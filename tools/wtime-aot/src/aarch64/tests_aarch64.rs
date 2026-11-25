@@ -2333,7 +2333,7 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
     let fn_ver = exp_map["blot_aot_abi_version"];
 
     vm.run_until_ret(fn_ver, 100).unwrap();
-    assert_eq!(vm.x[0], 8, "{label}: blot_aot_abi_version must return 8");
+    assert_eq!(vm.x[0], 1, "{label}: blot_aot_abi_version must return 1");
 
     let scratch_page = vm.alloc_seg(4096);
     let trap_ptr = scratch_page;
@@ -2394,8 +2394,8 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
             }
             Ok(RunOutcome::Exception(_)) | Err(_) => {
                 assert_eq!(
-                    rc, 2,
-                    "{label}/{fname}({arg:?}): expected trap rc=2, got rc={rc}"
+                    rc, 1,
+                    "{label}/{fname}({arg:?}): expected guest trap rc=1, got rc={rc}"
                 );
                 assert_ne!(
                     a64_trap, 0,
@@ -3988,4 +3988,323 @@ fn aarch64_oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
     let t64_wasm = crate::x64::tests_oracle::build_table64_and_funcref_test_wasm();
     let t64_calls: Vec<(&str, Value)> = (0..=16).map(|k| ("dispatch", Value::I32(k))).collect();
     assert_aarch64_oracle("a64_wasm3_table64_funcref", &t64_wasm, &t64_calls, 0);
+}
+
+#[test]
+fn aarch64_blot_abi8_full_18_exports_callbacks_reentry_globals_and_mem_grow() {
+    use super::asm::{A64Asm, Cond, Reg};
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, enc_str, export_sec, func_sec, leb_i32, leb_u32, section, type_sec,
+        wasm_module,
+    };
+
+    // Module with:
+    // - import 0: env::cb(i32) -> i32
+    // - memory 0: min=1, max=4
+    // - global 0: mut i32 = 100 (exported "g_mut", pinned!)
+    // - global 1: immut i32 = -5 (exported "g_neg", folded negative i32 -> 32-bit zero-ext!)
+    // - global 2: mut i64 = 0x1122_3344_5566_7788 (exported "g_i64")
+    // - f1 ("blot:allocate"): g0 += arg; return g0
+    // - f2 ("blot:reset"): g0 = arg; return arg + 1
+    // - f3 ("blot:finish_invocation"): return g0
+    // - f4 ("call_cb"): g0 += 1; return env::cb(arg)
+    // - f5 ("div_trap"): 100 / arg
+    let mut imp = vec![1];
+    enc_str(&mut imp, "env");
+    enc_str(&mut imp, "cb");
+    imp.push(0x00);
+    leb_u32(&mut imp, 0);
+
+    let mut globs = vec![3];
+    globs.extend_from_slice(&[0x7f, 1, 0x41]);
+    leb_i32(&mut globs, 100);
+    globs.push(0x0b);
+    globs.extend_from_slice(&[0x7f, 0, 0x41]);
+    leb_i32(&mut globs, -5);
+    globs.push(0x0b);
+    globs.extend_from_slice(&[0x7e, 1, 0x42]);
+    crate::x64::tests_unit::leb_i64(&mut globs, 0x1122_3344_5566_7788);
+    globs.push(0x0b);
+
+    let b1 = vec![0x23, 0, 0x20, 0, 0x6a, 0x24, 0, 0x23, 0];
+    let b2 = vec![0x20, 0, 0x24, 0, 0x20, 0, 0x41, 1, 0x6a];
+    let b3 = vec![0x23, 0];
+    let b4 = vec![0x23, 0, 0x41, 1, 0x6a, 0x24, 0, 0x20, 0, 0x10, 0];
+    let b5 = vec![0x41, 0xe4, 0x00, 0x20, 0, 0x6d];
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[], &[0x7f])]),
+        section(2, &imp),
+        func_sec(&[0, 0, 1, 0, 0]),
+        section(5, &[1, 0x01, 1, 4]),
+        section(6, &globs),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("blot:allocate", 0, 1),
+            ("blot:reset", 0, 2),
+            ("blot:finish_invocation", 0, 3),
+            ("call_cb", 0, 4),
+            ("div_trap", 0, 5),
+            ("g_mut", 3, 0),
+            ("g_neg", 3, 1),
+            ("g_i64", 3, 2),
+        ]),
+        code_sec(&[
+            enc_body(&[], &b1),
+            enc_body(&[], &b2),
+            enc_body(&[], &b3),
+            enc_body(&[], &b4),
+            enc_body(&[], &b5),
+        ]),
+    ]);
+
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 2,
+            deadline: None,
+            ..Default::default()
+        },
+    )
+    .expect("aarch64 blot cdylib compile with host imports");
+    verify_disasm_aarch64("a64_blot_abi8_full", &img.elf);
+
+    let exp: BTreeMap<String, u64> = img.export_vaddrs.iter().cloned().collect();
+    assert_eq!(exp.len(), 18, "all 18 Blot ABI 8 exports must be present");
+
+    let mut vm = A64Vm::new(&img);
+    let page = vm.alloc_seg(4096);
+    let p0 = page;
+    let p1 = page + 16;
+    let p2 = page + 32;
+    let p3 = page + 48;
+    let sbuf = page + 128;
+
+    // 1. abi_version == 1, import_count == 1, import_name(0) == ("env", "cb"), import_name(1) == 1
+    vm.run_until_ret(exp["blot_aot_abi_version"], 100).unwrap();
+    assert_eq!(vm.x[0], 1);
+    vm.run_until_ret(exp["blot_aot_import_count"], 100).unwrap();
+    assert_eq!(vm.x[0], 1);
+
+    vm.x[0] = 0;
+    vm.x[1] = p0;
+    vm.x[2] = p1;
+    vm.x[3] = p2;
+    vm.x[4] = p3;
+    vm.run_until_ret(exp["blot_aot_import_name"], 1000).unwrap();
+    assert_eq!(vm.x[0], 0);
+    let mod_ptr = vm.read_u64(p0).unwrap();
+    let mod_len = vm.read_u64(p1).unwrap() as usize;
+    let name_ptr = vm.read_u64(p2).unwrap();
+    let name_len = vm.read_u64(p3).unwrap() as usize;
+    assert_eq!(vm.read_bytes(mod_ptr, mod_len).unwrap(), b"env");
+    assert_eq!(vm.read_bytes(name_ptr, name_len).unwrap(), b"cb");
+    vm.x[0] = 1;
+    vm.run_until_ret(exp["blot_aot_import_name"], 1000).unwrap();
+    assert_eq!(vm.x[0], 1);
+
+    // 2. Build an executable AArch64 host callback in A64Vm that verifies `ActiveCall*` via
+    //    `blot_aot_active_mem_data`, `blot_aot_active_get_global`, and reentrant `blot_aot_active_allocate`!
+    let cb_page = vm.alloc_seg(4096);
+    let cb_scratch = page + 512;
+    let gmut_name = page + 640;
+    vm.write_bytes(gmut_name, b"g_mut").unwrap();
+    let mut cb = A64Asm::new();
+    let cb_fail = cb.new_label();
+    let cb_ep = cb.new_label();
+    // AAPCS64 args: X0=user, X1=ac, W2=imp_idx, X3=tok, X4=arg, X5=res_out
+    cb.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -64);
+    cb.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
+    cb.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
+    cb.mov_r(true, Reg::X19, Reg::X1); // ac
+    cb.mov_r(true, Reg::X20, Reg::X4); // arg
+    cb.mov_r(true, Reg::X21, Reg::X5); // res_out
+    // (a) active_mem_data(ac, &mp, &ml) -> verify ml == 131072 (after mem_grow(1))
+    cb.mov_r(true, Reg::X0, Reg::X19);
+    cb.mov_imm64(Reg::X1, cb_scratch);
+    cb.mov_imm64(Reg::X2, cb_scratch + 8);
+    cb.mov_imm64(Reg::X9, exp["blot_aot_active_mem_data"]);
+    cb.blr(Reg::X9);
+    cb.mov_imm64(Reg::X9, cb_scratch + 8);
+    cb.ldr_uimm(true, Reg::X10, Reg::X9, 0);
+    cb.mov_imm64(Reg::X11, 131072);
+    cb.cmp_r(true, Reg::X10, Reg::X11);
+    cb.b_cond(Cond::Ne, cb_fail);
+    // (b) active_get_global(ac, "g_mut", 5, &gv, &gk) -> X22 = gv (must see 101 after call_cb's g0+=1!)
+    cb.mov_r(true, Reg::X0, Reg::X19);
+    cb.mov_imm64(Reg::X1, gmut_name);
+    cb.mov_imm64(Reg::X2, 5);
+    cb.mov_imm64(Reg::X3, cb_scratch + 16);
+    cb.mov_imm64(Reg::X4, cb_scratch + 24);
+    cb.mov_imm64(Reg::X9, exp["blot_aot_active_get_global"]);
+    cb.blr(Reg::X9);
+    cb.cbnz(false, Reg::X0, cb_fail);
+    cb.mov_imm64(Reg::X9, cb_scratch + 16);
+    cb.ldr_uimm(true, Reg::X22, Reg::X9, 0);
+    // (c) active_allocate(ac, 10, &ares, &atr) -> g0 becomes 111, ares == 111!
+    cb.mov_r(true, Reg::X0, Reg::X19);
+    cb.mov_imm32(Reg::X1, 10);
+    cb.mov_imm64(Reg::X2, cb_scratch + 32);
+    cb.mov_imm64(Reg::X3, cb_scratch + 40);
+    cb.mov_imm64(Reg::X9, exp["blot_aot_active_allocate"]);
+    cb.blr(Reg::X9);
+    cb.cbnz(false, Reg::X0, cb_fail);
+    cb.mov_imm64(Reg::X9, cb_scratch + 32);
+    cb.ldr_uimm(false, Reg::X10, Reg::X9, 0); // ares (111)
+    // *res_out = arg * 2 + gv + ares
+    cb.lsl_imm(true, Reg::X11, Reg::X20, 1);
+    cb.add_r(true, Reg::X11, Reg::X11, Reg::X22);
+    cb.add_r(true, Reg::X11, Reg::X11, Reg::X10);
+    cb.str_uimm(true, Reg::X11, Reg::X21, 0);
+    cb.movz(false, Reg::X0, 0, 0);
+    cb.b(cb_ep);
+    cb.bind(cb_fail);
+    cb.mov_imm32(Reg::X0, 1);
+    cb.bind(cb_ep);
+    cb.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
+    cb.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
+    cb.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 64);
+    cb.ret();
+    cb.finish().unwrap();
+    vm.write_bytes(cb_page, &cb.code).unwrap();
+
+    // 3. blot_aot_new with mem_limit_pages = 2 (PAGES, not bytes!)
+    vm.x[0] = 0;
+    vm.x[1] = cb_page;
+    vm.x[2] = 2; // mem_limit_pages = 2
+    vm.x[3] = p0;
+    vm.run_until_ret(exp["blot_aot_new"], 10_000_000).unwrap();
+    let ctx = vm.x[0];
+    assert_ne!(ctx, 0, "blot_aot_new(limit=2 pages) failed");
+
+    // 4. blot_aot_mem_data & blot_aot_mem_grow (respects mem_limit_pages=2!)
+    vm.x[0] = ctx;
+    vm.x[1] = p0;
+    vm.x[2] = p1;
+    vm.run_until_ret(exp["blot_aot_mem_data"], 1000).unwrap();
+    assert_ne!(vm.read_u64(p0).unwrap(), 0);
+    assert_eq!(vm.read_u64(p1).unwrap(), 65536);
+
+    vm.x[0] = ctx;
+    vm.x[1] = 1;
+    vm.run_until_ret(exp["blot_aot_mem_grow"], 10_000).unwrap();
+    assert_eq!(vm.x[0], 1);
+    vm.x[0] = ctx;
+    vm.x[1] = 1;
+    vm.run_until_ret(exp["blot_aot_mem_grow"], 10_000).unwrap();
+    assert_eq!(
+        vm.x[0],
+        u64::MAX,
+        "grow past mem_limit_pages=2 must return -1"
+    );
+
+    // 5. blot_aot_get_global (folded negative i32 zero-ext, mutable i64) & blot_aot_set_global
+    vm.write_bytes(sbuf, b"g_neg").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 5;
+    vm.x[3] = p0;
+    vm.x[4] = p1;
+    vm.run_until_ret(exp["blot_aot_get_global"], 10_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    assert_eq!(vm.read_u64(p0).unwrap(), 0x0000_0000_ffff_fffb);
+    assert_eq!(vm.read_bytes(p1, 1).unwrap()[0], 0);
+
+    vm.write_bytes(sbuf, b"g_i64").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 5;
+    vm.x[3] = 0xfeed_face_cafe_babe;
+    vm.run_until_ret(exp["blot_aot_set_global"], 10_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 5;
+    vm.x[3] = p0;
+    vm.x[4] = p1;
+    vm.run_until_ret(exp["blot_aot_get_global"], 10_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    assert_eq!(vm.read_u64(p0).unwrap(), 0xfeed_face_cafe_babe);
+    assert_eq!(vm.read_bytes(p1, 1).unwrap()[0], 1);
+
+    // 6. blot_aot_call_export("call_cb", 5) -> host cb sees g_mut=101, calls active_allocate(10)->111, returns 5*2+101+111=222!
+    vm.write_bytes(sbuf, b"call_cb").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 7;
+    vm.x[3] = 5;
+    vm.x[4] = p0;
+    vm.x[5] = p1;
+    vm.run_until_ret(exp["blot_aot_call_export"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0, "call_cb failed");
+    assert_eq!(vm.read_u64(p0).unwrap(), 222);
+
+    // 7. blot_aot_call_allocate(9) -> 111+9 = 120; blot_aot_call_reset(50) -> 51; blot_aot_call_finish_invocation() -> 50
+    vm.x[0] = ctx;
+    vm.x[1] = 9;
+    vm.x[2] = p0;
+    vm.x[3] = p1;
+    vm.run_until_ret(exp["blot_aot_call_allocate"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    assert_eq!(
+        u32::from_le_bytes(vm.read_bytes(p0, 4).unwrap().try_into().unwrap()),
+        120
+    );
+
+    vm.x[0] = ctx;
+    vm.x[1] = 50;
+    vm.x[2] = p0;
+    vm.x[3] = p1;
+    vm.run_until_ret(exp["blot_aot_call_reset"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    assert_eq!(
+        u32::from_le_bytes(vm.read_bytes(p0, 4).unwrap().try_into().unwrap()),
+        51
+    );
+
+    vm.x[0] = ctx;
+    vm.x[1] = p0;
+    vm.x[2] = p1;
+    vm.run_until_ret(exp["blot_aot_call_finish_invocation"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    assert_eq!(
+        u32::from_le_bytes(vm.read_bytes(p0, 4).unwrap().try_into().unwrap()),
+        50
+    );
+
+    // 8. Guest trap rc == 1, missing export rc == 3, blot_aot_drop succeeds cleanly.
+    vm.write_bytes(sbuf, b"div_trap").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 8;
+    vm.x[3] = 0;
+    vm.x[4] = p0;
+    vm.x[5] = p1;
+    vm.run_until_ret(exp["blot_aot_call_export"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 1, "div_trap(0) must return rc=1");
+    assert_ne!(vm.read_bytes(p1, 1).unwrap()[0], 0);
+
+    vm.write_bytes(sbuf, b"nope").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 4;
+    vm.x[3] = 0;
+    vm.x[4] = p0;
+    vm.x[5] = p1;
+    vm.run_until_ret(exp["blot_aot_call_export"], 10_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 3, "missing export must return rc=3");
+
+    vm.x[0] = ctx;
+    vm.run_until_ret(exp["blot_aot_drop"], 10_000).unwrap();
 }

@@ -56,7 +56,7 @@ public APIs remain unchanged.
     `369.7 ms` (**`15.9×`**), **`0.034 ms`** warm `.so` load vs. `1.84 ms`
     (**`54×`**), **`8.31 ms`** warm CLI cache hit, and **`15.4%`** smaller
     (`8.03 MiB` vs. `9.49 MiB`).
-- **AArch64 regalloc, layout, & prologue parity (`tools/wtime-aot/src/aarch64`)**:
+- **AArch64 regalloc, layout, prologue, & full 18-export Blot ABI 8 parity (`tools/wtime-aot/src/aarch64`)**:
   - Added `A64Loc::Remat` GP constant rematerialization, 2-pass hot-fallthrough
     trace block layout with triangle-`if` diamond linearization and cold trap
     sinking, loop-depth-weighted spill eviction, ABI register hints +
@@ -64,10 +64,20 @@ public APIs remain unchanged.
     `Term::CmpBranch` (`b.cond` invert) fallthrough inversion, constant-zero
     NEON `movi` `MemFillConst` fast path, and zero-frame leaf prologue
     stack-check elision with prospective `frame_size` stack checking.
+  - Aligned `--backend aarch64 --blot-cdylib` 1:1 with the Blot ABI 8 Library
+    Protocol v1 contract (`blot_aot_abi_version() == 1`, `mem_limit_pages` in
+    pages, full `HELPER_HOST_CALL` + import trampolines with `Q8..Q15`
+    preservation and `ActiveCall*` callback reentry, plus all 18 exports
+    including `import_name`, `call_allocate`/`reset`/`finish_invocation`,
+    `mem_data`, `mem_grow`, `get_global`/`set_global`, and `active_*`).
 - **CI & automated dual-arch GitHub Releases**:
   - Fixed ARM64 test compilation (`x64/tests_oracle.rs`, `x64/runtime.rs`,
-    `cgen.rs`) and `conformance` checkout `fetch-depth: 0` in
-    `.github/workflows/ci.yml` (`fail-fast: false` on `wtime-aot` matrix).
+    `cgen.rs`), ARM64 C backend `-mcpu=` CPU selection (avoiding Clang's
+    `-march=native` rejection on AArch64), x64 `abi18` test driver pure-SysV
+    assembly stubs (fixing red-zone corruption under Clang without default
+    `-fstack-protector`), native ARM64 Blot ABI 8 integration harness, and
+    `conformance` checkout `fetch-depth: 0` in `.github/workflows/ci.yml`
+    (`fail-fast: false` on `wtime-aot` matrix).
   - Added `.github/workflows/release.yml` to build, strip, checksum
     (`SHA256SUMS.txt`), and publish both `x86_64-unknown-linux-gnu` and
     `aarch64-unknown-linux-gnu` tarballs for `wtime-aot` and `wtime-cli` on

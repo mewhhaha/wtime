@@ -6366,16 +6366,36 @@ fn extract_linemarker_path(line: &str) -> Option<String> {
     None
 }
 
+/// Formats the C compiler target CPU / architecture flag for `target_cpu`.
+/// On AArch64, Clang and GCC select CPU names (including `native` and `generic`) via `-mcpu=`,
+/// whereas explicit `armv*` ISA strings use `-march=`. On x86 and other targets `-march=` handles
+/// both CPU names and ISA levels.
+fn cc_target_cpu_flag(target_cpu: &str) -> String {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if target_cpu.starts_with("armv") {
+            format!("-march={target_cpu}")
+        } else {
+            format!("-mcpu={target_cpu}")
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        format!("-march={target_cpu}")
+    }
+}
+
 /// Probes ALL transitive system headers included by `WTIME_AOT_RT_H` via `cc -H -E` (combining
 /// `-H` stderr with `# <num> "/..."` pre-include linemarkers from `-E` stdout so GCC's implicit
 /// `/usr/include/stdc-predef.h` is always covered, zero Makefile escaping) across BOTH `-O2` and
-/// `-O0` with `-fPIC -march=<target_cpu>`, failing closed on any unresolvable or non-absolute header.
+/// `-O0` with `-fPIC` and the target CPU flag, failing closed on any unresolvable or non-absolute header.
 fn probe_sys_headers(
     cc_path: &Path,
     target_cpu: &str,
     probe_dir: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Res<(String, Vec<WatchedFile>)> {
+    let cpu_flag = cc_target_cpu_flag(target_cpu);
     let (mut hdr_file, hdr_path) = crate::build::create_private_temp_file(probe_dir, "hdrs", ".c")?;
     let _rm_hdr = crate::build::RemoveFileOnDrop(hdr_path.clone());
     std::io::Write::write_all(&mut hdr_file, SYS_HEADER_PROBE_C)
@@ -6403,16 +6423,8 @@ fn probe_sys_headers(
     };
     for opt_flag in ["-O2", "-O0"] {
         let mut cmd = clean_cc_command(cc_path);
-        cmd.args([
-            opt_flag,
-            "-fPIC",
-            &format!("-march={target_cpu}"),
-            "-H",
-            "-E",
-            "-x",
-            "c",
-        ])
-        .arg(&hdr_path);
+        cmd.args([opt_flag, "-fPIC", &cpu_flag, "-H", "-E", "-x", "c"])
+            .arg(&hdr_path);
         let out = crate::build::run_cmd_capture_with_deadline(
             cmd,
             &format!("{} {opt_flag} -H -E system headers", cc_path.display()),
@@ -6990,17 +7002,18 @@ pub fn cc_target_fingerprint_with_deadline(
     {
         return Ok(hit);
     }
+    let cpu_flag = cc_target_cpu_flag(target_cpu);
     let mut cmd = clean_cc_command(&info.cc_path);
-    cmd.args([&format!("-march={target_cpu}"), "-dM", "-E", "-x", "c", "-"]);
+    cmd.args([&cpu_flag, "-dM", "-E", "-x", "c", "-"]);
     let out = crate::build::run_cmd_capture_with_deadline(
         cmd,
-        &format!("probing {} -march={target_cpu}", info.cc_path.display()),
+        &format!("probing {} {cpu_flag}", info.cc_path.display()),
         deadline,
     )?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
-            "{} -march={target_cpu} probe failed: {stderr}",
+            "{} {cpu_flag} probe failed: {stderr}",
             info.cc_path.display()
         ));
     }
@@ -7292,10 +7305,11 @@ pub fn build_c_blot_cdylib_with_info(
                         let i = idx_ref.fetch_add(1, Ordering::Relaxed);
                         let Some(job) = jobs_slice.get(i) else { break };
                         let t_one = Instant::now();
+                        let cpu_flag = cc_target_cpu_flag(target_cpu);
                         let mut cmd = clean_cc_command(cc_path_ref);
                         cmd.args([
                             job.opt_flag,
-                            &format!("-march={target_cpu}"),
+                            &cpu_flag,
                             "-fPIC",
                             "-ffp-contract=off",
                             "-fno-math-errno",
@@ -7720,13 +7734,16 @@ mod tests {
         crate::build::assert_inside_test_root(root, &cache);
         crate::build::assert_inside_test_root(root, &src_dir);
         crate::build::assert_inside_test_root(root, &so_path);
-        let Ok(cc_info) = detect_cc_with_deadline("native", Some(&cache), None) else {
-            if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") {
-                panic!(
-                    "WTIME_AOT_REQUIRE_NATIVE_TESTS=1 is set, but no host C compiler was detected"
-                );
+        let cc_info = match detect_cc_with_deadline("native", Some(&cache), None) {
+            Ok(info) => info,
+            Err(err) => {
+                if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") {
+                    panic!(
+                        "WTIME_AOT_REQUIRE_NATIVE_TESTS=1 is set, but host C compiler probe failed: {err}"
+                    );
+                }
+                return;
             }
-            return;
         };
         assert_eq!(cc_info.cc_sha256.len(), 64);
         assert_eq!(cc_info.linker_sha256.len(), 64);

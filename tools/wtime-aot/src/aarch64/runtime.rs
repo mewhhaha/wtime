@@ -16,13 +16,14 @@ use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables};
 use crate::x64::{
     CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
     GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_EXTRA_MEM_COPY,
-    HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_INITIALIZE, HELPER_MEM_COPY,
-    HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT, HELPER_TABLE_COPY, HELPER_TABLE_FILL,
-    HELPER_TABLE_GROW, HELPER_TABLE_INIT, INTERNAL_EXN_SIGNAL, OFF_GUEST_STACK_BASE,
-    OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX,
-    OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES,
-    OFF_STACK_FLOOR, TRAP_ALLOC_FAILED, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB,
-    TRAP_TABLE_OOB, TRAP_UNREACHABLE,
+    HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_HOST_CALL, HELPER_INITIALIZE,
+    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT, HELPER_READ_GLOBAL,
+    HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT,
+    INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH, OFF_ACTIVE_DEPTH, OFF_ACTIVE_GUEST_RSP,
+    OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP,
+    OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES,
+    OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, TRAP_ALLOC_FAILED, TRAP_CALL_STACK, TRAP_HOST,
+    TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
 use wtime_types::ValType;
 
@@ -752,6 +753,750 @@ pub fn emit_a64_helpers(
     Ok(out)
 }
 
+fn emit_a64_pinned_load(a: &mut A64Asm, module: &X64Module, layout: &CtxLayout) {
+    if let Some(pg) = layout.pinned_global {
+        let off = layout.global_offs[pg as usize];
+        let ty = match module.globals[pg as usize].0 {
+            ValType::I64 | ValType::Ref(_) => Ty::I64,
+            _ => Ty::I32,
+        };
+        emit_load_off(a, ty, Some(PINNED_GLOB_REG), None, CTX_REG, off, SGP3);
+    }
+}
+
+fn emit_a64_pinned_store(a: &mut A64Asm, module: &X64Module, layout: &CtxLayout) {
+    if let Some(pg) = layout.pinned_global {
+        let off = layout.global_offs[pg as usize];
+        let ty = match module.globals[pg as usize].0 {
+            ValType::I64 | ValType::Ref(_) => Ty::I64,
+            _ => Ty::I32,
+        };
+        emit_store_off(a, ty, Some(PINNED_GLOB_REG), None, CTX_REG, off, SGP3);
+    }
+}
+
+fn find_fixed_export(module: &X64Module, name: &str, expect_param: Option<ValType>) -> Option<u32> {
+    let (_, fi) = module.exported_funcs.iter().find(|(n, _)| n == name)?;
+    let fty = module.func_type(*fi)?;
+    let ok_p = match expect_param {
+        Some(p) => fty.params.as_slice() == [p],
+        None => fty.params.is_empty(),
+    };
+    if ok_p && fty.results.as_slice() == [ValType::I32] {
+        u32::try_from(*fi).ok()
+    } else {
+        None
+    }
+}
+
+/// Shared host callback trampoline `HELPER_HOST_CALL(W0 = idx, X1 = tok, X2 = arg_bits)`.
+/// Runs on guest stack, switches back to `ctx->host_rsp`, invokes
+/// `ctx->host_fn(user_ctx, &ac, idx, tok, arg_bits, &res)`, switches back to guest stack,
+/// reloads `MEM_LEN_REG` and `PINNED_GLOB_REG`, and returns `X0 = res`, `W16 = 0 | TRAP_HOST`.
+pub fn emit_a64_helper_host_call(module: &X64Module, layout: &CtxLayout) -> Result<A64Asm, String> {
+    let mut a = A64Asm::new();
+    let null_host = a.new_label();
+    let fail_host = a.new_label();
+
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_HOST_FN,
+        SGP3,
+    );
+    a.cbz(true, Reg::X9, null_host);
+
+    // Guest stack link frame (160 B, 16-byte aligned):
+    //   [SP + 0..16]   = FP, LR
+    //   [SP + 16]      = prev_active_guest_rsp
+    //   [SP + 24]      = prev_host_rsp
+    //   [SP + 32..160] = Q8..Q15 (full 128-bit callee-saved SIMD registers; AAPCS64 only preserves D8..D15)
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -160);
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X10),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_GUEST_RSP,
+        SGP3,
+    );
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X11),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    a.stp_x(Reg::X10, Reg::X11, Reg::SP, 16);
+    a.stp_q(VReg::V8, VReg::V9, Reg::SP, 32);
+    a.stp_q(VReg::V10, VReg::V11, Reg::SP, 64);
+    a.stp_q(VReg::V12, VReg::V13, Reg::SP, 96);
+    a.stp_q(VReg::V14, VReg::V15, Reg::SP, 128);
+    a.mov_r(true, Reg::X10, Reg::SP);
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X10),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_GUEST_RSP,
+        SGP3,
+    );
+    emit_a64_pinned_store(&mut a, module, layout);
+
+    // Marshal AAPCS64 args 2, 3, 4 before switching stacks: W2 = idx, X3 = tok, X4 = arg_bits.
+    a.mov_r(true, Reg::X4, Reg::X2);
+    a.mov_r(true, Reg::X3, Reg::X1);
+    a.uxtw(Reg::X2, Reg::X0);
+
+    // Switch to outer host stack and allocate 32-byte ActiveCall + res frame.
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X10),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    a.mov_r(true, Reg::SP, Reg::X10);
+    a.sub_imm(true, Reg::SP, Reg::SP, 32);
+    a.stp_x(CTX_REG, MEM_BASE_REG, Reg::SP, 0); // ac.ctx, ac.mem
+    a.str_uimm(true, Reg::XZR, Reg::SP, 16); // u64 res = 0
+
+    // Finish AAPCS64 6-arg setup: X0 = user_ctx, X1 = &ac, X5 = &res.
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X0),
+        None,
+        CTX_REG,
+        OFF_HOST_USER_CTX,
+        SGP3,
+    );
+    a.add_imm(true, Reg::X1, Reg::SP, 0);
+    a.add_imm(true, Reg::X5, Reg::SP, 16);
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_HOST_FN,
+        SGP3,
+    );
+    a.blr(Reg::X9);
+
+    // Capture status (`W10 = W0`) and `res` (`X11 = [SP + 16]`) before switching back to guest stack.
+    a.mov_r(false, Reg::X10, Reg::X0);
+    a.ldr_uimm(true, Reg::X11, Reg::SP, 16);
+
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X12),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_GUEST_RSP,
+        SGP3,
+    );
+    a.mov_r(true, Reg::SP, Reg::X12);
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(MEM_LEN_REG),
+        None,
+        CTX_REG,
+        OFF_MEM_LEN,
+        SGP3,
+    );
+    emit_a64_pinned_load(&mut a, module, layout);
+
+    a.ldp_q(VReg::V8, VReg::V9, Reg::SP, 32);
+    a.ldp_q(VReg::V10, VReg::V11, Reg::SP, 64);
+    a.ldp_q(VReg::V12, VReg::V13, Reg::SP, 96);
+    a.ldp_q(VReg::V14, VReg::V15, Reg::SP, 128);
+    a.ldp_x(Reg::X12, Reg::X13, Reg::SP, 16);
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X12),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_GUEST_RSP,
+        SGP3,
+    );
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X13),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 160);
+
+    a.cbnz(false, Reg::X10, fail_host);
+    a.mov_r(true, Reg::X0, Reg::X11);
+    a.movz(false, SGP1, 0, 0);
+    a.ret();
+
+    a.bind(null_host);
+    a.bind(fail_host);
+    a.movz(true, Reg::X0, 0, 0);
+    a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+    a.ret();
+
+    a.finish()?;
+    Ok(a)
+}
+
+/// Emits internal AArch64 Wasm ABI trampoline for Blot cdylib import `k`.
+pub fn emit_a64_blot_import_trampoline(module: &X64Module, k: usize) -> Result<A64Asm, String> {
+    let mut a = A64Asm::new();
+    let ty = module
+        .func_type(k)
+        .ok_or("aarch64: import type index out of range")?;
+
+    match ty.params.as_slice() {
+        [] => {
+            a.movz(true, Reg::X1, 0, 0);
+            a.movz(true, Reg::X2, 0, 0);
+        }
+        [ValType::Ref(_)] => {
+            a.mov_r(true, Reg::X1, Reg::X0);
+            a.movz(true, Reg::X2, 0, 0);
+        }
+        [ValType::I32] => {
+            a.uxtw(Reg::X2, Reg::X0);
+            a.movz(true, Reg::X1, 0, 0);
+        }
+        [ValType::I64] => {
+            a.mov_r(true, Reg::X2, Reg::X0);
+            a.movz(true, Reg::X1, 0, 0);
+        }
+        [ValType::F32] => {
+            a.fmov_gp_from_fp(false, Reg::X2, VReg::V0);
+            a.uxtw(Reg::X2, Reg::X2);
+            a.movz(true, Reg::X1, 0, 0);
+        }
+        [ValType::F64] => {
+            a.fmov_gp_from_fp(true, Reg::X2, VReg::V0);
+            a.movz(true, Reg::X1, 0, 0);
+        }
+        [ValType::Ref(_), ValType::I32] => {
+            a.uxtw(Reg::X2, Reg::X1);
+            a.mov_r(true, Reg::X1, Reg::X0);
+        }
+        [ValType::Ref(_), ValType::I64] | [ValType::Ref(_), ValType::Ref(_)] => {
+            a.mov_r(true, Reg::X2, Reg::X1);
+            a.mov_r(true, Reg::X1, Reg::X0);
+        }
+        [ValType::Ref(_), ValType::F32] => {
+            a.fmov_gp_from_fp(false, Reg::X2, VReg::V0);
+            a.uxtw(Reg::X2, Reg::X2);
+            a.mov_r(true, Reg::X1, Reg::X0);
+        }
+        [ValType::Ref(_), ValType::F64] => {
+            a.fmov_gp_from_fp(true, Reg::X2, VReg::V0);
+            a.mov_r(true, Reg::X1, Reg::X0);
+        }
+        other => return Err(format!("aarch64: unsupported import {k} params {other:?}")),
+    }
+
+    a.mov_imm32(
+        Reg::X0,
+        u32::try_from(k).map_err(|_| "aarch64: import index overflow")?,
+    );
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -16);
+    a.bl_reloc(A64RelocTarget::Helper(HELPER_HOST_CALL));
+
+    match ty.results.as_slice() {
+        [] | [ValType::I64] | [ValType::Ref(_)] => {}
+        [ValType::I32] => a.uxtw(Reg::X0, Reg::X0),
+        [ValType::F32] => a.fmov_fp_from_gp(false, VReg::V0, Reg::X0),
+        [ValType::F64] => a.fmov_fp_from_gp(true, VReg::V0, Reg::X0),
+        other => return Err(format!("aarch64: unsupported import {k} results {other:?}")),
+    }
+
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 16);
+    a.ret();
+    a.finish()?;
+    Ok(a)
+}
+
+/// Shared leaf helper `HELPER_READ_GLOBAL(X0 = ctx, X1 = np, X2 = nl, X3 = val_out, X4 = kind_out) -> W0`.
+/// Clobbers ONLY caller-saved registers `X5..X14` so both `blot_aot_get_global` and
+/// `blot_aot_active_get_global` can tail-jump directly into it.
+pub fn emit_a64_helper_read_global(tables: &RuntimeTables) -> Result<A64Asm, String> {
+    let mut a = A64Asm::new();
+    if tables.get_global_count == 0 {
+        a.mov_imm32(Reg::X0, 1);
+        a.ret();
+        a.finish()?;
+        return Ok(a);
+    }
+
+    let lbl_np_ok = a.new_label();
+    let lbl_missing = a.new_label();
+    let lbl_loop = a.new_label();
+    let lbl_cmp = a.new_label();
+    let lbl_next = a.new_label();
+    let lbl_found = a.new_label();
+    let lbl_live = a.new_label();
+    let lbl_load32 = a.new_label();
+    let lbl_load64 = a.new_label();
+    let lbl_have_val = a.new_label();
+    let lbl_skip_val = a.new_label();
+    let lbl_skip_kind = a.new_label();
+
+    a.cbz(true, Reg::X2, lbl_np_ok);
+    a.cbz(true, Reg::X1, lbl_missing);
+    a.bind(lbl_np_ok);
+
+    // Table entry (24 B): +0: i32 name_rel, +4: u32 name_len, +8: u8 kind, +9: u8 is_const,
+    // +12: i32 ctx_off, +16: u64 const_bits.
+    a.adr_reloc(Reg::X5, A64RelocTarget::Rodata(tables.get_global_table_off));
+    a.mov_r(true, Reg::X6, Reg::X5);
+    a.mov_imm32(Reg::X7, tables.get_global_count);
+
+    a.bind(lbl_loop);
+    a.ldr_uimm(false, Reg::X8, Reg::X6, 4); // name_len (zero-ext to 64-bit)
+    a.cmp_r(true, Reg::X8, Reg::X2);
+    a.b_cond(Cond::Ne, lbl_next);
+    a.cbz(true, Reg::X2, lbl_found);
+
+    a.ldrsw_uimm(Reg::X9, Reg::X6, 0);
+    a.add_r(true, Reg::X9, Reg::X5, Reg::X9);
+    a.movz(true, Reg::X10, 0, 0);
+    a.bind(lbl_cmp);
+    a.ldrb_reg(Reg::X11, Reg::X1, Reg::X10, false);
+    a.ldrb_reg(Reg::X12, Reg::X9, Reg::X10, false);
+    a.cmp_r(false, Reg::X11, Reg::X12);
+    a.b_cond(Cond::Ne, lbl_next);
+    a.add_imm(true, Reg::X10, Reg::X10, 1);
+    a.cmp_r(true, Reg::X10, Reg::X2);
+    a.b_cond(Cond::Lo, lbl_cmp);
+    a.b(lbl_found);
+
+    a.bind(lbl_next);
+    a.add_imm(true, Reg::X6, Reg::X6, 24);
+    a.sub_imm(false, Reg::X7, Reg::X7, 1);
+    a.cbnz(false, Reg::X7, lbl_loop);
+
+    a.bind(lbl_missing);
+    a.mov_imm32(Reg::X0, 1);
+    a.ret();
+
+    a.bind(lbl_found);
+    a.ldrb_uimm(Reg::X8, Reg::X6, 8); // kind
+    a.ldrb_uimm(Reg::X9, Reg::X6, 9); // is_const
+    a.cbz(false, Reg::X9, lbl_live);
+    a.ldr_uimm(true, Reg::X10, Reg::X6, 16); // const_bits
+    a.b(lbl_have_val);
+
+    a.bind(lbl_live);
+    a.ldrsw_uimm(Reg::X11, Reg::X6, 12); // ctx_off
+    a.cbz(false, Reg::X8, lbl_load32);
+    a.cmp_imm(false, Reg::X8, 2);
+    a.b_cond(Cond::Ne, lbl_load64);
+    a.bind(lbl_load32);
+    a.ldr_reg(false, Reg::X10, Reg::X0, Reg::X11, false);
+    a.b(lbl_have_val);
+    a.bind(lbl_load64);
+    a.ldr_reg(true, Reg::X10, Reg::X0, Reg::X11, false);
+
+    a.bind(lbl_have_val);
+    a.cbz(true, Reg::X3, lbl_skip_val);
+    a.str_uimm(true, Reg::X10, Reg::X3, 0);
+    a.bind(lbl_skip_val);
+    a.cbz(true, Reg::X4, lbl_skip_kind);
+    a.strb_uimm(Reg::X8, Reg::X4, 0);
+    a.bind(lbl_skip_kind);
+    a.movz(false, Reg::X0, 0, 0);
+    a.ret();
+
+    a.finish()?;
+    Ok(a)
+}
+
+/// Emits top-level `blot_aot_call_allocate`, `blot_aot_call_reset`, or `blot_aot_call_finish_invocation`.
+fn emit_a64_export_call_fixed(
+    module: &X64Module,
+    layout: &CtxLayout,
+    export_name: &str,
+    has_arg: bool,
+) -> Result<A64Asm, String> {
+    let mut a = A64Asm::new();
+    let expect_param = if has_arg { Some(ValType::I32) } else { None };
+    let Some(target_fn) = find_fixed_export(module, export_name, expect_param) else {
+        a.mov_imm32(Reg::X0, 3);
+        a.ret();
+        a.finish()?;
+        return Ok(a);
+    };
+
+    // AAPCS64 args:
+    //   has_arg=true : (h: X0, arg: W1, res_out: X2, trap_out: X3)
+    //   has_arg=false: (h: X0, res_out: X1, trap_out: X2)
+    let res_reg = if has_arg { Reg::X2 } else { Reg::X1 };
+    let trap_reg = if has_arg { Reg::X3 } else { Reg::X2 };
+    let lbl_fail_host = a.new_label();
+    let lbl_fail_host_rc = a.new_label();
+    let lbl_trapped = a.new_label();
+    let lbl_not_exn = a.new_label();
+    let lbl_skip_res = a.new_label();
+    let lbl_skip_trap = a.new_label();
+    let lbl_ep = a.new_label();
+
+    a.cbz(true, Reg::X0, lbl_fail_host);
+    a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
+    a.cbnz(false, Reg::X9, lbl_fail_host);
+
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+    a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
+    a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
+    a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
+    a.stp_x(Reg::X25, Reg::X26, Reg::SP, 64);
+    a.stp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+
+    a.mov_r(true, CTX_REG, Reg::X0);
+    a.mov_r(true, Reg::X19, res_reg);
+    a.mov_r(true, Reg::X20, trap_reg);
+    if has_arg {
+        a.uxtw(Reg::X21, Reg::X1);
+    }
+
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(MEM_BASE_REG),
+        None,
+        CTX_REG,
+        OFF_MEM_BASE,
+        SGP3,
+    );
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(MEM_LEN_REG),
+        None,
+        CTX_REG,
+        OFF_MEM_LEN,
+        SGP3,
+    );
+    emit_a64_pinned_load(&mut a, module, layout);
+
+    a.mov_imm32(Reg::X9, 1);
+    a.strb_uimm(Reg::X9, CTX_REG, OFF_IN_CALL as u32);
+    a.mov_r(true, SGP2, Reg::SP);
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(SGP2),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(SGP2),
+        None,
+        CTX_REG,
+        OFF_GUEST_STACK_TOP,
+        SGP3,
+    );
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(SGP2),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_GUEST_RSP,
+        SGP3,
+    );
+    if has_arg {
+        a.mov_r(true, Reg::X0, Reg::X21);
+    }
+    a.mov_r(true, Reg::SP, SGP2);
+    a.bl_reloc(A64RelocTarget::Func(target_fn));
+
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(SGP2),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    a.mov_r(true, Reg::SP, SGP2);
+    emit_a64_pinned_store(&mut a, module, layout);
+    a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
+
+    a.cbnz(false, SGP1, lbl_trapped);
+    a.cbz(true, Reg::X19, lbl_skip_res);
+    a.str_uimm(false, Reg::X0, Reg::X19, 0);
+    a.bind(lbl_skip_res);
+    a.movz(false, Reg::X0, 0, 0);
+    a.b(lbl_ep);
+
+    a.bind(lbl_trapped);
+    a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
+    a.b_cond(Cond::Ne, lbl_not_exn);
+    a.mov_imm32(SGP1, u32::from(TRAP_UNREACHABLE));
+    a.bind(lbl_not_exn);
+    a.cbz(true, Reg::X20, lbl_skip_trap);
+    a.strb_uimm(SGP1, Reg::X20, 0);
+    a.bind(lbl_skip_trap);
+    a.mov_imm32(Reg::X0, 1);
+    a.mov_imm32(Reg::X9, 2);
+    a.cmp_imm(false, SGP1, u16::from(TRAP_HOST));
+    a.csel(false, Reg::X0, Reg::X9, Reg::X0, Cond::Eq);
+
+    a.bind(lbl_ep);
+    a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
+    a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
+    a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
+    a.ldp_x(Reg::X25, Reg::X26, Reg::SP, 64);
+    a.ldp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+    a.ret();
+
+    a.bind(lbl_fail_host);
+    a.cbz(true, trap_reg, lbl_fail_host_rc);
+    a.mov_imm32(Reg::X9, u32::from(TRAP_HOST));
+    a.strb_uimm(Reg::X9, trap_reg, 0);
+    a.bind(lbl_fail_host_rc);
+    a.mov_imm32(Reg::X0, 2);
+    a.ret();
+
+    a.finish()?;
+    Ok(a)
+}
+
+/// Emits callback-reentrant `blot_aot_active_allocate` or `blot_aot_active_reset`.
+fn emit_a64_export_active_fixed(
+    module: &X64Module,
+    layout: &CtxLayout,
+    export_name: &str,
+) -> Result<A64Asm, String> {
+    let mut a = A64Asm::new();
+    let Some(target_fn) = find_fixed_export(module, export_name, Some(ValType::I32)) else {
+        a.mov_imm32(Reg::X0, 3);
+        a.ret();
+        a.finish()?;
+        return Ok(a);
+    };
+
+    // AAPCS64 args: (ac: X0, arg: W1, res_out: X2, trap_out: X3)
+    let lbl_fail_host = a.new_label();
+    let lbl_fail_host_rc = a.new_label();
+    let lbl_fail_stack = a.new_label();
+    let lbl_fail_stack_rc = a.new_label();
+    let lbl_trapped = a.new_label();
+    let lbl_not_exn = a.new_label();
+    let lbl_skip_res = a.new_label();
+    let lbl_skip_trap = a.new_label();
+    let lbl_ep = a.new_label();
+
+    a.cbz(true, Reg::X0, lbl_fail_host);
+    a.ldr_uimm(true, Reg::X8, Reg::X0, 0); // ac->ctx
+    a.cbz(true, Reg::X8, lbl_fail_host);
+    a.ldrb_uimm(Reg::X9, Reg::X8, OFF_IN_CALL as u32);
+    a.cbz(false, Reg::X9, lbl_fail_host);
+
+    // Check active_depth < MAX_ACTIVE_REENTRY_DEPTH && suspended in [stack_floor+64, guest_stack_top-16]
+    a.ldr_uimm(false, Reg::X9, Reg::X8, OFF_ACTIVE_DEPTH as u32);
+    a.cmp_imm(false, Reg::X9, MAX_ACTIVE_REENTRY_DEPTH as u16);
+    a.b_cond(Cond::Hs, lbl_fail_stack);
+
+    a.ldr_uimm(true, Reg::X9, Reg::X8, OFF_ACTIVE_GUEST_RSP as u32);
+    a.ldr_uimm(true, Reg::X10, Reg::X8, OFF_STACK_FLOOR as u32);
+    a.add_imm(true, Reg::X10, Reg::X10, 64);
+    a.cmp_r(true, Reg::X9, Reg::X10);
+    a.b_cond(Cond::Lo, lbl_fail_stack);
+
+    a.ldr_uimm(true, Reg::X10, Reg::X8, OFF_GUEST_STACK_TOP as u32);
+    a.sub_imm(true, Reg::X10, Reg::X10, 16);
+    a.cmp_r(true, Reg::X9, Reg::X10);
+    a.b_cond(Cond::Hi, lbl_fail_stack);
+
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+    a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
+    a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
+    a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
+    a.stp_x(Reg::X25, Reg::X26, Reg::SP, 64);
+    a.stp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+
+    a.mov_r(true, Reg::X19, Reg::X2); // res_out
+    a.mov_r(true, Reg::X20, Reg::X3); // trap_out
+    a.uxtw(Reg::X21, Reg::X1); // arg
+    a.ldr_uimm(true, CTX_REG, Reg::X0, 0); // ac->ctx
+    a.ldr_uimm(true, MEM_BASE_REG, Reg::X0, 8); // ac->mem
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(MEM_LEN_REG),
+        None,
+        CTX_REG,
+        OFF_MEM_LEN,
+        SGP3,
+    );
+    emit_a64_pinned_load(&mut a, module, layout);
+
+    // new_guest_sp = (suspended & !15) - 32
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X22),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_GUEST_RSP,
+        SGP3,
+    );
+    a.mov_imm64(Reg::X9, !15u64);
+    a.and_r(true, Reg::X22, Reg::X22, Reg::X9);
+    a.sub_imm(true, Reg::X22, Reg::X22, 32);
+
+    // Link record at [X22 + 0..16]: [0] = prev ctx->host_rsp, [8] = current host SP.
+    emit_load_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    a.mov_r(true, Reg::X10, Reg::SP);
+    a.stp_x(Reg::X9, Reg::X10, Reg::X22, 0);
+
+    // active_depth += 1; ctx->host_rsp = current host SP.
+    emit_load_off(
+        &mut a,
+        Ty::I32,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_DEPTH,
+        SGP3,
+    );
+    a.add_imm(false, Reg::X9, Reg::X9, 1);
+    emit_store_off(
+        &mut a,
+        Ty::I32,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_DEPTH,
+        SGP3,
+    );
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X10),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+
+    a.mov_r(true, Reg::X0, Reg::X21);
+    a.mov_r(true, Reg::SP, Reg::X22);
+    a.bl_reloc(A64RelocTarget::Func(target_fn));
+
+    // Restore ctx->host_rsp, host SP, active_depth -= 1, pinned global (preserving X0 & W16!).
+    a.ldp_x(Reg::X9, Reg::X10, Reg::SP, 0);
+    emit_store_off(
+        &mut a,
+        Ty::I64,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_HOST_RSP,
+        SGP3,
+    );
+    a.mov_r(true, Reg::SP, Reg::X10);
+    emit_load_off(
+        &mut a,
+        Ty::I32,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_DEPTH,
+        SGP3,
+    );
+    a.sub_imm(false, Reg::X9, Reg::X9, 1);
+    emit_store_off(
+        &mut a,
+        Ty::I32,
+        Some(Reg::X9),
+        None,
+        CTX_REG,
+        OFF_ACTIVE_DEPTH,
+        SGP3,
+    );
+    emit_a64_pinned_store(&mut a, module, layout);
+
+    a.cbnz(false, SGP1, lbl_trapped);
+    a.cbz(true, Reg::X19, lbl_skip_res);
+    a.str_uimm(false, Reg::X0, Reg::X19, 0);
+    a.bind(lbl_skip_res);
+    a.movz(false, Reg::X0, 0, 0);
+    a.b(lbl_ep);
+
+    a.bind(lbl_trapped);
+    a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
+    a.b_cond(Cond::Ne, lbl_not_exn);
+    a.mov_imm32(SGP1, u32::from(TRAP_UNREACHABLE));
+    a.bind(lbl_not_exn);
+    a.cbz(true, Reg::X20, lbl_skip_trap);
+    a.strb_uimm(SGP1, Reg::X20, 0);
+    a.bind(lbl_skip_trap);
+    a.mov_imm32(Reg::X0, 1);
+    a.mov_imm32(Reg::X9, 2);
+    a.cmp_imm(false, SGP1, u16::from(TRAP_HOST));
+    a.csel(false, Reg::X0, Reg::X9, Reg::X0, Cond::Eq);
+
+    a.bind(lbl_ep);
+    a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
+    a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
+    a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
+    a.ldp_x(Reg::X25, Reg::X26, Reg::SP, 64);
+    a.ldp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+    a.ret();
+
+    a.bind(lbl_fail_host);
+    a.cbz(true, Reg::X3, lbl_fail_host_rc);
+    a.mov_imm32(Reg::X9, u32::from(TRAP_HOST));
+    a.strb_uimm(Reg::X9, Reg::X3, 0);
+    a.bind(lbl_fail_host_rc);
+    a.mov_imm32(Reg::X0, 2);
+    a.ret();
+
+    a.bind(lbl_fail_stack);
+    a.cbz(true, Reg::X3, lbl_fail_stack_rc);
+    a.mov_imm32(Reg::X9, u32::from(TRAP_CALL_STACK));
+    a.strb_uimm(Reg::X9, Reg::X3, 0);
+    a.bind(lbl_fail_stack_rc);
+    a.mov_imm32(Reg::X0, 1);
+    a.ret();
+
+    a.finish()?;
+    Ok(a)
+}
+
 /// Emits Blot ABI 8 exported C functions on AArch64 (`EXPORT_NAMES` parity with x64/C/Rust).
 pub fn emit_a64_exports(
     module: &X64Module,
@@ -760,15 +1505,15 @@ pub fn emit_a64_exports(
 ) -> Result<Vec<(&'static str, A64Asm)>, String> {
     let mut out = Vec::with_capacity(EXPORT_NAMES.len());
 
-    // 1. blot_aot_abi_version() -> 8
+    // 1. blot_aot_abi_version() -> 1 (Library Protocol v1 / Blot Guest ABI 8)
     {
         let mut a = A64Asm::new();
-        a.mov_imm32(Reg::X0, 8);
+        a.mov_imm32(Reg::X0, 1);
         a.ret();
         a.finish()?;
         out.push(("blot_aot_abi_version", a));
     }
-    // 3. blot_aot_trap_message(code: u8, out_ptr: *mut *const u8, out_len: *mut usize) -> i32
+    // 2. blot_aot_trap_message(code: u8, out_ptr: *mut *const u8, out_len: *mut usize) -> i32
     {
         let mut a = A64Asm::new();
         let bad = a.new_label();
@@ -799,33 +1544,70 @@ pub fn emit_a64_exports(
         a.finish()?;
         out.push(("blot_aot_trap_message", a));
     }
-    // 4. blot_aot_import_count() -> usize
+    // 3. blot_aot_import_count() -> u32
     {
         let mut a = A64Asm::new();
-        a.mov_imm64(Reg::X0, module.imports.len() as u64);
+        a.mov_imm32(Reg::X0, tables.imp_count);
         a.ret();
         a.finish()?;
         out.push(("blot_aot_import_count", a));
     }
-    // 5. blot_aot_import_name(...) -> i32 (1 = OOB when 0 imports; lookup table otherwise)
+    // 4. blot_aot_import_name(idx, mod_ptr, mod_len, name_ptr, name_len) -> i32
     {
         let mut a = A64Asm::new();
-        let bad = a.new_label();
-        a.mov_imm64(Reg::X5, module.imports.len() as u64);
-        a.cmp_r(true, Reg::X0, Reg::X5);
-        a.b_cond(Cond::Hs, bad);
-        a.mov_imm32(Reg::X0, 1);
-        a.ret();
-        a.bind(bad);
-        a.mov_imm32(Reg::X0, 1);
-        a.ret();
+        if tables.imp_count == 0 {
+            a.mov_imm32(Reg::X0, 1);
+            a.ret();
+        } else {
+            let bad = a.new_label();
+            let s1 = a.new_label();
+            let s2 = a.new_label();
+            let s3 = a.new_label();
+            let s4 = a.new_label();
+            a.uxtw(Reg::X5, Reg::X0);
+            a.mov_imm64(Reg::X6, u64::from(tables.imp_count));
+            a.cmp_r(true, Reg::X5, Reg::X6);
+            a.b_cond(Cond::Hs, bad);
+            a.adr_reloc(Reg::X7, A64RelocTarget::Rodata(tables.imp_table_off));
+            a.lsl_imm(true, Reg::X5, Reg::X5, 4);
+            a.add_r(true, Reg::X5, Reg::X7, Reg::X5);
+
+            a.cbz(true, Reg::X1, s1);
+            a.ldrsw_uimm(Reg::X8, Reg::X5, 0);
+            a.add_r(true, Reg::X8, Reg::X7, Reg::X8);
+            a.str_uimm(true, Reg::X8, Reg::X1, 0);
+            a.bind(s1);
+
+            a.cbz(true, Reg::X2, s2);
+            a.ldr_uimm(false, Reg::X8, Reg::X5, 4);
+            a.str_uimm(true, Reg::X8, Reg::X2, 0);
+            a.bind(s2);
+
+            a.cbz(true, Reg::X3, s3);
+            a.ldrsw_uimm(Reg::X8, Reg::X5, 8);
+            a.add_r(true, Reg::X8, Reg::X7, Reg::X8);
+            a.str_uimm(true, Reg::X8, Reg::X3, 0);
+            a.bind(s3);
+
+            a.cbz(true, Reg::X4, s4);
+            a.ldr_uimm(false, Reg::X8, Reg::X5, 12);
+            a.str_uimm(true, Reg::X8, Reg::X4, 0);
+            a.bind(s4);
+
+            a.movz(false, Reg::X0, 0, 0);
+            a.ret();
+            a.bind(bad);
+            a.mov_imm32(Reg::X0, 1);
+            a.ret();
+        }
         a.finish()?;
         out.push(("blot_aot_import_name", a));
     }
-    // 6. blot_aot_new(host_ctx, host_fn, max_mem_bytes, out_trap) -> *mut Ctx
+    // 5. blot_aot_new(host_ctx, host_fn, mem_limit_pages, out_trap) -> *mut Ctx
     {
         let mut a = A64Asm::new();
-        let fail_limit = a.new_label();
+        let fail_mem_limit = a.new_label();
+        let fail_mem_too_large = a.new_label();
         let fail_alloc = a.new_label();
         let fail_trap = a.new_label();
         let skip_mem = a.new_label();
@@ -840,21 +1622,35 @@ pub fn emit_a64_exports(
 
         a.mov_r(true, Reg::X19, Reg::X0); // host_ctx
         a.mov_r(true, Reg::X20, Reg::X1); // host_fn
-        a.mov_r(true, Reg::X21, Reg::X2); // max_mem_bytes
+        a.mov_r(true, Reg::X21, Reg::X2); // mem_limit_pages (0 = default)
         a.mov_r(true, Reg::X22, Reg::X3); // out_trap
 
-        let (min_pages, max_pages) = module.memory.unwrap_or((0, 0));
-        // Effective max pages capped by `max_mem_bytes >> 16` when non-zero.
-        a.mov_imm64(Reg::X23, max_pages);
-        let no_cap = a.new_label();
-        a.cbz(true, Reg::X21, no_cap);
-        a.lsr_imm(true, Reg::X4, Reg::X21, 16);
-        a.cmp_r(true, Reg::X4, Reg::X23);
-        a.csel(true, Reg::X23, Reg::X4, Reg::X23, Cond::Lo);
-        a.bind(no_cap);
-        a.mov_imm64(Reg::X4, min_pages);
-        a.cmp_r(true, Reg::X4, Reg::X23);
-        a.b_cond(Cond::Hi, fail_limit);
+        let (min_pages, declared_max) = module.memory.unwrap_or((0, 0));
+        if module.memory.is_some() {
+            let have_lim = a.new_label();
+            let default_lim = if module.memory64 {
+                min_pages.max(131_072)
+            } else {
+                65_536
+            };
+            let hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
+            a.cbnz(true, Reg::X21, have_lim);
+            a.mov_imm64(Reg::X21, default_lim);
+            a.bind(have_lim);
+
+            a.mov_imm64(Reg::X4, min_pages);
+            a.cmp_r(true, Reg::X4, Reg::X21);
+            a.b_cond(Cond::Hi, fail_mem_limit);
+
+            a.mov_imm64(Reg::X23, declared_max.min(hard_cap));
+            a.cmp_r(true, Reg::X21, Reg::X23);
+            a.csel(true, Reg::X23, Reg::X21, Reg::X23, Cond::Lo);
+
+            a.cmp_r(true, Reg::X4, Reg::X23);
+            a.b_cond(Cond::Hi, fail_mem_too_large);
+        } else {
+            a.movz(true, Reg::X23, 0, 0);
+        }
 
         // mmap Ctx (`layout.total_bytes`)
         a.movz(true, Reg::X0, 0, 0);
@@ -1185,21 +1981,59 @@ pub fn emit_a64_exports(
             }
         }
 
-        // Initialize globals, data segments, and optional start function.
+        // Switch to dedicated guest stack and run `HELPER_INITIALIZE` (globals, data, start fn).
+        a.mov_imm32(Reg::X4, 1);
+        a.strb_uimm(Reg::X4, CTX_REG, OFF_IN_CALL as u32);
+        a.mov_r(true, SGP2, Reg::SP);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_HOST_RSP,
+            SGP3,
+        );
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_GUEST_STACK_TOP,
+            SGP3,
+        );
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_ACTIVE_GUEST_RSP,
+            SGP3,
+        );
+        a.mov_r(true, Reg::SP, SGP2);
         a.bl_reloc(A64RelocTarget::Helper(HELPER_INITIALIZE));
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_HOST_RSP,
+            SGP3,
+        );
+        a.mov_r(true, Reg::SP, SGP2);
+        a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
         a.cbnz(false, SGP1, fail_trap);
         a.mov_r(true, Reg::X0, CTX_REG);
         a.b(done_ok);
 
-        a.bind(fail_limit);
-        a.mov_imm32(
-            SGP1,
-            u32::from(if min_pages > max_pages {
-                TRAP_MEM_TOO_LARGE
-            } else {
-                TRAP_MEM_LIMIT
-            }),
-        );
+        a.bind(fail_mem_limit);
+        a.mov_imm32(SGP1, u32::from(TRAP_MEM_LIMIT));
+        a.b(fail_trap);
+        a.bind(fail_mem_too_large);
+        a.mov_imm32(SGP1, u32::from(TRAP_MEM_TOO_LARGE));
         a.b(fail_trap);
         a.bind(fail_alloc);
         a.mov_imm32(SGP1, u32::from(TRAP_ALLOC_FAILED));
@@ -1226,13 +2060,15 @@ pub fn emit_a64_exports(
         a.finish()?;
         out.push(("blot_aot_new", a));
     }
-    // 7. blot_aot_drop(ctx)
+    // 6. blot_aot_drop(ctx)
     {
         let mut a = A64Asm::new();
         let ret_now = a.new_label();
         let skip_m = a.new_label();
         let skip_s = a.new_label();
         a.cbz(true, Reg::X0, ret_now);
+        a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
+        a.cbnz(false, Reg::X9, ret_now);
         a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -32);
         a.str_uimm(true, Reg::X19, Reg::SP, 16);
         a.mov_r(true, Reg::X19, Reg::X0);
@@ -1243,7 +2079,7 @@ pub fn emit_a64_exports(
             None,
             Reg::X19,
             OFF_MEM_BASE,
-            SGP3,
+            Reg::X15,
         );
         emit_load_off(
             &mut a,
@@ -1252,7 +2088,7 @@ pub fn emit_a64_exports(
             None,
             Reg::X19,
             OFF_MEM_RESERVE_BYTES,
-            SGP3,
+            Reg::X15,
         );
         a.cbz(true, Reg::X0, skip_m);
         emit_syscall(&mut a, SYS_MUNMAP);
@@ -1266,7 +2102,7 @@ pub fn emit_a64_exports(
                 None,
                 Reg::X19,
                 desc_off,
-                SGP3,
+                Reg::X15,
             );
             emit_load_off(
                 &mut a,
@@ -1275,7 +2111,7 @@ pub fn emit_a64_exports(
                 None,
                 Reg::X19,
                 desc_off + 24,
-                SGP3,
+                Reg::X15,
             );
             a.cbz(true, Reg::X1, skip_em);
             emit_syscall(&mut a, SYS_MUNMAP);
@@ -1290,7 +2126,7 @@ pub fn emit_a64_exports(
                 None,
                 Reg::X19,
                 exn_off + 8,
-                SGP3,
+                Reg::X15,
             );
             a.cbz(true, Reg::X0, skip_exn);
             a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
@@ -1306,7 +2142,7 @@ pub fn emit_a64_exports(
                 None,
                 Reg::X19,
                 desc_off,
-                SGP3,
+                Reg::X15,
             );
             emit_load_off(
                 &mut a,
@@ -1315,7 +2151,7 @@ pub fn emit_a64_exports(
                 None,
                 Reg::X19,
                 desc_off + 16,
-                SGP3,
+                Reg::X15,
             );
             a.cbz(true, Reg::X1, skip_dt);
             emit_syscall(&mut a, SYS_MUNMAP);
@@ -1328,7 +2164,7 @@ pub fn emit_a64_exports(
             None,
             Reg::X19,
             OFF_GUEST_STACK_BASE,
-            SGP3,
+            Reg::X15,
         );
         a.cbz(true, Reg::X0, skip_s);
         a.mov_imm64(Reg::X1, GUEST_STACK_TOTAL_BYTES as u64);
@@ -1342,7 +2178,7 @@ pub fn emit_a64_exports(
             None,
             Reg::X19,
             OFF_HANDLE_ALLOC_BYTES,
-            SGP3,
+            Reg::X15,
         );
         emit_syscall(&mut a, SYS_MUNMAP);
         a.ldr_uimm(true, Reg::X19, Reg::SP, 16);
@@ -1352,11 +2188,16 @@ pub fn emit_a64_exports(
         a.finish()?;
         out.push(("blot_aot_drop", a));
     }
-    // 8. blot_aot_memory(ctx, out_ptr, out_len) -> i32
+    // 7. blot_aot_mem_data(ctx, out_ptr, out_len)
     {
         let mut a = A64Asm::new();
-        let bad = a.new_label();
-        a.cbz(true, Reg::X0, bad);
+        let zero = a.new_label();
+        let zero_l = a.new_label();
+        let done = a.new_label();
+        let sp = a.new_label();
+        a.cbz(true, Reg::X0, zero);
+        a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
+        a.cbnz(false, Reg::X9, zero);
         emit_load_off(
             &mut a,
             Ty::I64,
@@ -1364,7 +2205,7 @@ pub fn emit_a64_exports(
             None,
             Reg::X0,
             OFF_MEM_BASE,
-            SGP3,
+            Reg::X15,
         );
         emit_load_off(
             &mut a,
@@ -1373,28 +2214,32 @@ pub fn emit_a64_exports(
             None,
             Reg::X0,
             OFF_MEM_LEN,
-            SGP3,
+            Reg::X15,
         );
-        let sp = a.new_label();
-        let sl = a.new_label();
         a.cbz(true, Reg::X1, sp);
         a.str_uimm(true, Reg::X3, Reg::X1, 0);
         a.bind(sp);
-        a.cbz(true, Reg::X2, sl);
+        a.cbz(true, Reg::X2, done);
         a.str_uimm(true, Reg::X4, Reg::X2, 0);
-        a.bind(sl);
-        a.movz(false, Reg::X0, 0, 0);
-        a.ret();
-        a.bind(bad);
-        a.mov_imm32(Reg::X0, 1);
+        a.b(done);
+        a.bind(zero);
+        a.cbz(true, Reg::X1, zero_l);
+        a.str_uimm(true, Reg::XZR, Reg::X1, 0);
+        a.bind(zero_l);
+        a.cbz(true, Reg::X2, done);
+        a.str_uimm(true, Reg::XZR, Reg::X2, 0);
+        a.bind(done);
         a.ret();
         a.finish()?;
         out.push(("blot_aot_mem_data", a));
     }
-    // 9. blot_aot_call_export(ctx, name_ptr, name_len, arg0, out_res, out_trap) -> i32
+    // 8. blot_aot_call_export(ctx, name_ptr, name_len, arg0, out_res, out_trap) -> i32
     {
         let mut a = A64Asm::new();
         let not_found = a.new_label();
+        let reentry_trap = a.new_label();
+        let reentry_skip = a.new_label();
+        let name_ok = a.new_label();
         let ret_ep = a.new_label();
         a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
         a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
@@ -1410,6 +2255,12 @@ pub fn emit_a64_exports(
         a.mov_r(true, Reg::X21, Reg::X3); // arg0
         a.mov_r(true, Reg::X22, Reg::X4); // out_res
         a.mov_r(true, Reg::X23, Reg::X5); // out_trap
+
+        a.ldrb_uimm(Reg::X9, CTX_REG, OFF_IN_CALL as u32);
+        a.cbnz(false, Reg::X9, reentry_trap);
+        a.cbz(true, Reg::X20, name_ok);
+        a.cbz(true, Reg::X19, not_found);
+        a.bind(name_ok);
 
         emit_load_off(
             &mut a,
@@ -1429,14 +2280,7 @@ pub fn emit_a64_exports(
             OFF_MEM_LEN,
             SGP3,
         );
-        if let Some(pg) = layout.pinned_global {
-            let off = layout.global_offs[pg as usize];
-            let ty = match module.globals[pg as usize].0 {
-                ValType::I64 | ValType::Ref(_) => Ty::I64,
-                _ => Ty::I32,
-            };
-            emit_load_off(&mut a, ty, Some(PINNED_GLOB_REG), None, CTX_REG, off, SGP3);
-        }
+        emit_a64_pinned_load(&mut a, module, layout);
 
         // Linear scan over exported functions comparing name bytes.
         for (exp_name, func_index) in &module.exported_funcs {
@@ -1450,7 +2294,7 @@ pub fn emit_a64_exports(
                 a.cmp_imm(false, Reg::X7, u16::from(ch));
                 a.b_cond(Cond::Ne, next_exp);
             }
-            // Matched export! Marshal up to 1 arg (i32/i64/f32/f64) and call.
+            // Matched export! Marshal up to 1 arg (i32/i64/f32/f64/ref) and call.
             let ty_sig = module
                 .func_type(*func_index)
                 .ok_or_else(|| format!("aarch64: missing type for func {func_index}"))?;
@@ -1459,6 +2303,7 @@ pub fn emit_a64_exports(
             } else {
                 if let Some(&pt) = ty_sig.params.first() {
                     match pt {
+                        ValType::I32 => a.uxtw(Reg::X0, Reg::X21),
                         ValType::F32 => a.fmov_fp_from_gp(false, VReg::V0, Reg::X21),
                         ValType::F64 => a.fmov_fp_from_gp(true, VReg::V0, Reg::X21),
                         _ => a.mov_r(true, Reg::X0, Reg::X21),
@@ -1486,6 +2331,15 @@ pub fn emit_a64_exports(
                     OFF_GUEST_STACK_TOP,
                     SGP3,
                 );
+                emit_store_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    OFF_ACTIVE_GUEST_RSP,
+                    SGP3,
+                );
                 a.mov_r(true, Reg::SP, SGP2);
                 a.bl_reloc(A64RelocTarget::Func(*func_index as u32));
                 emit_load_off(
@@ -1499,14 +2353,7 @@ pub fn emit_a64_exports(
                 );
                 a.mov_r(true, Reg::SP, SGP2);
                 a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
-                if let Some(pg) = layout.pinned_global {
-                    let off = layout.global_offs[pg as usize];
-                    let ty = match module.globals[pg as usize].0 {
-                        ValType::I64 | ValType::Ref(_) => Ty::I64,
-                        _ => Ty::I32,
-                    };
-                    emit_store_off(&mut a, ty, Some(PINNED_GLOB_REG), None, CTX_REG, off, SGP3);
-                }
+                emit_a64_pinned_store(&mut a, module, layout);
                 let got_trap = a.new_label();
                 a.cbnz(false, SGP1, got_trap);
                 let skip_res = a.new_label();
@@ -1542,14 +2389,26 @@ pub fn emit_a64_exports(
                 a.cbz(true, Reg::X23, skip_t);
                 a.strb_uimm(SGP1, Reg::X23, 0);
                 a.bind(skip_t);
-                a.mov_imm32(Reg::X0, 2);
+                a.mov_imm32(Reg::X0, 1);
+                a.mov_imm32(Reg::X9, 2);
+                a.cmp_imm(false, SGP1, u16::from(TRAP_HOST));
+                a.csel(false, Reg::X0, Reg::X9, Reg::X0, Cond::Eq);
                 a.b(ret_ep);
             }
             a.bind(next_exp);
         }
 
         a.bind(not_found);
-        a.mov_imm32(Reg::X0, 1);
+        a.mov_imm32(Reg::X0, 3);
+        a.b(ret_ep);
+
+        a.bind(reentry_trap);
+        a.cbz(true, Reg::X23, reentry_skip);
+        a.mov_imm32(Reg::X9, u32::from(TRAP_HOST));
+        a.strb_uimm(Reg::X9, Reg::X23, 0);
+        a.bind(reentry_skip);
+        a.mov_imm32(Reg::X0, 2);
+
         a.bind(ret_ep);
         a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
         a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
@@ -1562,25 +2421,212 @@ pub fn emit_a64_exports(
         out.push(("blot_aot_call_export", a));
     }
 
-    // Remaining Blot ABI 8 symbols (matching exact `EXPORT_NAMES` set).
-    let stub_names: &[(&'static str, u32)] = &[
-        ("blot_aot_call_allocate", 1),
-        ("blot_aot_call_reset", 1),
-        ("blot_aot_call_finish_invocation", 1),
-        ("blot_aot_mem_grow", 1),
-        ("blot_aot_get_global", 1),
-        ("blot_aot_set_global", 1),
-        ("blot_aot_active_mem_data", 1),
-        ("blot_aot_active_allocate", 1),
-        ("blot_aot_active_reset", 1),
-        ("blot_aot_active_get_global", 1),
-    ];
-    for &(name, rv) in stub_names {
+    // 9-11. blot_aot_call_allocate, blot_aot_call_reset, blot_aot_call_finish_invocation
+    out.push((
+        "blot_aot_call_allocate",
+        emit_a64_export_call_fixed(module, layout, "blot:allocate", true)?,
+    ));
+    out.push((
+        "blot_aot_call_reset",
+        emit_a64_export_call_fixed(module, layout, "blot:reset", true)?,
+    ));
+    out.push((
+        "blot_aot_call_finish_invocation",
+        emit_a64_export_call_fixed(module, layout, "blot:finish_invocation", false)?,
+    ));
+
+    // 12. blot_aot_mem_grow(ctx, delta_pages: u64) -> i64
+    {
         let mut a = A64Asm::new();
-        a.mov_imm32(Reg::X0, rv);
+        let fail = a.new_label();
+        a.cbz(true, Reg::X0, fail);
+        a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
+        a.cbnz(false, Reg::X9, fail);
+        a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -64);
+        a.stp_x(Reg::X24, Reg::X25, Reg::SP, 16);
+        a.stp_x(Reg::X26, Reg::X27, Reg::SP, 32);
+        a.str_uimm(true, Reg::X28, Reg::SP, 48);
+        a.mov_r(true, CTX_REG, Reg::X0);
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(MEM_BASE_REG),
+            None,
+            CTX_REG,
+            OFF_MEM_BASE,
+            SGP3,
+        );
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(MEM_LEN_REG),
+            None,
+            CTX_REG,
+            OFF_MEM_LEN,
+            SGP3,
+        );
+        a.mov_r(true, Reg::X0, Reg::X1); // full 64-bit delta_pages
+        a.bl_reloc(A64RelocTarget::Helper(HELPER_MEM_GROW));
+        a.ldr_uimm(true, Reg::X28, Reg::SP, 48);
+        a.ldp_x(Reg::X26, Reg::X27, Reg::SP, 32);
+        a.ldp_x(Reg::X24, Reg::X25, Reg::SP, 16);
+        a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 64);
+        a.ret();
+        a.bind(fail);
+        a.mov_imm64(Reg::X0, u64::MAX);
         a.ret();
         a.finish()?;
-        out.push((name, a));
+        out.push(("blot_aot_mem_grow", a));
+    }
+
+    // 13. blot_aot_get_global(ctx, name_ptr, name_len, val_out, kind_out) -> i32
+    {
+        let mut a = A64Asm::new();
+        let fail = a.new_label();
+        a.cbz(true, Reg::X0, fail);
+        a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
+        a.cbnz(false, Reg::X9, fail);
+        a.b_reloc(A64RelocTarget::Helper(HELPER_READ_GLOBAL));
+        a.bind(fail);
+        a.mov_imm32(Reg::X0, 1);
+        a.ret();
+        a.finish()?;
+        out.push(("blot_aot_get_global", a));
+    }
+
+    // 14. blot_aot_set_global(ctx, name_ptr, name_len, val) -> i32
+    {
+        let mut a = A64Asm::new();
+        if tables.set_global_count == 0 {
+            a.mov_imm32(Reg::X0, 1);
+            a.ret();
+        } else {
+            let lbl_fail = a.new_label();
+            let lbl_np_ok = a.new_label();
+            let lbl_loop = a.new_label();
+            let lbl_cmp = a.new_label();
+            let lbl_next = a.new_label();
+            let lbl_found = a.new_label();
+            let lbl_store64 = a.new_label();
+            let lbl_done = a.new_label();
+
+            a.cbz(true, Reg::X0, lbl_fail);
+            a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
+            a.cbnz(false, Reg::X9, lbl_fail);
+            a.cbz(true, Reg::X2, lbl_np_ok);
+            a.cbz(true, Reg::X1, lbl_fail);
+            a.bind(lbl_np_ok);
+
+            // Table entry (16 B): +0: i32 name_rel, +4: u32 name_len, +8: i32 ctx_off, +12: u8 is64.
+            a.adr_reloc(Reg::X5, A64RelocTarget::Rodata(tables.set_global_table_off));
+            a.mov_r(true, Reg::X6, Reg::X5);
+            a.mov_imm32(Reg::X7, tables.set_global_count);
+
+            a.bind(lbl_loop);
+            a.ldr_uimm(false, Reg::X8, Reg::X6, 4);
+            a.cmp_r(true, Reg::X8, Reg::X2);
+            a.b_cond(Cond::Ne, lbl_next);
+            a.cbz(true, Reg::X2, lbl_found);
+
+            a.ldrsw_uimm(Reg::X9, Reg::X6, 0);
+            a.add_r(true, Reg::X9, Reg::X5, Reg::X9);
+            a.movz(true, Reg::X10, 0, 0);
+            a.bind(lbl_cmp);
+            a.ldrb_reg(Reg::X11, Reg::X1, Reg::X10, false);
+            a.ldrb_reg(Reg::X12, Reg::X9, Reg::X10, false);
+            a.cmp_r(false, Reg::X11, Reg::X12);
+            a.b_cond(Cond::Ne, lbl_next);
+            a.add_imm(true, Reg::X10, Reg::X10, 1);
+            a.cmp_r(true, Reg::X10, Reg::X2);
+            a.b_cond(Cond::Lo, lbl_cmp);
+            a.b(lbl_found);
+
+            a.bind(lbl_next);
+            a.add_imm(true, Reg::X6, Reg::X6, 16);
+            a.sub_imm(false, Reg::X7, Reg::X7, 1);
+            a.cbnz(false, Reg::X7, lbl_loop);
+
+            a.bind(lbl_fail);
+            a.mov_imm32(Reg::X0, 1);
+            a.ret();
+
+            a.bind(lbl_found);
+            a.ldrsw_uimm(Reg::X10, Reg::X6, 8); // ctx_off
+            a.ldrb_uimm(Reg::X11, Reg::X6, 12); // is64
+            a.cbnz(false, Reg::X11, lbl_store64);
+            a.str_reg(false, Reg::X3, Reg::X0, Reg::X10, false);
+            a.b(lbl_done);
+            a.bind(lbl_store64);
+            a.str_reg(true, Reg::X3, Reg::X0, Reg::X10, false);
+            a.bind(lbl_done);
+            a.movz(false, Reg::X0, 0, 0);
+            a.ret();
+        }
+        a.finish()?;
+        out.push(("blot_aot_set_global", a));
+    }
+
+    // 15. blot_aot_active_mem_data(ac, ptr_out, len_out)
+    {
+        let mut a = A64Asm::new();
+        let zero = a.new_label();
+        let zero_l = a.new_label();
+        let done = a.new_label();
+        let sp = a.new_label();
+        a.cbz(true, Reg::X0, zero);
+        a.ldr_uimm(true, Reg::X3, Reg::X0, 0); // ac->ctx
+        a.cbz(true, Reg::X3, zero);
+        a.cbz(true, Reg::X1, sp);
+        a.ldr_uimm(true, Reg::X4, Reg::X0, 8); // ac->mem
+        a.str_uimm(true, Reg::X4, Reg::X1, 0);
+        a.bind(sp);
+        a.cbz(true, Reg::X2, done);
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X4),
+            None,
+            Reg::X3,
+            OFF_MEM_LEN,
+            Reg::X15,
+        );
+        a.str_uimm(true, Reg::X4, Reg::X2, 0);
+        a.b(done);
+        a.bind(zero);
+        a.cbz(true, Reg::X1, zero_l);
+        a.str_uimm(true, Reg::XZR, Reg::X1, 0);
+        a.bind(zero_l);
+        a.cbz(true, Reg::X2, done);
+        a.str_uimm(true, Reg::XZR, Reg::X2, 0);
+        a.bind(done);
+        a.ret();
+        a.finish()?;
+        out.push(("blot_aot_active_mem_data", a));
+    }
+
+    // 16-17. blot_aot_active_allocate, blot_aot_active_reset
+    out.push((
+        "blot_aot_active_allocate",
+        emit_a64_export_active_fixed(module, layout, "blot:allocate")?,
+    ));
+    out.push((
+        "blot_aot_active_reset",
+        emit_a64_export_active_fixed(module, layout, "blot:reset")?,
+    ));
+
+    // 18. blot_aot_active_get_global(ac, name_ptr, name_len, val_out, kind_out) -> i32
+    {
+        let mut a = A64Asm::new();
+        let fail = a.new_label();
+        a.cbz(true, Reg::X0, fail);
+        a.ldr_uimm(true, Reg::X0, Reg::X0, 0); // ac->ctx
+        a.cbz(true, Reg::X0, fail);
+        a.b_reloc(A64RelocTarget::Helper(HELPER_READ_GLOBAL));
+        a.bind(fail);
+        a.mov_imm32(Reg::X0, 1);
+        a.ret();
+        a.finish()?;
+        out.push(("blot_aot_active_get_global", a));
     }
 
     // Reorder strictly to match `EXPORT_NAMES` order expected by `A64ElfSoLayout::plan`.

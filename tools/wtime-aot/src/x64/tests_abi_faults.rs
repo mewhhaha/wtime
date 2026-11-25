@@ -21,13 +21,16 @@ fn compile_c_test_bin(
     src: &str,
     extra_flags: &[&str],
 ) -> Option<std::path::PathBuf> {
-    let Ok(cc) = crate::cgen::detect_cc_with_deadline("native", None, None) else {
-        if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") {
-            panic!(
-                "WTIME_AOT_REQUIRE_NATIVE_TESTS=1 is set, but no host C compiler was detected for {name}"
-            );
+    let cc = match crate::cgen::detect_cc_with_deadline("native", None, None) {
+        Ok(cc) => cc,
+        Err(err) => {
+            if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") {
+                panic!(
+                    "WTIME_AOT_REQUIRE_NATIVE_TESTS=1 is set, but host C compiler probe failed for {name}: {err}"
+                );
+            }
+            return None;
         }
-        return None;
     };
     let c_path = root.join(format!("{name}.c"));
     let bin = root.join(name);
@@ -363,56 +366,73 @@ typedef struct {
     uint32_t observed_cb_mxcsr;
 } CbCtx;
 
-// Helper that deliberately clobbers R14 and R15 before calling blot_aot_active_allocate!
-__attribute__((noinline))
-static int32_t call_active_with_clobbered_r14_r15(fn_call_i32 fn, void *ac, int32_t arg, int32_t *res, uint8_t *tr) {
-    uint64_t ret = (uint64_t)(uintptr_t)fn;
-    __asm__ volatile(
-        "push %%r14\n\t"
-        "push %%r15\n\t"
-        "mov $0xdeadbeef14141414, %%r14\n\t"
-        "mov $0xdeadbeef15151515, %%r15\n\t"
-        "call *%%rax\n\t"
-        "pop %%r15\n\t"
-        "pop %%r14\n\t"
-        : "+a"(ret), "+D"(ac), "+S"(arg), "+d"(res), "+c"(tr)
-        :
-        : "r8", "r9", "r10", "r11", "memory"
-    );
-    return (int32_t)ret;
-}
+// Pure SysV ABI assembly helpers (avoiding inline-asm red-zone / stack-alignment hazards):
+// 1. Deliberately clobbers R14 and R15 before calling blot_aot_active_allocate.
+extern int32_t call_active_with_clobbered_r14_r15(fn_call_i32 fn, void *ac, int32_t arg, int32_t *res, uint8_t *tr);
+// 2. Verifies blot_aot_mem_grow preserves caller's R13, R14, R15.
+extern int64_t call_mem_grow_check_callee_regs(fn_mem_grow fn, void *h, uint64_t delta, int *ok_out);
 
-// Helper verifying blot_aot_mem_grow preserves caller's R13, R14, R15!
-__attribute__((noinline))
-static int64_t call_mem_grow_check_callee_regs(fn_mem_grow fn, void *h, uint64_t delta, int *ok_out) {
-    uint64_t after[3] = {0, 0, 0};
-    uint64_t *after_p = after;
-    uint64_t ret = (uint64_t)(uintptr_t)fn;
-    __asm__ volatile(
-        "push %%r13\n\t"
-        "push %%r14\n\t"
-        "push %%r15\n\t"
-        "push %%rdx\n\t"
-        "mov $0x1313131313131313, %%r13\n\t"
-        "mov $0x1414141414141414, %%r14\n\t"
-        "mov $0x1515151515151515, %%r15\n\t"
-        "call *%%rax\n\t"
-        "pop %%rcx\n\t"
-        "mov %%r13, 0(%%rcx)\n\t"
-        "mov %%r14, 8(%%rcx)\n\t"
-        "mov %%r15, 16(%%rcx)\n\t"
-        "pop %%r15\n\t"
-        "pop %%r14\n\t"
-        "pop %%r13\n\t"
-        : "+a"(ret), "+d"(after_p), "+D"(h), "+S"(delta)
-        :
-        : "rcx", "r8", "r9", "r10", "r11", "memory"
-    );
-    *ok_out = (after[0] == 0x1313131313131313ULL &&
-               after[1] == 0x1414141414141414ULL &&
-               after[2] == 0x1515151515151515ULL);
-    return (int64_t)ret;
-}
+__asm__(
+    ".pushsection .text\n\t"
+    ".p2align 4\n\t"
+    ".type call_active_with_clobbered_r14_r15, @function\n"
+    "call_active_with_clobbered_r14_r15:\n\t"
+    "endbr64\n\t"
+    "push %rbp\n\t"
+    "mov %rsp, %rbp\n\t"
+    "push %r14\n\t"
+    "push %r15\n\t"
+    "mov %rdi, %rax\n\t"
+    "mov %rsi, %rdi\n\t"
+    "mov %edx, %esi\n\t"
+    "mov %rcx, %rdx\n\t"
+    "mov %r8, %rcx\n\t"
+    "movabs $0xdeadbeef14141414, %r14\n\t"
+    "movabs $0xdeadbeef15151515, %r15\n\t"
+    "call *%rax\n\t"
+    "pop %r15\n\t"
+    "pop %r14\n\t"
+    "pop %rbp\n\t"
+    "ret\n\t"
+    ".size call_active_with_clobbered_r14_r15, .-call_active_with_clobbered_r14_r15\n\t"
+    ".p2align 4\n\t"
+    ".type call_mem_grow_check_callee_regs, @function\n"
+    "call_mem_grow_check_callee_regs:\n\t"
+    "endbr64\n\t"
+    "push %rbp\n\t"
+    "mov %rsp, %rbp\n\t"
+    "push %rbx\n\t"
+    "push %r13\n\t"
+    "push %r14\n\t"
+    "push %r15\n\t"
+    "mov %rcx, %rbx\n\t"
+    "mov %rdi, %rax\n\t"
+    "mov %rsi, %rdi\n\t"
+    "mov %rdx, %rsi\n\t"
+    "movabs $0x1313131313131313, %r13\n\t"
+    "movabs $0x1414141414141414, %r14\n\t"
+    "movabs $0x1515151515151515, %r15\n\t"
+    "call *%rax\n\t"
+    "movabs $0x1313131313131313, %rcx\n\t"
+    "xor %r13, %rcx\n\t"
+    "movabs $0x1414141414141414, %rdx\n\t"
+    "xor %r14, %rdx\n\t"
+    "or %rdx, %rcx\n\t"
+    "movabs $0x1515151515151515, %rdx\n\t"
+    "xor %r15, %rdx\n\t"
+    "or %rdx, %rcx\n\t"
+    "sete %dl\n\t"
+    "movzbl %dl, %edx\n\t"
+    "movl %edx, (%rbx)\n\t"
+    "pop %r15\n\t"
+    "pop %r14\n\t"
+    "pop %r13\n\t"
+    "pop %rbx\n\t"
+    "pop %rbp\n\t"
+    "ret\n\t"
+    ".size call_mem_grow_check_callee_regs, .-call_mem_grow_check_callee_regs\n\t"
+    ".popsection\n"
+);
 
 static int32_t test_cb(void *u, void *ac, uint32_t idx, uint64_t tok, uint64_t arg, uint64_t *res) {
     (void)tok;
@@ -1112,24 +1132,39 @@ typedef void (*fn_drop)(void *);
 typedef int32_t (*fn_call_export)(void *, const uint8_t *, size_t, uint64_t, uint64_t *, uint8_t *);
 typedef int32_t (*fn_call_i32)(void *, int32_t, int32_t *, uint8_t *);
 
-// Verify blot_aot_new preserves RBX across CPUID failure & success paths!
-__attribute__((noinline))
-static void *call_new_check_rbx(fn_new fn, void *u, void *cb, uint64_t lim, uint8_t *tr, int *rbx_ok) {
-    uint64_t rbx_after = 0;
-    void *ret;
-    __asm__ volatile(
-        "push %%rbx\n\t"
-        "mov $0xbbbbbbbbbbbbbbbb, %%rbx\n\t"
-        "call *%6\n\t"
-        "mov %%rbx, %1\n\t"
-        "pop %%rbx\n\t"
-        : "=a"(ret), "=r"(rbx_after)
-        : "D"(u), "S"(cb), "d"(lim), "c"(tr), "r"(fn)
-        : "r8", "r9", "r10", "r11", "memory"
-    );
-    *rbx_ok = (rbx_after == 0xbbbbbbbbbbbbbbbbULL);
-    return ret;
-}
+// Verify blot_aot_new preserves RBX across CPUID failure & success paths (pure SysV ABI stub).
+extern void *call_new_check_rbx(fn_new fn, void *u, void *cb, uint64_t lim, uint8_t *tr, int *rbx_ok);
+
+__asm__(
+    ".pushsection .text\n\t"
+    ".p2align 4\n\t"
+    ".type call_new_check_rbx, @function\n"
+    "call_new_check_rbx:\n\t"
+    "endbr64\n\t"
+    "push %rbp\n\t"
+    "mov %rsp, %rbp\n\t"
+    "push %rbx\n\t"
+    "push %r12\n\t"
+    "mov %r9, %r12\n\t"
+    "mov %rdi, %rax\n\t"
+    "mov %rsi, %rdi\n\t"
+    "mov %rdx, %rsi\n\t"
+    "mov %rcx, %rdx\n\t"
+    "mov %r8, %rcx\n\t"
+    "movabs $0xbbbbbbbbbbbbbbbb, %rbx\n\t"
+    "call *%rax\n\t"
+    "movabs $0xbbbbbbbbbbbbbbbb, %rcx\n\t"
+    "cmp %rcx, %rbx\n\t"
+    "sete %cl\n\t"
+    "movzbl %cl, %ecx\n\t"
+    "movl %ecx, (%r12)\n\t"
+    "pop %r12\n\t"
+    "pop %rbx\n\t"
+    "pop %rbp\n\t"
+    "ret\n\t"
+    ".size call_new_check_rbx, .-call_new_check_rbx\n\t"
+    ".popsection\n"
+);
 
 int main(int argc, char **argv) {
     if (argc < 3) return 2;

@@ -380,15 +380,28 @@ typedef int32_t (*fn_imp_name)(uint32_t, const uint8_t **, size_t *, const uint8
 typedef void *(*fn_new)(void *, host_fn_t, uint64_t, uint8_t *);
 typedef void (*fn_drop)(void *);
 typedef int32_t (*fn_call)(void *, const uint8_t *, size_t, uint64_t, uint64_t *, uint8_t *);
-typedef int32_t (*fn_get_g)(void *, const uint8_t *, size_t, uint8_t *, uint64_t *);
+typedef int32_t (*fn_get_g)(void *, const uint8_t *, size_t, uint64_t *, uint8_t *);
 typedef int32_t (*fn_set_g)(void *, const uint8_t *, size_t, uint64_t);
-typedef uint8_t *(*fn_mem_ptr)(void *);
-typedef size_t (*fn_mem_len)(void *);
+typedef void (*fn_mem_data)(void *, uint8_t **, size_t *);
+typedef int64_t (*fn_mem_grow)(void *, uint64_t);
 
-static int32_t my_host(void *u, void *ctx, uint32_t imp, uint64_t a0, uint64_t a1, uint64_t *out) {
-    (void)u; (void)ctx; (void)a1;
+typedef struct {
+    fn_mem_data active_mem_data;
+    fn_get_g active_get_g;
+    int saw_active;
+} HostCtx;
+
+static int32_t my_host(void *u, void *ac, uint32_t imp, uint64_t tok, uint64_t arg, uint64_t *out) {
+    (void)tok;
+    HostCtx *hc = (HostCtx *)u;
     if (imp != 0) return 1;
-    *out = (uint64_t)((uint32_t)a0 * 2u);
+    uint8_t *mp = NULL; size_t ml = 0;
+    hc->active_mem_data(ac, &mp, &ml);
+    if (!mp || ml != 65536) return 1;
+    uint64_t gv = 0; uint8_t gk = 255;
+    if (hc->active_get_g(ac, (const uint8_t *)"g", 1, &gv, &gk) != 0 || gk != 0 || (uint32_t)gv != 10u) return 1;
+    hc->saw_active = 1;
+    *out = (uint64_t)((uint32_t)arg * 2u);
     return 0;
 }
 
@@ -406,9 +419,11 @@ int main(int argc, char **argv) {
     fn_call aot_call = (fn_call)dlsym(dl, "blot_aot_call_export");
     fn_get_g aot_get_g = (fn_get_g)dlsym(dl, "blot_aot_get_global");
     fn_set_g aot_set_g = (fn_set_g)dlsym(dl, "blot_aot_set_global");
-    fn_mem_ptr mem_ptr = (fn_mem_ptr)dlsym(dl, "blot_aot_memory_ptr");
-    fn_mem_len mem_len = (fn_mem_len)dlsym(dl, "blot_aot_memory_len");
-    CHECK(abi_ver && imp_cnt && imp_name && aot_new && aot_drop && aot_call && aot_get_g && aot_set_g && mem_ptr && mem_len, "missing symbol");
+    fn_mem_data mem_data = (fn_mem_data)dlsym(dl, "blot_aot_mem_data");
+    fn_mem_grow mem_grow = (fn_mem_grow)dlsym(dl, "blot_aot_mem_grow");
+    fn_mem_data active_mem_data = (fn_mem_data)dlsym(dl, "blot_aot_active_mem_data");
+    fn_get_g active_get_g = (fn_get_g)dlsym(dl, "blot_aot_active_get_global");
+    CHECK(abi_ver && imp_cnt && imp_name && aot_new && aot_drop && aot_call && aot_get_g && aot_set_g && mem_data && mem_grow && active_mem_data && active_get_g, "missing symbol");
 
     CHECK(abi_ver() == 1, "abi_version != 1");
     CHECK(imp_cnt() == 1, "import_count != 1");
@@ -417,29 +432,40 @@ int main(int argc, char **argv) {
     CHECK(imp_name(0, &mp, &ml, &np, &nl) == 0, "import_name failed");
     CHECK(ml == 3 && memcmp(mp, "env", 3) == 0 && nl == 2 && memcmp(np, "cb", 2) == 0, "import_name mismatch");
 
+    HostCtx hc = { active_mem_data, active_get_g, 0 };
     uint8_t trap = 0;
-    void *h = aot_new(NULL, my_host, 0, &trap);
+    void *h = aot_new(&hc, my_host, 0, &trap);
     CHECK(h != NULL && trap == 0, "blot_aot_new failed");
-    CHECK(mem_len(h) == 65536, "initial memory len != 65536");
+    uint8_t *m = NULL; size_t mlen = 0;
+    mem_data(h, &m, &mlen);
+    CHECK(m != NULL && mlen == 65536, "initial memory len != 65536");
 
     uint64_t res = 0;
     // compute(5): cb(5)=10 -> +11=21 -> +7=28 -> +40=68 -> global 10+2=12 -> 68+12=80!
     CHECK(aot_call(h, (const uint8_t *)"compute", 7, 5, &res, &trap) == 0, "compute call failed");
     CHECK((uint32_t)res == 80u, "compute(5) != 80");
+    CHECK(hc.saw_active == 1, "active callback helpers not verified");
 
-    uint8_t *m = mem_ptr(h);
+    mem_data(h, &m, &mlen);
     CHECK(m[16] == 11 && m[17] == 22 && m[18] == 33 && m[19] == 44, "memory.init bytes mismatch");
 
-    uint8_t kind = 0;
+    uint8_t kind = 255;
     uint64_t gv = 0;
-    CHECK(aot_get_g(h, (const uint8_t *)"g", 1, &kind, &gv) == 0 && (uint32_t)gv == 12u, "get_global g != 12");
+    CHECK(aot_get_g(h, (const uint8_t *)"g", 1, &gv, &kind) == 0 && kind == 0 && (uint32_t)gv == 12u, "get_global g != 12");
     CHECK(aot_set_g(h, (const uint8_t *)"g", 1, 99) == 0, "set_global failed");
-    CHECK(aot_get_g(h, (const uint8_t *)"g", 1, &kind, &gv) == 0 && (uint32_t)gv == 99u, "get_global after set != 99");
+    CHECK(aot_get_g(h, (const uint8_t *)"g", 1, &gv, &kind) == 0 && kind == 0 && (uint32_t)gv == 99u, "get_global after set != 99");
 
-    // div_trap(4) == 25; div_trap(0) traps cleanly (rc == 2, trap != 0)!
+    // mem_grow: 1 -> 2 pages ok; 2 -> 3 fails (-1) because max=2!
+    CHECK(mem_grow(h, 1) == 1, "mem_grow(1) != 1");
+    CHECK(mem_grow(h, 1) == -1, "mem_grow past max must return -1");
+    mem_data(h, &m, &mlen);
+    CHECK(mlen == 131072, "grown memory len != 131072");
+
+    // div_trap(4) == 25; div_trap(0) traps cleanly (rc == 1, trap != 0)!
     CHECK(aot_call(h, (const uint8_t *)"div_trap", 8, 4, &res, &trap) == 0 && (uint32_t)res == 25u, "div_trap(4) != 25");
     trap = 0;
-    CHECK(aot_call(h, (const uint8_t *)"div_trap", 8, 0, &res, &trap) == 2 && trap != 0, "div_trap(0) must trap");
+    CHECK(aot_call(h, (const uint8_t *)"div_trap", 8, 0, &res, &trap) == 1 && trap != 0, "div_trap(0) must trap with rc=1");
+    CHECK(aot_call(h, (const uint8_t *)"missing", 7, 0, &res, &trap) == 3, "missing export must return 3");
 
     aot_drop(h);
     dlclose(dl);

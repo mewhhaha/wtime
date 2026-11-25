@@ -33,7 +33,10 @@ use inc_cache::{
 };
 use lower::lower_ir_to_aarch64;
 use regalloc::allocate;
-use runtime::{emit_a64_exports, emit_a64_helpers};
+use runtime::{
+    emit_a64_blot_import_trampoline, emit_a64_exports, emit_a64_helper_host_call,
+    emit_a64_helper_read_global, emit_a64_helpers,
+};
 use standalone_rt::{
     emit_a64_helper_goose_fmt_float, emit_a64_helper_standalone_fs,
     emit_a64_helper_standalone_reserve_copy, emit_a64_standalone_import_trampoline,
@@ -56,11 +59,12 @@ use crate::x64::opt::{
     self, FnOwnEffects, InlineMode, Stage2Scratch, compute_module_effects_from_summaries,
     inline_small_helpers, optimize_func_stage2_with_scratch, try_compute_fn_own_effects,
 };
-use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables, TRAP_MESSAGES};
+use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables, TRAP_MESSAGES, global_kind_code};
 use crate::x64::verify::verify_ir;
 use crate::x64::{
-    CiTableLayout, CtxLayout, HELPER_GOOSE_FMT_FLOAT, HELPER_STANDALONE_FS,
-    HELPER_STANDALONE_RESERVE_COPY, MAX_WASM_BYTES_X64, NUM_HELPERS, X64CompileError,
+    CiTableLayout, CtxLayout, HELPER_GOOSE_FMT_FLOAT, HELPER_HOST_CALL, HELPER_READ_GLOBAL,
+    HELPER_STANDALONE_FS, HELPER_STANDALONE_RESERVE_COPY, MAX_WASM_BYTES_X64, NUM_HELPERS,
+    X64CompileError,
 };
 
 /// Compilation options for `--backend aarch64`.
@@ -763,13 +767,6 @@ fn compile_wasm_to_aarch64_detailed(
     )
     .map_err(X64CompileError::AdmissionRejected)?;
 
-    if opts.target == X64Target::BlotCdylib && !module.imports.is_empty() {
-        return Err(X64CompileError::AdmissionRejected(
-            "aarch64: Blot host imports are not yet supported by --backend aarch64 --blot-cdylib"
-                .into(),
-        ));
-    }
-
     // 1. Build shared `.rodata` tables (trap messages, call_indirect slots BEFORE data segments
     //    so edits to data segments do not shift `ci_tables` offsets).
     let mut rodata = Vec::with_capacity(4096);
@@ -916,16 +913,162 @@ fn compile_wasm_to_aarch64_detailed(
         0
     };
 
+    let mut layout =
+        CtxLayout::compute(&module, ci_tables).map_err(X64CompileError::AdmissionRejected)?;
+    layout.func_sig_ro_off = func_sig_ro_off;
+    layout.func_addr_ro_off = func_addr_ro_off;
+
+    let (
+        imp_table_off,
+        imp_count,
+        get_global_table_off,
+        get_global_count,
+        set_global_table_off,
+        set_global_count,
+    ) = if opts.target == X64Target::BlotCdylib {
+        let push_ro_str = |rodata: &mut Vec<u8>, s: &str| -> Result<(u32, u32), X64CompileError> {
+            let len = u32::try_from(s.len()).map_err(|_| {
+                X64CompileError::Failed("aarch64: rodata string exceeds u32".into())
+            })?;
+            if s.is_empty() {
+                Ok((empty_off, 0))
+            } else {
+                let mut bytes = Vec::with_capacity(s.len() + 1);
+                bytes.extend_from_slice(s.as_bytes());
+                bytes.push(0);
+                let off = append_rodata(rodata, 1, &bytes).map_err(X64CompileError::Failed)?;
+                Ok((off, len))
+            }
+        };
+
+        let mut imp_offs = Vec::with_capacity(module.imports.len());
+        for (m, n) in &module.imports {
+            imp_offs.push((push_ro_str(&mut rodata, m)?, push_ro_str(&mut rodata, n)?));
+        }
+        let imp_count = u32::try_from(imp_offs.len())
+            .map_err(|_| X64CompileError::Failed("aarch64: import count exceeds u32".into()))?;
+        let imp_table_off = if imp_offs.is_empty() {
+            0
+        } else {
+            let tbl = append_rodata(&mut rodata, 4, &vec![0u8; imp_offs.len() * 16])
+                .map_err(X64CompileError::Failed)?;
+            for (i, &((moff, mlen), (noff, nlen))) in imp_offs.iter().enumerate() {
+                let mrel = i32::try_from(i64::from(moff) - i64::from(tbl)).map_err(|_| {
+                    X64CompileError::Failed("aarch64: import mod rel32 overflow".into())
+                })?;
+                let nrel = i32::try_from(i64::from(noff) - i64::from(tbl)).map_err(|_| {
+                    X64CompileError::Failed("aarch64: import name rel32 overflow".into())
+                })?;
+                let pos = (tbl as usize) + i * 16;
+                rodata[pos..pos + 4].copy_from_slice(&mrel.to_le_bytes());
+                rodata[pos + 4..pos + 8].copy_from_slice(&mlen.to_le_bytes());
+                rodata[pos + 8..pos + 12].copy_from_slice(&nrel.to_le_bytes());
+                rodata[pos + 12..pos + 16].copy_from_slice(&nlen.to_le_bytes());
+            }
+            tbl
+        };
+
+        let mut get_global_items = Vec::new();
+        let mut set_global_items = Vec::new();
+        for (name, gi, vt, mutable) in &module.exported_globals {
+            let Some(kind) = global_kind_code(*vt) else {
+                continue;
+            };
+            let (noff, nlen) = push_ro_str(&mut rodata, name)?;
+            match module.global_consts[*gi] {
+                Some(c) => {
+                    let bits: u64 = match c {
+                        x64_mod::X64ConstVal::I32(v) => u64::from(v as u32),
+                        x64_mod::X64ConstVal::I64(v) => v as u64,
+                        x64_mod::X64ConstVal::F32(b) => u64::from(b),
+                        x64_mod::X64ConstVal::F64(b) => b,
+                        x64_mod::X64ConstVal::RefNull => 0,
+                        x64_mod::X64ConstVal::FuncRef(f) => u64::from(f) + 1,
+                        x64_mod::X64ConstVal::V128(_) => continue,
+                    };
+                    get_global_items.push((noff, nlen, kind, 1u8, 0i32, bits));
+                }
+                None => {
+                    let ctx_off = layout.global_offs[*gi];
+                    get_global_items.push((noff, nlen, kind, 0u8, ctx_off, 0u64));
+                    if *mutable {
+                        let is64 = u8::from(!matches!(
+                            vt,
+                            wtime_types::ValType::I32 | wtime_types::ValType::F32
+                        ));
+                        set_global_items.push((noff, nlen, ctx_off, is64));
+                    }
+                }
+            }
+        }
+        let get_global_count = u32::try_from(get_global_items.len()).map_err(|_| {
+            X64CompileError::Failed("aarch64: global export count exceeds u32".into())
+        })?;
+        let get_global_table_off = if get_global_items.is_empty() {
+            0
+        } else {
+            let tbl = append_rodata(&mut rodata, 8, &vec![0u8; get_global_items.len() * 24])
+                .map_err(X64CompileError::Failed)?;
+            for (i, &(noff, nlen, kind, is_const, ctx_off, const_bits)) in
+                get_global_items.iter().enumerate()
+            {
+                let nrel = i32::try_from(i64::from(noff) - i64::from(tbl)).map_err(|_| {
+                    X64CompileError::Failed("aarch64: get_global name rel32 overflow".into())
+                })?;
+                let pos = (tbl as usize) + i * 24;
+                rodata[pos..pos + 4].copy_from_slice(&nrel.to_le_bytes());
+                rodata[pos + 4..pos + 8].copy_from_slice(&nlen.to_le_bytes());
+                rodata[pos + 8] = kind;
+                rodata[pos + 9] = is_const;
+                rodata[pos + 12..pos + 16].copy_from_slice(&ctx_off.to_le_bytes());
+                rodata[pos + 16..pos + 24].copy_from_slice(&const_bits.to_le_bytes());
+            }
+            tbl
+        };
+
+        let set_global_count = u32::try_from(set_global_items.len()).map_err(|_| {
+            X64CompileError::Failed("aarch64: mutable global export count exceeds u32".into())
+        })?;
+        let set_global_table_off = if set_global_items.is_empty() {
+            0
+        } else {
+            let tbl = append_rodata(&mut rodata, 4, &vec![0u8; set_global_items.len() * 16])
+                .map_err(X64CompileError::Failed)?;
+            for (i, &(noff, nlen, ctx_off, is64)) in set_global_items.iter().enumerate() {
+                let nrel = i32::try_from(i64::from(noff) - i64::from(tbl)).map_err(|_| {
+                    X64CompileError::Failed("aarch64: set_global name rel32 overflow".into())
+                })?;
+                let pos = (tbl as usize) + i * 16;
+                rodata[pos..pos + 4].copy_from_slice(&nrel.to_le_bytes());
+                rodata[pos + 4..pos + 8].copy_from_slice(&nlen.to_le_bytes());
+                rodata[pos + 8..pos + 12].copy_from_slice(&ctx_off.to_le_bytes());
+                rodata[pos + 12] = is64;
+            }
+            tbl
+        };
+
+        (
+            imp_table_off,
+            imp_count,
+            get_global_table_off,
+            get_global_count,
+            set_global_table_off,
+            set_global_count,
+        )
+    } else {
+        (0, 0, 0, 0, 0, 0)
+    };
+
     let tables = RuntimeTables {
         trap_table_off,
-        imp_table_off: 0,
-        imp_count: 0,
+        imp_table_off,
+        imp_count,
         call_export_table_off: 0,
         call_export_count: 0,
-        get_global_table_off: 0,
-        get_global_count: 0,
-        set_global_table_off: 0,
-        set_global_count: 0,
+        get_global_table_off,
+        get_global_count,
+        set_global_table_off,
+        set_global_count,
         data_segs,
         v128_global_inits: Vec::new(),
         passive_data_table_off,
@@ -934,10 +1077,6 @@ fn compile_wasm_to_aarch64_detailed(
         func_sig_ro_off,
         func_addr_ro_off,
     };
-    let mut layout =
-        CtxLayout::compute(&module, ci_tables).map_err(X64CompileError::AdmissionRejected)?;
-    layout.func_sig_ro_off = func_sig_ro_off;
-    layout.func_addr_ro_off = func_addr_ro_off;
 
     // 2. Try incremental compilation against `a64-inc`, falling back cleanly to full parallel cold compile.
     let n_defs = validated.decoded().code.len();
@@ -1464,13 +1603,36 @@ fn compile_wasm_to_aarch64_detailed(
         ));
     }
 
+    if opts.target == X64Target::BlotCdylib {
+        helper_asms.push((
+            HELPER_READ_GLOBAL,
+            emit_a64_helper_read_global(&tables).map_err(X64CompileError::Failed)?,
+        ));
+        if !module.imports.is_empty() {
+            helper_asms.push((
+                HELPER_HOST_CALL,
+                emit_a64_helper_host_call(&module, &layout).map_err(X64CompileError::Failed)?,
+            ));
+        }
+    }
+
     let mut import_asms: Vec<A64Asm> = Vec::with_capacity(n_imports);
-    if opts.target == X64Target::StandaloneExec {
-        for k in 0..n_imports {
-            import_asms.push(
-                emit_a64_standalone_import_trampoline(&module, k)
-                    .map_err(X64CompileError::Failed)?,
-            );
+    match opts.target {
+        X64Target::StandaloneExec => {
+            for k in 0..n_imports {
+                import_asms.push(
+                    emit_a64_standalone_import_trampoline(&module, k)
+                        .map_err(X64CompileError::Failed)?,
+                );
+            }
+        }
+        X64Target::BlotCdylib => {
+            for k in 0..n_imports {
+                import_asms.push(
+                    emit_a64_blot_import_trampoline(&module, k)
+                        .map_err(X64CompileError::AdmissionRejected)?,
+                );
+            }
         }
     }
 
