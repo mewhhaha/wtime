@@ -659,7 +659,10 @@ impl Memory {
     pub fn read(&self, address: u64, n: u64) -> R<Vec<u8>> {
         let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
         let at = self.at(address, 0, n)?;
-        let mut out = vec![0; n];
+        let mut out = Vec::new();
+        out.try_reserve_exact(n)
+            .map_err(|_| Trap::AllocationFailed)?;
+        out.resize(n, 0);
         self.read_into(at, &mut out);
         Ok(out)
     }
@@ -883,7 +886,10 @@ pub fn slice_parts<'a>(
     if at + n <= outer.fast && at + n <= base.len() {
         return Ok(std::borrow::Cow::Borrowed(&base[at..at + n]));
     }
-    let mut out = vec![0; n];
+    let mut out = Vec::new();
+    out.try_reserve_exact(n)
+        .map_err(|_| Trap::AllocationFailed)?;
+    out.resize(n, 0);
     read_parts(base, outer, at, &mut out);
     Ok(std::borrow::Cow::Owned(out))
 }
@@ -2393,7 +2399,12 @@ impl Memory32 {
 impl LinearMemory for Memory32 {
     fn read(&self, address: u64, n: u64) -> R<Vec<u8>> {
         let range = self.range(address, n)?;
-        Ok(self.bytes[range].to_vec())
+        let slice = &self.bytes[range];
+        let mut out = Vec::new();
+        out.try_reserve_exact(slice.len())
+            .map_err(|_| Trap::AllocationFailed)?;
+        out.extend_from_slice(slice);
+        Ok(out)
     }
     fn slice(&self, address: u64, n: u64) -> R<std::borrow::Cow<'_, [u8]>> {
         let range = self.range(address, n)?;

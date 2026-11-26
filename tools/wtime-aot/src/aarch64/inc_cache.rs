@@ -13,14 +13,14 @@
 //!   compared to a cold compile.
 
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sha256::{Sha256, to_hex};
 use crate::x64::inc_cache::{
-    CachedBytes, compute_abi_hash, parallel_payload_digest, sweep_stale_tmp_files_with_cutoff,
-    try_copy_slice, try_vec_with_capacity,
+    CachedBytes, compute_abi_hash, parallel_payload_digest, read_private_cache_file,
+    sweep_stale_tmp_files_with_cutoff, try_copy_slice, try_vec_with_capacity,
 };
 use crate::x64::lower::TargetIsa;
 use crate::x64::module::{
@@ -33,7 +33,7 @@ use crate::x64::{CtxLayout, NUM_HELPERS, RodataConsts};
 use super::asm::{A64Asm, A64Reloc, A64RelocKind, A64RelocTarget};
 
 const MAGIC: &[u8; 8] = b"WTA64INC";
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20;
 
 static NEXT_A64_INC_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -197,26 +197,7 @@ impl<'a> BinReader<'a> {
 }
 
 fn ensure_private_a64_inc_dir(dir: &Path) -> Option<()> {
-    if !dir.exists() {
-        fs::create_dir_all(dir).ok()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        let meta = fs::symlink_metadata(dir).ok()?;
-        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-            return None;
-        }
-        let euid = crate::build::current_euid().ok()?;
-        if meta.uid() != euid {
-            return None;
-        }
-        let mode = meta.permissions().mode() & 0o777;
-        if (mode & 0o077) != 0 {
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).ok()?;
-        }
-    }
-    Some(())
+    crate::build::ensure_private_dir(dir).ok().map(|_| ())
 }
 
 /// Reads and verifies the AArch64 incremental cache file on disk, returning `None` on any mismatch or I/O error.
@@ -228,27 +209,7 @@ pub fn load_a64_inc_cache(
     expected_global_words: usize,
 ) -> Option<A64IncCacheData> {
     let path = cache_file_path(cache_dir, expected_abi_hash);
-    let mut f = fs::File::open(&path).ok()?;
-    let meta = f.metadata().ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let file_len = usize::try_from(meta.len()).ok()?;
-    if !(8 + 4 + 32 + 32..=MAX_CACHE_FILE_BYTES).contains(&file_len) {
-        return None;
-    }
-    let mut raw = try_vec_with_capacity(file_len)?;
-    let mut chunk = [0u8; 16384];
-    loop {
-        let n = f.read(&mut chunk).ok()?;
-        if n == 0 {
-            break;
-        }
-        if raw.len().saturating_add(n) > MAX_CACHE_FILE_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&chunk[..n]);
-    }
+    let raw = read_private_cache_file(&path)?;
     if raw.len() < 8 + 4 + 32 + 32 {
         return None;
     }

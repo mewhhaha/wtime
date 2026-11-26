@@ -5176,3 +5176,484 @@ fn oracle_wasm3_table64_and_function_references() {
     let calls: Vec<OracleCall> = (0..=16).map(|k| c("dispatch", ArgSpec::I32(k))).collect();
     assert_oracle_matrix("wasm3_table64_funcref", &wasm, &calls, &[], &[]);
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_try_table_call_catch_gvn_and_licm() {
+    // Tests GVN and LICM invalidation across `Term::CallCatch`:
+    //   global 0 (mut i32) = 1
+    //   memory 0 (min 1, max 8)
+    //   tag 0: () -> ()
+    //   func 0 (mut_ok):    g0 += 10; mem[0] += 100; drop(memory.grow(1))
+    //   func 1 (mut_throw): g0 += 20; mem[0] += 200; drop(memory.grow(1)); throw 0
+    //   func 2 (gvn_ok):    reads (g0, mem[0], mem.size) BEFORE & AFTER try_table(call 0), returns delta
+    //   func 3 (gvn_catch): reads (g0, mem[0], mem.size) BEFORE & AFTER try_table(catch 0 -> call 1), returns delta
+    //   func 4 (licm_loop): loops `n` times reading g0 + mem.size and calling `try_table(call 0/1)`, returns sum
+    let types = type_sec(&[(&[], &[]), (&[0x7f], &[0x7f])]);
+    let mem = section(5, &[1, 0x01, 1, 8]);
+    let tag = section(13, &[1, 0x00, 0]);
+    let globals = section(6, &[1, 0x7f, 0x01, 0x41, 1, 0x0b]);
+
+    let f0 = enc_body(
+        &[],
+        &[
+            0x23, 0, 0x41, 10, 0x6a, 0x24, 0, // g0 += 10
+            0x41, 0, 0x41, 0, 0x28, 2, 0, 0x41, 0xe4, 0x00, 0x6a, 0x36, 2, 0, // mem[0] += 100
+            0x41, 1, 0x40, 0, 0x1a, // drop(memory.grow(1))
+        ],
+    );
+    let f1 = enc_body(
+        &[],
+        &[
+            0x23, 0, 0x41, 20, 0x6a, 0x24, 0, // g0 += 20
+            0x41, 0, 0x41, 0, 0x28, 2, 0, 0x41, 0xc8, 0x01, 0x6a, 0x36, 2, 0, // mem[0] += 200
+            0x41, 1, 0x40, 0, 0x1a, // drop(memory.grow(1))
+            0x08, 0, // throw 0
+        ],
+    );
+    // f2(x): before = g0 + mem[0] + mem.size*1000; block $c { try_table (catch 0 $c) { call 0 } }; after = g0 + mem[0] + mem.size*1000; return after - before
+    let f2 = enc_body(
+        &[(1, 0x7f)],
+        &[
+            0x23, 0, 0x41, 0, 0x28, 2, 0, 0x6a, 0x3f, 0, 0x41, 0xe8, 0x07, 0x6c, 0x6a, 0x21,
+            1, // local 1 = before
+            0x02, 0x40, // block $c
+            0x1f, 0x40, 1, 0x00, 0, 0, // try_table () (catch 0 0)
+            0x10, 0,    // call 0 (returns normally -> Term::CallCatch)
+            0x0b, // end try_table
+            0x0b, // end block
+            0x23, 0, 0x41, 0, 0x28, 2, 0, 0x6a, 0x3f, 0, 0x41, 0xe8, 0x07, 0x6c, 0x6a, 0x20, 1,
+            0x6b, // after - before
+            0x20, 0, 0x6a, // + x
+        ],
+    );
+    // f3(x): same but calls f1 which throws into $c!
+    let f3 = enc_body(
+        &[(1, 0x7f)],
+        &[
+            0x23, 0, 0x41, 0, 0x28, 2, 0, 0x6a, 0x3f, 0, 0x41, 0xe8, 0x07, 0x6c, 0x6a, 0x21, 1,
+            0x02, 0x40, 0x1f, 0x40, 1, 0x00, 0, 0, 0x10, 1, 0x0b, 0x0b, 0x23, 0, 0x41, 0, 0x28, 2,
+            0, 0x6a, 0x3f, 0, 0x41, 0xe8, 0x07, 0x6c, 0x6a, 0x20, 1, 0x6b, 0x20, 0, 0x6a,
+        ],
+    );
+    // f4(n): block $done { loop $lp { if i >= n { br $done }; acc += g0 + mem.size*1000; try_table (catch 0) { call 1 }; i += 1; br $lp } }; return acc
+    let f4 = enc_body(
+        &[(2, 0x7f)],
+        &[
+            0x02, 0x40, // block $done
+            0x03, 0x40, // loop $lp
+            0x20, 1, 0x20, 0, 0x4e, 0x04, 0x40, 0x0c, 2, 0x0b, // if i >= n { br $done }
+            0x20, 2, 0x23, 0, 0x3f, 0, 0x41, 0xe8, 0x07, 0x6c, 0x6a, 0x6a, 0x21,
+            2, // acc += g0 + size*1000
+            0x02, 0x40, 0x1f, 0x40, 1, 0x00, 0, 0, 0x10, 1, 0x0b, 0x0b, 0x20, 1, 0x41, 1, 0x6a,
+            0x21, 1, 0x0c, 0,    // i += 1; br $lp
+            0x0b, // end loop
+            0x0b, // end block
+            0x20, 2,
+        ],
+    );
+    let wasm = wasm_module(&[
+        types,
+        func_sec(&[0, 0, 1, 1, 1]),
+        mem,
+        tag,
+        globals,
+        export_sec(&[("gvn_ok", 0, 2), ("gvn_catch", 0, 3), ("licm_loop", 0, 4)]),
+        code_sec(&[f0, f1, f2, f3, f4]),
+    ]);
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    assert_oracle_matrix(
+        "try_table_call_catch_gvn_licm",
+        &wasm,
+        &[
+            c("gvn_ok", ArgSpec::I32(5)),
+            c("gvn_catch", ArgSpec::I32(7)),
+            c("licm_loop", ArgSpec::I32(3)),
+        ],
+        &[],
+        &[],
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_standalone_x64_cli_parse_u64_rejects_invalid_and_overflow() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let wasm = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x00, 1]),
+        export_sec(&[("_start", 0, 0)]),
+        code_sec(&[enc_body(&[], &[])]),
+    ]);
+    let opts = X64CompileOptions {
+        target: super::module::X64Target::StandaloneExec,
+        ..Default::default()
+    };
+    let elf = compile_wasm_to_x64_so(&wasm, &opts).expect("compile standalone x64");
+    let bin_path = std::env::temp_dir().join(format!(
+        "wtime-x64-cli-hardening-{}.bin",
+        std::process::id()
+    ));
+    std::fs::write(&bin_path, &elf).unwrap();
+    std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Valid flags must exit 0.
+    let ok_st = std::process::Command::new(&bin_path)
+        .args([
+            "--memory-limit-pages",
+            "64",
+            "--output-limit",
+            "18446744073709551615",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        ok_st.success(),
+        "valid numeric flags should succeed: {ok_st}"
+    );
+
+    // Empty, non-numeric, trailing-garbage, and u64-overflowing values must fail closed.
+    for args in [
+        &["--memory-limit-pages", ""][..],
+        &["--memory-limit-pages", "abc"][..],
+        &["--memory-limit-pages", "12abc"][..],
+        &["--memory-limit-pages", "-1"][..],
+        &["--memory-limit-pages", "18446744073709551616"][..],
+        &["--memory-limit-pages", "99999999999999999999"][..],
+        &["--output-limit", ""][..],
+        &["--output-limit", "xyz"][..],
+        &["--output-limit", "100x"][..],
+        &["--output-limit", "18446744073709551616"][..],
+    ] {
+        let out = std::process::Command::new(&bin_path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "malformed standalone flag {args:?} must fail closed"
+        );
+    }
+    let _ = std::fs::remove_file(&bin_path);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_x64_simd_spill_swap_and_self_alias_hardening() {
+    fn push_sleb_i32(out: &mut Vec<u8>, mut v: i32) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_simd(code: &mut Vec<u8>, sub: u8) {
+        code.push(0xfd);
+        if sub < 0x80 {
+            code.push(sub);
+        } else {
+            code.push((sub & 0x7f) | 0x80);
+            code.push(sub >> 7);
+        }
+    }
+    fn push_v128_const(code: &mut Vec<u8>, bytes: [u8; 16]) {
+        push_simd(code, 0x0c);
+        code.extend_from_slice(&bytes);
+    }
+    fn push_fold_v128_to_i32(code: &mut Vec<u8>, v_local: u8) {
+        // Fold all 4 i32 lanes of `v_local` via prime multipliers so every byte matters.
+        for (lane, mult) in [(0u8, 1i32), (1, 31), (2, 131), (3, 521)] {
+            code.extend_from_slice(&[0x20, v_local]);
+            push_simd(code, 0x1b); // i32x4.extract_lane
+            code.push(lane);
+            if mult != 1 {
+                code.push(0x41);
+                push_sleb_i32(code, mult);
+                code.push(0x6c); // i32.mul
+            }
+            if lane > 0 {
+                code.push(0x6a); // i32.add
+            }
+        }
+    }
+
+    // Export 0 (`simd_spill_ops(arg: i32) -> i32`):
+    // Keeps 22 live `v128` locals (`local 1..=22`) across the function so regalloc spills many
+    // of them (forcing `b == SFP2` with `dst == a == SFP1` and `dst == a` reg + `b == SFP2`).
+    // Exercises every swapped/unsigned-compare/andnot/pmin/pmax binary SIMD op category.
+    let mut spill_body = Vec::new();
+    // Initialize locals 1..=22 from `arg` so nothing constant-folds.
+    for i in 1u8..=22 {
+        spill_body.extend_from_slice(&[0x20, 0, 0x41]);
+        push_sleb_i32(&mut spill_body, i32::from(i) * 17 - 9);
+        spill_body.push(0x6a); // arg + (i*17 - 9)
+        push_simd(&mut spill_body, 0x11); // i32x4.splat
+        let mut pat = [0u8; 16];
+        for (k, slot) in pat.iter_mut().enumerate() {
+            *slot = i.wrapping_mul(29).wrapping_add((k as u8).wrapping_mul(13));
+        }
+        push_v128_const(&mut spill_body, pat);
+        push_simd(&mut spill_body, 0x51); // v128.xor
+        // Clamp exponent bits so every lane is simultaneously a finite non-NaN f32 & f64 AND
+        // diverse signed/unsigned i8/i16/i32/i64 bytes (preserving sign bit 31/63).
+        push_v128_const(
+            &mut spill_body,
+            [
+                0xff, 0xff, 0xff, 0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xff,
+                0xff, 0xbf,
+            ],
+        );
+        push_simd(&mut spill_body, 0x4e); // v128.and
+        push_v128_const(
+            &mut spill_body,
+            [
+                0x00, 0x00, 0x80, 0x3e, 0x00, 0x00, 0x80, 0x3e, 0x00, 0x00, 0x80, 0x3e, 0x00, 0x00,
+                0x80, 0x3e,
+            ],
+        );
+        push_simd(&mut spill_body, 0x50); // v128.or
+        spill_body.extend_from_slice(&[0x21, i]); // local.set i
+    }
+    // `local 23` = accumulator v128 = local 1
+    spill_body.extend_from_slice(&[0x20, 1, 0x21, 23]);
+
+    // All 29 swapped/ucmp/andnot/pmin/pmax opcodes, run with BOTH `(spilled_a, spilled_b)` and
+    // `(early_a, spilled_b)` into a live accumulator so every `(dst, a, b)` spill combination hits.
+    let swap_ops: &[u8] = &[
+        0x25, 0x26, 0x28, 0x2a, 0x2b, 0x2c, // i8x16: lt_s, lt_u, gt_u, le_u, ge_s, ge_u
+        0x2f, 0x30, 0x32, 0x34, 0x35, 0x36, // i16x8: lt_s, lt_u, gt_u, le_u, ge_s, ge_u
+        0x39, 0x3a, 0x3c, 0x3e, 0x3f, 0x40, // i32x4: lt_s, lt_u, gt_u, le_u, ge_s, ge_u
+        0x44, 0x46, // f32x4: gt, ge
+        0x4a, 0x4c, // f64x2: gt, ge
+        0x4f, // v128.andnot
+        0xd8, 0xdb, // i64x2: lt_s, ge_s
+        0xea, 0xeb, // f32x4: pmin, pmax
+        0xf6, 0xf7, // f64x2: pmin, pmax
+    ];
+    for (idx, &sub) in swap_ops.iter().enumerate() {
+        let a_loc = 18u8 + ((idx as u8) % 5); // high locals -> spilled (SFP1)
+        let b_loc = 17u8 - ((idx as u8) % 4); // distinct high locals -> spilled (SFP2)
+        // Result feeds straight into `local 24` (spilled) then XOR-folded into `local 23`!
+        spill_body.extend_from_slice(&[0x20, a_loc, 0x20, b_loc]);
+        push_simd(&mut spill_body, sub);
+        spill_body.extend_from_slice(&[0x21, 24]);
+        spill_body.extend_from_slice(&[0x20, 23, 0x20, 24]);
+        push_simd(&mut spill_body, 0xae); // i32x4.add
+        spill_body.extend_from_slice(&[0x21, 23]);
+
+        // Also test early (likely-register) `a` with spilled `b` where `dst` can reuse `a`'s reg!
+        let reg_loc = 1u8 + ((idx as u8) % 4);
+        spill_body.extend_from_slice(&[0x20, reg_loc, 0x20, a_loc]);
+        push_simd(&mut spill_body, sub);
+        spill_body.extend_from_slice(&[0x20, 23]);
+        push_simd(&mut spill_body, 0x51); // v128.xor
+        spill_body.extend_from_slice(&[0x21, 23]);
+    }
+    // Keep ALL 22 locals live until the end of the function so regalloc cannot free them early!
+    for i in 1u8..=22 {
+        spill_body.extend_from_slice(&[0x20, 23, 0x20, i]);
+        push_simd(&mut spill_body, 0x51); // v128.xor
+        spill_body.extend_from_slice(&[0x21, 23]);
+    }
+    push_fold_v128_to_i32(&mut spill_body, 23);
+
+    // Export 1 (`simd_self_alias(arg: i32) -> i32`):
+    // Exercises in-place squaring `op(x, x)` with zero register pressure (single live `v128`
+    // dead immediately at `op`, forcing `dst == a == b` in regalloc) for all 12 `extmul` ops
+    // AND `i64x2.mul`!
+    let self_alias_ops: &[u8] = &[
+        0x9c, 0x9d, 0x9e, 0x9f, // i16x8.extmul_{low,high}_i8x16_{s,u}
+        0xbc, 0xbd, 0xbe, 0xbf, // i32x4.extmul_{low,high}_i16x8_{s,u}
+        0xdc, 0xdd, 0xde, 0xdf, // i64x2.extmul_{low,high}_i32x4_{s,u}
+        0xd5, // i64x2.mul
+    ];
+    let mut self_body = Vec::new();
+    // local 1 (i32) = acc, local 2 (v128) = tmp
+    self_body.extend_from_slice(&[0x41, 0, 0x21, 1]);
+    for (idx, &sub) in self_alias_ops.iter().enumerate() {
+        // Compute a fresh `x` from `arg` so `x`'s live range starts here and ends at `op(x, x)`.
+        self_body.extend_from_slice(&[0x20, 0, 0x41]);
+        push_sleb_i32(&mut self_body, (idx as i32) * 37 + 5);
+        self_body.push(0x6a);
+        push_simd(&mut self_body, 0x11); // i32x4.splat
+        let mut pat = [0u8; 16];
+        for (k, slot) in pat.iter_mut().enumerate() {
+            *slot = ((idx as u8).wrapping_mul(19))
+                .wrapping_add((k as u8).wrapping_mul(23))
+                .wrapping_add(0x81);
+        }
+        push_v128_const(&mut self_body, pat);
+        push_simd(&mut self_body, 0x51); // v128.xor
+        self_body.extend_from_slice(&[0x22, 2, 0x20, 2]); // local.tee 2; local.get 2
+        push_simd(&mut self_body, sub); // op(x, x) -> dst aliases x!
+        self_body.extend_from_slice(&[0x21, 2]);
+        // Fold result into `acc` (`local 1`): `acc = acc * 131 + fold(local 2)`
+        self_body.extend_from_slice(&[0x20, 1, 0x41]);
+        push_sleb_i32(&mut self_body, 131);
+        self_body.push(0x6c);
+        push_fold_v128_to_i32(&mut self_body, 2);
+        self_body.extend_from_slice(&[0x6a, 0x21, 1]);
+    }
+    self_body.extend_from_slice(&[0x20, 1]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        export_sec(&[("simd_spill_ops", 0, 0), ("simd_self_alias", 0, 1)]),
+        code_sec(&[
+            enc_body(&[(24, 0x7b)], &spill_body),
+            enc_body(&[(1, 0x7f), (1, 0x7b)], &self_body),
+        ]),
+    ]);
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    assert_oracle_matrix(
+        "x64_simd_spill_swap_and_self_alias",
+        &wasm,
+        &[
+            c("simd_spill_ops", ArgSpec::I32(0)),
+            c("simd_spill_ops", ArgSpec::I32(1234567)),
+            c("simd_spill_ops", ArgSpec::I32(-9876543)),
+            c("simd_self_alias", ArgSpec::I32(0)),
+            c("simd_self_alias", ArgSpec::I32(42)),
+            c("simd_self_alias", ArgSpec::I32(-777777)),
+        ],
+        &[],
+        &[],
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_x64_extra_memory_store_spilled_and_const_hardening() {
+    // Regression for `Op::StoreMem` + `emit_store_to_mem`: when storing a spilled integer
+    // or non-inline rematerialized constant (`i32.store16`, large `i64.store`) into an extra
+    // memory (`mem >= 1`), `SCRATCH_GP1` holds an absolute host pointer and must be preserved
+    // as `[SCRATCH_GP2]` rather than `[R14 + SCRATCH_GP2]`.
+    fn push_sleb_i32(out: &mut Vec<u8>, mut v: i32) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_sleb_i64(out: &mut Vec<u8>, mut v: i64) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    // Export 0 (`const_stores(arg: i32) -> i32`):
+    // Stores rematerialized constants (`i32.store16` and large 64-bit `i64.store`) into memory 1
+    // (32-bit extra memory) and memory 2 (64-bit extra memory), then reads them back.
+    let mut f0 = Vec::new();
+    // mem1[0] = (i16)0x5a3c via i32.store16 (align=0x41 -> memidx=1, offset=0)
+    f0.extend_from_slice(&[0x41, 0, 0x41]);
+    push_sleb_i32(&mut f0, 0x5a3c);
+    f0.extend_from_slice(&[0x3b, 0x41, 1, 0]);
+    // mem1[8] = 0x1122_3344_5566_7788 via i64.store (align=0x43 -> memidx=1, offset=8)
+    f0.extend_from_slice(&[0x41, 0, 0x42]);
+    push_sleb_i64(&mut f0, 0x1122_3344_5566_7788);
+    f0.extend_from_slice(&[0x37, 0x43, 1, 8]);
+    // mem2[16] = 0x0fed_cba9_8765_4321 via i64.store (memory64 memidx=2, offset=16)
+    f0.extend_from_slice(&[0x42, 0, 0x42]);
+    push_sleb_i64(&mut f0, 0x0fed_cba9_8765_4321);
+    f0.extend_from_slice(&[0x37, 0x43, 2, 16]);
+    // Return (i32.load16_u mem1[0]) + wrap(i64.load mem1[8] ^ i64.load mem2[16]) + arg
+    f0.extend_from_slice(&[
+        0x41, 0, 0x2f, 0x41, 1, 0, // i32.load16_u mem=1 off=0
+        0x41, 0, 0x29, 0x43, 1, 8, // i64.load mem=1 off=8
+        0x42, 0, 0x29, 0x43, 2, 16,   // i64.load mem=2 off=16
+        0x85, // i64.xor
+        0xa7, // i32.wrap_i64
+        0x6a, // i32.add
+        0x20, 0, 0x6a, // + arg
+    ]);
+
+    // Export 1 (`spilled_stores(arg: i32) -> i32`):
+    // Keeps 20 live GP locals (`local 1..=20`) across the function so several are spilled,
+    // then stores every local into memory 1 (`i32.store`, `i32.store16`, `i32.store8`) and
+    // sums both the stored values from memory 1 and all live locals.
+    let mut f1 = Vec::new();
+    for i in 1u8..=20 {
+        f1.extend_from_slice(&[0x20, 0, 0x41]);
+        push_sleb_i32(&mut f1, i32::from(i) * 131 + 7);
+        f1.extend_from_slice(&[0x6a, 0x21, i]);
+    }
+    for i in 1u8..=20 {
+        // mem1[i*8] = local i (i32.store mem=1)
+        f1.push(0x41);
+        push_sleb_i32(&mut f1, i32::from(i) * 8);
+        f1.extend_from_slice(&[0x20, i, 0x36, 0x42, 1, 0]);
+        // mem1[256 + i*4] = local i (i32.store16 mem=1)
+        f1.push(0x41);
+        push_sleb_i32(&mut f1, 256 + i32::from(i) * 4);
+        f1.extend_from_slice(&[0x20, i, 0x3b, 0x41, 1, 0]);
+        // mem1[512 + i] = local i (i32.store8 mem=1)
+        f1.push(0x41);
+        push_sleb_i32(&mut f1, 512 + i32::from(i));
+        f1.extend_from_slice(&[0x20, i, 0x3a, 0x40, 1, 0]);
+    }
+    f1.extend_from_slice(&[0x41, 0]); // acc = 0
+    for i in 1u8..=20 {
+        f1.push(0x41);
+        push_sleb_i32(&mut f1, i32::from(i) * 8);
+        f1.extend_from_slice(&[0x28, 0x42, 1, 0, 0x6a]);
+        f1.push(0x41);
+        push_sleb_i32(&mut f1, 256 + i32::from(i) * 4);
+        f1.extend_from_slice(&[0x2f, 0x41, 1, 0, 0x6a]);
+        f1.push(0x41);
+        push_sleb_i32(&mut f1, 512 + i32::from(i));
+        f1.extend_from_slice(&[0x2d, 0x40, 1, 0, 0x6a]);
+        // Keep all 20 locals live past all stores!
+        f1.extend_from_slice(&[0x20, i, 0x6a]);
+    }
+
+    // 3 memories: mem0 (32-bit, 1..2), mem1 (32-bit, 1..2), mem2 (64-bit, 1..2)
+    let mems = section(5, &[3, 0x01, 1, 2, 0x01, 1, 2, 0x05, 1, 2]);
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        mems,
+        export_sec(&[("const_stores", 0, 0), ("spilled_stores", 0, 1)]),
+        code_sec(&[enc_body(&[], &f0), enc_body(&[(20, 0x7f)], &f1)]),
+    ]);
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    assert_oracle_matrix(
+        "x64_extra_memory_store_spilled_and_const",
+        &wasm,
+        &[
+            c("const_stores", ArgSpec::I32(11)),
+            c("spilled_stores", ArgSpec::I32(19)),
+            c("spilled_stores", ArgSpec::I32(-42)),
+        ],
+        &[],
+        &[],
+    );
+}

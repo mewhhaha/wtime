@@ -5344,7 +5344,7 @@ fn emit_rt_exports_c(
             if active {
                 writeln!(
                     s,
-                    "  if (!ac || !ac->ctx || !ac->mem) {{ if (trap_out) *trap_out = TRAP_HOST; return 2; }}\n\
+                    "  if (!ac || !ac->ctx || !ac->mem || !ac->ctx->in_call) {{ if (trap_out) *trap_out = TRAP_HOST; return 2; }}\n\
                        Ctx *ctx = ac->ctx; uint8_t *mb = ac->mem;\n\
                        {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} }}\n\
                        uint32_t saved_mxcsr = wt_get_mxcsr();\n\

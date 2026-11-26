@@ -135,6 +135,46 @@ impl GcArena {
         let i = self.index(r)?;
         Ok(self.slots[i].object.as_mut().unwrap())
     }
+    pub fn copy_fields(
+        &mut self,
+        src: GcRef,
+        src_range: std::ops::Range<usize>,
+        dst: GcRef,
+        dst_range: std::ops::Range<usize>,
+    ) -> Result<()> {
+        let si = self.index(src)?;
+        let di = self.index(dst)?;
+        let src_len = self.slots[si].object.as_ref().unwrap().fields.len();
+        let dst_len = self.slots[di].object.as_ref().unwrap().fields.len();
+        if src_range.start > src_range.end
+            || dst_range.start > dst_range.end
+            || src_range.end > src_len
+            || dst_range.end > dst_len
+            || src_range.len() != dst_range.len()
+        {
+            return Err(err(ErrorKind::Trap, "out of bounds array access"));
+        }
+        if si == di {
+            let fields = &mut self.slots[di].object.as_mut().unwrap().fields;
+            fields.copy_within(src_range, dst_range.start);
+            return Ok(());
+        }
+        let (src_fields, dst_fields) = if si < di {
+            let (left, right) = self.slots.split_at_mut(di);
+            (
+                &left[si].object.as_ref().unwrap().fields,
+                &mut right[0].object.as_mut().unwrap().fields,
+            )
+        } else {
+            let (left, right) = self.slots.split_at_mut(si);
+            (
+                &right[0].object.as_ref().unwrap().fields,
+                &mut left[di].object.as_mut().unwrap().fields,
+            )
+        };
+        dst_fields[dst_range].copy_from_slice(&src_fields[src_range]);
+        Ok(())
+    }
     pub fn live(&self) -> usize {
         self.live
     }
@@ -438,5 +478,63 @@ mod tests {
         );
         assert_eq!(arena.collect([b]).unwrap().live, 4);
         assert_eq!(arena.collect([]).unwrap().reclaimed, 4);
+    }
+    #[test]
+    fn copy_fields_validates_ranges_for_same_and_distinct_objects() {
+        let mut arena = GcArena::new(1);
+        let mut a = object();
+        a.fields = vec![Value::I32(1), Value::I32(2), Value::I32(3), Value::I32(4)];
+        let mut b = object();
+        b.fields = vec![
+            Value::I32(10),
+            Value::I32(20),
+            Value::I32(30),
+            Value::I32(40),
+        ];
+        let ra = arena.allocate(a, 10).unwrap();
+        let rb = arena.allocate(b, 10).unwrap();
+        // Mismatched lengths and OOB/inverted ranges must trap without mutating either object.
+        for bad in [
+            (0..2, 2..3),
+            (0..5, 0..5),
+            (std::ops::Range { start: 2, end: 1 }, 0..0),
+            (0..2, 3..5),
+        ] {
+            assert_eq!(
+                arena
+                    .copy_fields(ra, bad.0.clone(), ra, bad.1.clone())
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Trap
+            );
+            assert_eq!(
+                arena.copy_fields(ra, bad.0, rb, bad.1).unwrap_err().kind,
+                ErrorKind::Trap
+            );
+        }
+        assert_eq!(
+            arena.get(ra).unwrap().fields,
+            vec![Value::I32(1), Value::I32(2), Value::I32(3), Value::I32(4)]
+        );
+        assert_eq!(
+            arena.get(rb).unwrap().fields,
+            vec![
+                Value::I32(10),
+                Value::I32(20),
+                Value::I32(30),
+                Value::I32(40)
+            ]
+        );
+        // Valid overlapping same-object and distinct-object copies succeed.
+        arena.copy_fields(ra, 0..3, ra, 1..4).unwrap();
+        assert_eq!(
+            arena.get(ra).unwrap().fields,
+            vec![Value::I32(1), Value::I32(1), Value::I32(2), Value::I32(3)]
+        );
+        arena.copy_fields(ra, 1..4, rb, 0..3).unwrap();
+        assert_eq!(
+            arena.get(rb).unwrap().fields,
+            vec![Value::I32(1), Value::I32(2), Value::I32(3), Value::I32(40)]
+        );
     }
 }

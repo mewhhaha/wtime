@@ -4140,7 +4140,7 @@ pub fn try_compute_fn_own_effects(
     n_total: usize,
 ) -> Option<FnOwnEffects> {
     let global_words = module.globals.len().div_ceil(64);
-    let fixed_mem = module.fixed32.is_some();
+    let any_mem_can_grow = module.fixed32.is_none() || !module.extra_memories.is_empty();
     let mut writes_mem = false;
     let mut grows_mem = false;
     let mut writes_all_globals = false;
@@ -4170,7 +4170,7 @@ pub fn try_compute_fn_own_effects(
                 | Op::F64AxpyLoop { .. } => writes_mem = true,
                 Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                     writes_mem = true;
-                    grows_mem = !fixed_mem || !module.extra_memories.is_empty();
+                    grows_mem = any_mem_can_grow;
                 }
                 Op::GlobalSet(g, _) => {
                     let gi = g as usize;
@@ -4193,7 +4193,7 @@ pub fn try_compute_fn_own_effects(
                 }
                 Op::CallIndirect { .. } => {
                     writes_mem = true;
-                    grows_mem = !fixed_mem;
+                    grows_mem = any_mem_can_grow;
                     writes_all_globals = true;
                     writes_all_tables = true;
                 }
@@ -4217,7 +4217,7 @@ pub fn try_compute_fn_own_effects(
             }
             Term::ReturnCallIndirect { .. } | Term::CallIndirectCatch { .. } => {
                 writes_mem = true;
-                grows_mem = !fixed_mem;
+                grows_mem = any_mem_can_grow;
                 writes_all_globals = true;
                 writes_all_tables = true;
             }
@@ -4283,7 +4283,7 @@ where
     let n_imports = module.imports.len();
     let n_total = n_imports + n_defs;
     let global_words = module.globals.len().div_ceil(64);
-    let fixed_mem = module.fixed32.is_some();
+    let any_mem_can_grow = module.fixed32.is_none() || !module.extra_memories.is_empty();
     let flat_gw_len = n_total.checked_mul(global_words);
 
     let alloc_res = (|| -> Option<_> {
@@ -4329,7 +4329,7 @@ where
 
     for fi in 0..n_imports {
         writes_mem[fi] = true;
-        grows_mem[fi] = !fixed_mem;
+        grows_mem[fi] = any_mem_can_grow;
         writes_all_globals[fi] = true;
         writes_all_tables[fi] = true;
     }
@@ -4480,7 +4480,7 @@ where
     let n_imports = module.imports.len();
     let n_total = n_imports + n_defs;
     let global_words = module.globals.len().div_ceil(64);
-    let fixed_mem = module.fixed32.is_some();
+    let any_mem_can_grow = module.fixed32.is_none() || !module.extra_memories.is_empty();
     let flat_gw_len = n_total.checked_mul(global_words);
 
     let alloc_res = (|| -> Option<_> {
@@ -4563,7 +4563,7 @@ where
 
     for fi in 0..n_imports {
         writes_mem[fi] = true;
-        grows_mem[fi] = !fixed_mem;
+        grows_mem[fi] = any_mem_can_grow;
         writes_all_globals[fi] = true;
         writes_all_tables[fi] = true;
     }
@@ -4854,7 +4854,7 @@ pub fn run_licm(
         }
     }
 
-    let fixed_mem = module.fixed32.is_some();
+    let any_mem_can_grow = module.fixed32.is_none() || !module.extra_memories.is_empty();
     let mut guarded_candidates: Vec<(u32, u32, Vec<u32>)> = Vec::new();
     for (li, (hdr, body)) in loops.into_iter().enumerate() {
         if let Some(bg) = budget
@@ -4891,8 +4891,8 @@ pub fn run_licm(
         for &b in &body {
             for inst in &ir.blocks[b as usize].insts {
                 match inst.op {
-                    Op::MemGrow(_) => {
-                        if !fixed_mem {
+                    Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
+                        if any_mem_can_grow {
                             loop_grows_mem = true;
                         }
                     }
@@ -4903,7 +4903,7 @@ pub fn run_licm(
                         }
                     }
                     Op::CallIndirect { .. } => {
-                        if !fixed_mem {
+                        if any_mem_can_grow {
                             loop_grows_mem = true;
                         }
                         loop_writes_all_globals = true;
@@ -4926,6 +4926,31 @@ pub fn run_licm(
                     }
                     _ => {}
                 }
+            }
+            match ir.blocks[b as usize].term {
+                Term::CallIndirectCatch { .. } => {
+                    if any_mem_can_grow {
+                        loop_grows_mem = true;
+                    }
+                    loop_writes_all_globals = true;
+                }
+                Term::CallCatch { func, .. } => {
+                    let f = func as usize;
+                    if effects.grows_mem[f] {
+                        loop_grows_mem = true;
+                    }
+                    if effects.writes_all_globals[f] {
+                        loop_writes_all_globals = true;
+                    } else {
+                        for (dst, &src) in loop_written_globals
+                            .iter_mut()
+                            .zip(effects.written_globals_slice(f).iter())
+                        {
+                            *dst |= src;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -6220,7 +6245,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                 Op::CallIndirect { .. } => {
                     fn_writes_mem = true;
                     blk_writes_mem = true;
-                    if !fixed_mem {
+                    if !fixed_mem || !module.extra_memories.is_empty() {
                         fn_may_grow = true;
                     }
                     fn_writes_all_globals = true;
@@ -6259,6 +6284,49 @@ fn run_dom_gvn_and_bce_with_scratch(
                 }
                 _ => {}
             }
+        }
+        match ir.blocks[b as usize].term {
+            Term::CallIndirectCatch { .. } => {
+                fn_writes_mem = true;
+                blk_writes_mem = true;
+                if !fixed_mem || !module.extra_memories.is_empty() {
+                    fn_may_grow = true;
+                }
+                fn_writes_all_globals = true;
+                fn_writes_any_global = true;
+                fn_writes_all_tables = true;
+            }
+            Term::CallCatch { func, .. } => {
+                let f = func as usize;
+                if effects.writes_mem[f] {
+                    fn_writes_mem = true;
+                    blk_writes_mem = true;
+                }
+                if effects.grows_mem[f] {
+                    fn_may_grow = true;
+                    blk_writes_mem = true;
+                }
+                if effects.writes_all_globals[f] {
+                    fn_writes_all_globals = true;
+                    fn_writes_any_global = true;
+                } else {
+                    for (dst, &src) in fn_written_globals
+                        .iter_mut()
+                        .zip(effects.written_globals_slice(f).iter())
+                    {
+                        if src != 0 {
+                            *dst |= src;
+                            fn_writes_any_global = true;
+                        }
+                    }
+                }
+                if effects.writes_all_tables[f] {
+                    fn_writes_all_tables = true;
+                } else {
+                    fn_written_tables |= effects.written_tables[f];
+                }
+            }
+            _ => {}
         }
         block_writes_mem[b as usize] = blk_writes_mem;
     }
@@ -7027,7 +7095,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                         }
                         Op::CallIndirect { .. } => {
                             st.clear_mem_facts();
-                            if st.module.fixed32.is_none() {
+                            if st.module.fixed32.is_none() || !st.module.extra_memories.is_empty() {
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
                             }
                             st.glob_epoch = st.glob_epoch.wrapping_add(1);
@@ -7772,6 +7840,36 @@ fn run_dom_gvn_and_bce_with_scratch(
 
                 // Compute optional branch-refined range facts for uniquely dominated children.
                 let term_snap = bb.term;
+                // Invalidate memory/global/table/grow GVN facts across catching call terminators
+                // before descending into `ok_bb` / `catch_bb` dominated children (rolled back by `Exit`).
+                match term_snap {
+                    Term::CallCatch { func, .. } => {
+                        let f = func as usize;
+                        if st.effects.writes_mem[f] {
+                            st.clear_mem_facts();
+                        }
+                        if st.effects.grows_mem[f] {
+                            st.grow_epoch = st.grow_epoch.wrapping_add(1);
+                        }
+                        if st.effects.writes_all_globals[f]
+                            || st.effects.written_globals_slice(f).iter().any(|&w| w != 0)
+                        {
+                            st.glob_epoch = st.glob_epoch.wrapping_add(1);
+                        }
+                        if st.effects.writes_all_tables[f] || st.effects.written_tables[f] != 0 {
+                            st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
+                        }
+                    }
+                    Term::CallIndirectCatch { .. } => {
+                        st.clear_mem_facts();
+                        if st.module.fixed32.is_none() || !st.module.extra_memories.is_empty() {
+                            st.grow_epoch = st.grow_epoch.wrapping_add(1);
+                        }
+                        st.glob_epoch = st.glob_epoch.wrapping_add(1);
+                        st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
+                    }
+                    _ => {}
+                }
                 // Push dom_children in reverse so they visit in forward order.
                 for &child in dom.dom_children(bid).iter().rev() {
                     let mut ef = EdgeFact::None;
@@ -11620,7 +11718,10 @@ fn forward_loop_carried_scaled_loads(ir: &mut IrFunc, dom: &CfgDom, module: &X64
         // Candidate load block: `hdr`, or `hdr`'s unique single-pred in-loop body block when `hdr`
         // itself performs no memory writes/calls.
         let mut cand_bbs: Vec<u32> = vec![hdr];
-        let hdr_pure = !ir.blocks[hdr as usize]
+        let hdr_pure = !matches!(
+            ir.blocks[hdr as usize].term,
+            Term::CallCatch { .. } | Term::CallIndirectCatch { .. }
+        ) && !ir.blocks[hdr as usize]
             .insts
             .iter()
             .any(|ins| is_mem_write_or_call(&ins.op));
@@ -14064,6 +14165,14 @@ fn peel_boundary_clamped_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                 {
                     safe_cfg = false;
                 }
+                Term::CallCatch {
+                    ok_bb, catch_bb, ..
+                }
+                | Term::CallIndirectCatch {
+                    ok_bb, catch_bb, ..
+                } if ok_bb == bi_id || catch_bb == bi_id => {
+                    safe_cfg = false;
+                }
                 _ => {}
             }
             if !safe_cfg {
@@ -14075,159 +14184,50 @@ fn peel_boundary_clamped_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
         }
 
         let orig_insts: Vec<Inst> = ir.blocks[bi].insts.clone();
+        let orig_nvals = ir.val_tys.len();
 
         // Helper to clone `orig_insts` substituting `iv_param -> iv_val` and optionally folding
-        // boundary `CmpSelect`s + `(j, j+1, j+2)` load/store addressing for the interior loop.
+        // boundary `CmpSelect`s + `(j, j+1, j+2, j+3)` load/store addressing for the interior loop.
         let clone_body = |iv_val: Val, interior_j: Option<Val>, ir_ref: &mut IrFunc| -> Vec<Inst> {
-            let mut vmap: HashMap<Val, Val> = fx_map_cap(orig_insts.len() + 2);
-            vmap.insert(iv_param, iv_val);
+            let mut vmap: Vec<Val> = (0..orig_nvals as u32).map(Val).collect();
+            vmap[iv_param.0 as usize] = iv_val;
             let mut j_disp: HashMap<Val, u64> = fx_map();
             if let Some(jv) = interior_j {
                 j_disp.insert(jv, 0);
                 j_disp.insert(iv_val, 1);
             }
-            let map_v = |v: Val, m: &HashMap<Val, Val>| m.get(&v).copied().unwrap_or(v);
             let mut out = Vec::with_capacity(orig_insts.len());
             for ins in &orig_insts {
                 if interior_j.is_some()
                     && let Some(r) = ins.res
                     && let Some(chosen) = classify_interior_select(ins.op)
                 {
-                    let mapped = map_v(chosen, &vmap);
-                    vmap.insert(r, mapped);
+                    vmap[r.0 as usize] = vmap[chosen.0 as usize];
                     continue;
                 }
                 let mut op = ins.op;
-                // Rewrite operand uses through `vmap` (all ops here have no ValRange args/rets).
-                match &mut op {
-                    Op::I32Eqz(x)
-                    | Op::I64Eqz(x)
-                    | Op::I32Clz(x)
-                    | Op::I32Ctz(x)
-                    | Op::I32Popcnt(x)
-                    | Op::I64Clz(x)
-                    | Op::I64Ctz(x)
-                    | Op::I64Popcnt(x)
-                    | Op::I32WrapI64(x)
-                    | Op::I64ExtendI32S(x)
-                    | Op::I64ExtendI32U(x)
-                    | Op::I32Extend8S(x)
-                    | Op::I32Extend16S(x)
-                    | Op::I64Extend8S(x)
-                    | Op::I64Extend16S(x)
-                    | Op::I64Extend32S(x)
-                    | Op::I32BinImm(_, x, _)
-                    | Op::I64BinImm(_, x, _)
-                    | Op::I32CmpImm(_, x, _)
-                    | Op::I64CmpImm(_, x, _)
-                    | Op::F32Un(_, x)
-                    | Op::F64Un(_, x)
-                    | Op::F32DemoteF64(x)
-                    | Op::F64PromoteF32(x)
-                    | Op::F32ConvertI32S(x)
-                    | Op::F32ConvertI32U(x)
-                    | Op::F32ConvertI64S(x)
-                    | Op::F32ConvertI64U(x)
-                    | Op::F64ConvertI32S(x)
-                    | Op::F64ConvertI32U(x)
-                    | Op::F64ConvertI64S(x)
-                    | Op::F64ConvertI64U(x)
-                    | Op::I32ReinterpretF32(x)
-                    | Op::I64ReinterpretF64(x)
-                    | Op::F32ReinterpretI32(x)
-                    | Op::F64ReinterpretI64(x)
-                    | Op::Trunc(_, x)
-                    | Op::V128Splat { val: x, .. }
-                    | Op::V128ExtractLane { v: x, .. }
-                    | Op::V128Un { a: x, .. }
-                    | Op::V128ToI32 { a: x, .. } => {
-                        *x = map_v(*x, &vmap);
-                    }
-                    Op::I32Bin(_, x, y)
-                    | Op::I64Bin(_, x, y)
-                    | Op::I32Cmp(_, x, y)
-                    | Op::I64Cmp(_, x, y)
-                    | Op::F32Cmp(_, x, y)
-                    | Op::F64Cmp(_, x, y)
-                    | Op::F32Bin(_, x, y)
-                    | Op::F64Bin(_, x, y)
-                    | Op::V128ReplaceLane { v: x, x: y, .. }
-                    | Op::V128Shuffle { a: x, b: y, .. }
-                    | Op::V128Bin { a: x, b: y, .. }
-                    | Op::V128Shift { v: x, shift: y, .. } => {
-                        *x = map_v(*x, &vmap);
-                        *y = map_v(*y, &vmap);
-                    }
-                    Op::Select { cond, a, b } => {
-                        *cond = map_v(*cond, &vmap);
-                        *a = map_v(*a, &vmap);
-                        *b = map_v(*b, &vmap);
-                    }
-                    Op::CmpSelect {
-                        kind: ck,
-                        a,
-                        b,
-                        tv,
-                        fv,
-                    } => {
-                        *a = map_v(*a, &vmap);
-                        if !matches!(ck, CmpBranchKind::I32Imm(..) | CmpBranchKind::I64Imm(..)) {
-                            *b = map_v(*b, &vmap);
-                        } else {
-                            *b = *a;
+                // Exhaustively rewrite all operand uses through `vmap` (none of the ops allowed
+                // by `insts_safe` reference `val_pool`, and `rewrite_op_uses` covers every `Op`).
+                rewrite_op_uses(&mut op, &mut ir_ref.val_pool, &vmap);
+                if let Some(jv) = interior_j {
+                    match &mut op {
+                        Op::Load { addr, offset, .. }
+                        | Op::Store { addr, offset, .. }
+                        | Op::V128LoadLane { addr, offset, .. } => {
+                            if let Some(&d) = j_disp.get(addr)
+                                && let Some(noff) = offset.checked_add(d)
+                                && noff <= i32::MAX as u64
+                            {
+                                *addr = jv;
+                                *offset = noff;
+                            }
                         }
-                        *tv = map_v(*tv, &vmap);
-                        *fv = map_v(*fv, &vmap);
+                        _ => {}
                     }
-                    Op::Load { addr, offset, .. } => {
-                        *addr = map_v(*addr, &vmap);
-                        if let Some(jv) = interior_j
-                            && let Some(&d) = j_disp.get(addr)
-                            && let Some(noff) = offset.checked_add(d)
-                            && noff <= i32::MAX as u64
-                        {
-                            *addr = jv;
-                            *offset = noff;
-                        }
-                    }
-                    Op::Store {
-                        addr, val, offset, ..
-                    } => {
-                        *addr = map_v(*addr, &vmap);
-                        *val = map_v(*val, &vmap);
-                        if let Some(jv) = interior_j
-                            && let Some(&d) = j_disp.get(addr)
-                            && let Some(noff) = offset.checked_add(d)
-                            && noff <= i32::MAX as u64
-                        {
-                            *addr = jv;
-                            *offset = noff;
-                        }
-                    }
-                    Op::V128LoadLane {
-                        addr, vec, offset, ..
-                    } => {
-                        *addr = map_v(*addr, &vmap);
-                        *vec = map_v(*vec, &vmap);
-                        if let Some(jv) = interior_j
-                            && let Some(&d) = j_disp.get(addr)
-                            && let Some(noff) = offset.checked_add(d)
-                            && noff <= i32::MAX as u64
-                        {
-                            *addr = jv;
-                            *offset = noff;
-                        }
-                    }
-                    Op::ConstI32(_)
-                    | Op::ConstI64(_)
-                    | Op::ConstF32(_)
-                    | Op::ConstF64(_)
-                    | Op::ConstV128(_)
-                    | Op::GlobalGet(_)
-                    | Op::MemSize => {}
-                    _ => {}
                 }
                 // Track `j + k` affine relationships for interior load/store offset folding!
+                // Restrict to `0..=3`: in the interior loop `j <= limit - 3 <= u32::MAX - 3`,
+                // so `j + 0..=3` provably never wraps `u32` (whereas `j + 4` wraps at `limit == u32::MAX`).
                 if interior_j.is_some()
                     && let Some(r) = ins.res
                 {
@@ -14236,11 +14236,11 @@ fn peel_boundary_clamped_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                             if let Some(&d) = j_disp.get(&base) {
                                 let sum = (d as i64) + i64::from(k);
                                 if sum == 0 {
-                                    vmap.insert(r, interior_j.unwrap());
+                                    vmap[r.0 as usize] = interior_j.unwrap();
                                     continue;
-                                } else if (0..=4).contains(&sum) {
+                                } else if (0..=3).contains(&sum) {
                                     let nr = ir_ref.push_val(ir_ref.val_tys[r.0 as usize]);
-                                    vmap.insert(r, nr);
+                                    vmap[r.0 as usize] = nr;
                                     j_disp.insert(nr, sum as u64);
                                     out.push(Inst { res: Some(nr), op });
                                     continue;
@@ -14251,11 +14251,11 @@ fn peel_boundary_clamped_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                             if let Some(&d) = j_disp.get(&base) {
                                 let diff = (d as i64) - i64::from(k);
                                 if diff == 0 {
-                                    vmap.insert(r, interior_j.unwrap());
+                                    vmap[r.0 as usize] = interior_j.unwrap();
                                     continue;
-                                } else if (0..=4).contains(&diff) {
+                                } else if (0..=3).contains(&diff) {
                                     let nr = ir_ref.push_val(ir_ref.val_tys[r.0 as usize]);
-                                    vmap.insert(r, nr);
+                                    vmap[r.0 as usize] = nr;
                                     j_disp.insert(nr, diff as u64);
                                     out.push(Inst { res: Some(nr), op });
                                     continue;
@@ -14267,7 +14267,7 @@ fn peel_boundary_clamped_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                 }
                 let new_res = ins.res.map(|r| {
                     let nr = ir_ref.push_val(ir_ref.val_tys[r.0 as usize]);
-                    vmap.insert(r, nr);
+                    vmap[r.0 as usize] = nr;
                     nr
                 });
                 out.push(Inst { res: new_res, op });
@@ -14945,9 +14945,10 @@ fn vectorize_f64_axpy_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
         };
 
         // Validate body ops: exactly 1 F64 Store, 2 F64 Loads, 1 F64 Mul, 1 F64 Add/Sub,
-        // and only pure I32 address/IV arithmetic (plus optional BoundsChecks).
+        // and only pure I32 address/IV arithmetic (plus optional subsumed BoundsChecks).
         let mut store_info: Option<(Val, Val, u64)> = None;
         let mut load_count = 0usize;
+        let mut bounds_checks: Vec<(Val, u64)> = Vec::new();
         let mut bad_op = false;
         for ins in &bb.insts {
             match ins.op {
@@ -14966,8 +14967,10 @@ fn vectorize_f64_axpy_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                 } => {
                     load_count += 1;
                 }
-                Op::BoundsCheck { .. }
-                | Op::ConstI32(_)
+                Op::BoundsCheck { addr, end_off, .. } => {
+                    bounds_checks.push((addr, end_off));
+                }
+                Op::ConstI32(_)
                 | Op::I32Bin(IntBinOp::Add | IntBinOp::Shl | IntBinOp::Mul, _, _)
                 | Op::I32BinImm(IntBinOp::Add | IntBinOp::Shl | IntBinOp::Mul, _, _)
                 | Op::F64Bin(FloatBinOp::Add | FloatBinOp::Sub | FloatBinOp::Mul, _, _) => {}
@@ -14996,17 +14999,17 @@ fn vectorize_f64_axpy_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                 }) if addr == dst_addr_v && offset == dst_store_off
             )
         };
-        let (prod_val, is_sub) = match find_inst_op(out_val) {
+        let (dst_load_v, prod_val, is_sub) = match find_inst_op(out_val) {
             Some(Op::F64Bin(FloatBinOp::Add, x, y)) => {
                 if is_dst_load(x) {
-                    (y, false)
+                    (x, y, false)
                 } else if is_dst_load(y) {
-                    (x, false)
+                    (y, x, false)
                 } else {
                     continue;
                 }
             }
-            Some(Op::F64Bin(FloatBinOp::Sub, x, y)) if is_dst_load(x) => (y, true),
+            Some(Op::F64Bin(FloatBinOp::Sub, x, y)) if is_dst_load(x) => (x, y, true),
             _ => continue,
         };
 
@@ -15025,18 +15028,30 @@ fn vectorize_f64_axpy_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                 _ => None,
             }
         };
-        let (src_addr_v, src_load_off, scale_v) = if let Some((sa, so)) = extract_src_load(mx)
+        let (src_load_v, src_addr_v, src_load_off, scale_v) = if let Some((sa, so)) =
+            extract_src_load(mx)
             && !is_in_bb(my)
         {
-            (sa, so, my)
+            (mx, sa, so, my)
         } else if let Some((sa, so)) = extract_src_load(my)
             && !is_in_bb(mx)
         {
-            (sa, so, mx)
+            (my, sa, so, mx)
         } else {
             continue;
         };
-        if src_load_off > u32::MAX as u64 || ir.val_tys[scale_v.0 as usize] != Ty::F64 {
+        // Both `Load` instructions in `bb` must be accounted for (preventing an unrelated
+        // potentially-trapping 2nd load from being silently dropped when `dst_load_v == src_load_v`),
+        // and every `BoundsCheck` must be subsumed by either the checked `dst` or `src` access.
+        let bcs_subsumed = bounds_checks.iter().all(|&(bc_addr, bc_end)| {
+            (bc_addr == dst_addr_v && bc_end <= dst_store_off.saturating_add(8))
+                || (bc_addr == src_addr_v && bc_end <= src_load_off.saturating_add(8))
+        });
+        if dst_load_v == src_load_v
+            || !bcs_subsumed
+            || src_load_off > u32::MAX as u64
+            || ir.val_tys[scale_v.0 as usize] != Ty::F64
+        {
             continue;
         }
 
@@ -18054,6 +18069,31 @@ where
             let f = fi as usize;
             if f >= n_imports && f - n_imports < n_defs {
                 cannot_elide[f - n_imports] = true;
+            }
+        }
+    }
+    if module.uses_call_ref || module.uses_dyn_ci {
+        let mut dyn_or_ref_sigs: Vec<u32> = Vec::new();
+        for ci in &module.ci_sigs {
+            if ci.is_dynamic || ci.is_call_ref {
+                if dyn_or_ref_sigs.len() == dyn_or_ref_sigs.capacity()
+                    && dyn_or_ref_sigs.try_reserve(1).is_err()
+                {
+                    return Ok(None);
+                }
+                dyn_or_ref_sigs.push(ci.canon_sig);
+            }
+        }
+        dyn_or_ref_sigs.sort_unstable();
+        dyn_or_ref_sigs.dedup();
+        if !dyn_or_ref_sigs.is_empty() {
+            for (bi, flag) in cannot_elide.iter_mut().enumerate() {
+                if dyn_or_ref_sigs
+                    .binary_search(&module.func_canon_sig[n_imports + bi])
+                    .is_ok()
+                {
+                    *flag = true;
+                }
             }
         }
     }

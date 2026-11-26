@@ -1753,8 +1753,8 @@ impl<'a> LowerA64<'a> {
                     } else if disp < 0 && disp > -4096 {
                         self.asm.sub_imm(is64, d, d, (-disp) as u16);
                     } else {
-                        self.asm.mov_imm64(SGP1, i64::from(disp) as u64);
-                        self.asm.add_r(is64, d, d, SGP1);
+                        self.asm.mov_imm64(SGP3, i64::from(disp) as u64);
+                        self.asm.add_r(is64, d, d, SGP3);
                     }
                 }
                 self.gp_commit(r, d);
@@ -2133,9 +2133,9 @@ impl<'a> LowerA64<'a> {
                     );
                     self.asm.uxtw(SGP2, ir);
                     self.asm.lsl_imm(true, SGP2, SGP2, 3);
-                    self.asm.add_r(true, SGP3, SGP3, SGP2);
+                    self.asm.add_r(true, SGP2, SGP3, SGP2);
                     let vr = self.gp_read(val, SGP1);
-                    self.asm.str_uimm(true, vr, SGP3, 0);
+                    self.asm.str_uimm(true, vr, SGP2, 0);
                 }
             }
             Op::BoundsCheck {
@@ -2669,34 +2669,42 @@ impl<'a> LowerA64<'a> {
                     }
                 } else {
                     let (ptr, uimm) = self.compute_mem_base_uimm(ar, offset, kind.bytes());
+                    // Preserve `ptr` in `SGP2` before `gp_read`/`fp_read`, since large spill
+                    // offsets in `emit_load_off` clobber `SGP3`.
+                    let ptr_safe = if ptr == SGP3 {
+                        self.asm.mov_r(true, SGP2, ptr);
+                        SGP2
+                    } else {
+                        ptr
+                    };
                     match kind {
                         StoreKind::I8 => {
                             let vr = self.gp_read(val, SGP1);
-                            self.asm.strb_uimm(vr, ptr, uimm);
+                            self.asm.strb_uimm(vr, ptr_safe, uimm);
                         }
                         StoreKind::I16 => {
                             let vr = self.gp_read(val, SGP1);
-                            self.asm.strh_uimm(vr, ptr, uimm);
+                            self.asm.strh_uimm(vr, ptr_safe, uimm);
                         }
                         StoreKind::I32 => {
                             let vr = self.gp_read(val, SGP1);
-                            self.asm.str_uimm(false, vr, ptr, uimm);
+                            self.asm.str_uimm(false, vr, ptr_safe, uimm);
                         }
                         StoreKind::I64 => {
                             let vr = self.gp_read(val, SGP1);
-                            self.asm.str_uimm(true, vr, ptr, uimm);
+                            self.asm.str_uimm(true, vr, ptr_safe, uimm);
                         }
                         StoreKind::F32 => {
                             let vr = self.fp_read(val, SFP1);
-                            self.asm.str_s_uimm(vr, ptr, uimm);
+                            self.asm.str_s_uimm(vr, ptr_safe, uimm);
                         }
                         StoreKind::F64 => {
                             let vr = self.fp_read(val, SFP1);
-                            self.asm.str_d_uimm(vr, ptr, uimm);
+                            self.asm.str_d_uimm(vr, ptr_safe, uimm);
                         }
                         StoreKind::V128 => {
                             let vr = self.fp_read(val, SFP1);
-                            self.asm.str_q_uimm(vr, ptr, uimm);
+                            self.asm.str_q_uimm(vr, ptr_safe, uimm);
                         }
                     }
                 }
@@ -2733,34 +2741,42 @@ impl<'a> LowerA64<'a> {
                 }
                 let (ptr, uimm) =
                     self.compute_scaled_mem_base_uimm(addr, ar, scale, offset, kind.bytes());
+                // Preserve `ptr` in `SGP2` before `gp_read`/`fp_read`, since large spill
+                // offsets in `emit_load_off` clobber `SGP3`.
+                let ptr_safe = if ptr == SGP3 {
+                    self.asm.mov_r(true, SGP2, ptr);
+                    SGP2
+                } else {
+                    ptr
+                };
                 match kind {
                     StoreKind::I8 => {
                         let vr = self.gp_read(val, SGP1);
-                        self.asm.strb_uimm(vr, ptr, uimm);
+                        self.asm.strb_uimm(vr, ptr_safe, uimm);
                     }
                     StoreKind::I16 => {
                         let vr = self.gp_read(val, SGP1);
-                        self.asm.strh_uimm(vr, ptr, uimm);
+                        self.asm.strh_uimm(vr, ptr_safe, uimm);
                     }
                     StoreKind::I32 => {
                         let vr = self.gp_read(val, SGP1);
-                        self.asm.str_uimm(false, vr, ptr, uimm);
+                        self.asm.str_uimm(false, vr, ptr_safe, uimm);
                     }
                     StoreKind::I64 => {
                         let vr = self.gp_read(val, SGP1);
-                        self.asm.str_uimm(true, vr, ptr, uimm);
+                        self.asm.str_uimm(true, vr, ptr_safe, uimm);
                     }
                     StoreKind::F32 => {
                         let vr = self.fp_read(val, SFP1);
-                        self.asm.str_s_uimm(vr, ptr, uimm);
+                        self.asm.str_s_uimm(vr, ptr_safe, uimm);
                     }
                     StoreKind::F64 => {
                         let vr = self.fp_read(val, SFP1);
-                        self.asm.str_d_uimm(vr, ptr, uimm);
+                        self.asm.str_d_uimm(vr, ptr_safe, uimm);
                     }
                     StoreKind::V128 => {
                         let vr = self.fp_read(val, SFP1);
-                        self.asm.str_q_uimm(vr, ptr, uimm);
+                        self.asm.str_q_uimm(vr, ptr_safe, uimm);
                     }
                 }
             }
@@ -2820,23 +2836,30 @@ impl<'a> LowerA64<'a> {
                     self.emit_bounds_check(ar, offset.saturating_add(u64::from(width)));
                 }
                 let (ptr, uimm) = self.compute_mem_base_uimm(ar, offset, u64::from(width));
+                // Preserve `ptr` in `SGP2` before `fp_read`, since large spill offsets clobber `SGP3`.
+                let ptr_safe = if ptr == SGP3 {
+                    self.asm.mov_r(true, SGP2, ptr);
+                    SGP2
+                } else {
+                    ptr
+                };
                 let vr = self.fp_read(vec, SFP1);
                 match width {
                     1 => {
                         self.asm.umov(0, SGP1, vr, lane);
-                        self.asm.strb_uimm(SGP1, ptr, uimm);
+                        self.asm.strb_uimm(SGP1, ptr_safe, uimm);
                     }
                     2 => {
                         self.asm.umov(1, SGP1, vr, lane);
-                        self.asm.strh_uimm(SGP1, ptr, uimm);
+                        self.asm.strh_uimm(SGP1, ptr_safe, uimm);
                     }
                     4 => {
                         self.asm.umov(2, SGP1, vr, lane);
-                        self.asm.str_uimm(false, SGP1, ptr, uimm);
+                        self.asm.str_uimm(false, SGP1, ptr_safe, uimm);
                     }
                     8 => {
                         self.asm.umov(3, SGP1, vr, lane);
-                        self.asm.str_uimm(true, SGP1, ptr, uimm);
+                        self.asm.str_uimm(true, SGP1, ptr_safe, uimm);
                     }
                     _ => return Err(format!("aarch64: invalid V128StoreLane width {width}")),
                 }
@@ -4178,31 +4201,57 @@ impl<'a> LowerA64<'a> {
                 // v128.bitselect(a, b, c) = (a & c) | (b & ~c) = bsl(c, a, b)
                 let r = res.unwrap();
                 let d = self.fp_write_reg(r);
-                let ar = self.fp_read(a, SFP1);
-                let br = self.fp_read(b, SFP2);
-                let cr = match self.loc(c) {
-                    A64Loc::Fp(v) => v,
-                    A64Loc::Spill(off) => {
-                        emit_load_off(&mut self.asm, Ty::V128, None, Some(d), Reg::SP, off, SGP3);
-                        d
+                if d != SFP1 && d != SFP2 {
+                    // `d` is a real FP register: save `a`/`b` out of `d` BEFORE placing `c` into `d`.
+                    let ar = self.fp_read(a, SFP1);
+                    let a_use = if ar == d {
+                        self.asm.mov_16b(SFP1, ar);
+                        SFP1
+                    } else {
+                        ar
+                    };
+                    let br = self.fp_read(b, SFP2);
+                    let b_use = if br == d {
+                        self.asm.mov_16b(SFP2, br);
+                        SFP2
+                    } else {
+                        br
+                    };
+                    match self.loc(c) {
+                        A64Loc::Fp(v) => {
+                            if v != d {
+                                self.asm.mov_16b(d, v);
+                            }
+                        }
+                        A64Loc::Spill(off) => {
+                            emit_load_off(
+                                &mut self.asm,
+                                Ty::V128,
+                                None,
+                                Some(d),
+                                Reg::SP,
+                                off,
+                                SGP3,
+                            );
+                        }
+                        A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
                     }
-                    A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
-                };
-                // Save `a`/`b` if aliasing `d` before moving `c` into `d`.
-                let a_use = if d == ar {
-                    self.asm.mov_16b(SFP1, ar);
-                    SFP1
+                    self.asm.bsl_16b(d, a_use, b_use);
                 } else {
-                    ar
-                };
-                let b_use = if d == br {
-                    self.asm.mov_16b(SFP2, br);
-                    SFP2
-                } else {
-                    br
-                };
-                self.asm.mov_16b(d, cr);
-                self.asm.bsl_16b(d, a_use, b_use);
+                    // Spilled destination (`d == SFP1`): evaluate `(a & c) | (b & ~c)` using only
+                    // `SFP1`, `SFP2`, and `[CTX_REG + OFF_SCRATCH_V128]` so arbitrary spill/alias
+                    // combinations never overwrite an operand or live FP register.
+                    let ar = self.fp_read(a, SFP1);
+                    let cr = self.fp_read(c, SFP2);
+                    self.asm.and_16b(SFP1, ar, cr);
+                    self.asm
+                        .str_q_uimm(SFP1, CTX_REG, crate::x64::OFF_SCRATCH_V128 as u32);
+                    let br = self.fp_read(b, SFP1);
+                    self.asm.bic_16b(SFP1, br, cr);
+                    self.asm
+                        .ldr_q_uimm(SFP2, CTX_REG, crate::x64::OFF_SCRATCH_V128 as u32);
+                    self.asm.orr_16b(d, SFP1, SFP2);
+                }
                 self.fp_commit(r, d);
             }
             Op::Call { func, args, rets } => self.emit_call_abi(args, rets, None, Some(func))?,

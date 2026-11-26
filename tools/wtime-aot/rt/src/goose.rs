@@ -39,6 +39,8 @@ pub struct State {
 
 /// The default of `Policy::output_limit`.
 pub const OUTPUT_LIMIT: u64 = 256 << 20;
+/// Maximum standard input bytes buffered before guest execution (256 MiB).
+pub const INPUT_LIMIT: u64 = 256 << 20;
 
 /// What the module may reach outside itself beyond its input, output,
 /// arguments and the clock. Nothing by default: the operator grants
@@ -314,6 +316,9 @@ fn write64(guest: &mut dyn Guest, pointer: i64, value: i128) -> R<()> {
 
 fn print(guest: &mut dyn Guest, text: &[u8]) -> R<Out> {
     charge(guest, text.len() as u64)?;
+    if guest.state().out.try_reserve(text.len()).is_err() {
+        return Err(fail(guest, "ResourceLimit: memory allocation failed"));
+    }
     guest.state().out.extend_from_slice(text);
     Ok(Out::Nothing)
 }
@@ -346,8 +351,17 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
     let handler: Handler = match (module, name) {
         ("goose", "write") => |g, values| {
             let (pointer, length) = (integer(g, values, 0)?, integer(g, values, 1)?);
-            let text = read(g, address(pointer), address(length))?;
-            print(g, &text)
+            let (ptr, len) = (address(pointer), address(length));
+            if ptr < 0 || len < 0 {
+                return Err(fail(g, "negative host address"));
+            }
+            charge(g, u64::try_from(len).unwrap_or(u64::MAX))?;
+            let text = read(g, ptr, len)?;
+            if g.state().out.try_reserve(text.len()).is_err() {
+                return Err(fail(g, "ResourceLimit: memory allocation failed"));
+            }
+            g.state().out.extend_from_slice(&text);
+            Ok(Out::Nothing)
         },
         ("goose", "print_i64") => |g, values| {
             let text = integer(g, values, 0)?.to_string();
@@ -582,17 +596,24 @@ fn os_read_file(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     };
     // At most the output limit: a larger file is reported unreadable.
     let limit = guest.state().policy.output_limit;
-    let read = fs::File::open(file).and_then(|file| {
-        let mut contents = Vec::new();
-        file.take(limit.saturating_add(1))
-            .read_to_end(&mut contents)?;
-        Ok(contents)
+    let directories = guest.state().policy.directories.clone();
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    no_follow_nonblock(&mut options);
+    let read = verified_open_target(&file, &directories).and_then(|(dir_guard, target)| {
+        let result = options.open(&target).and_then(|file| {
+            if !verify_open_fd_allowed(&file, &directories) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "path outside allowed directories",
+                ));
+            }
+            read_bounded_bytes(file, limit).map_err(std::io::Error::other)
+        });
+        drop(dir_guard);
+        result
     });
-    match read
-        .ok()
-        .filter(|contents| contents.len() as u64 <= limit)
-        .ok_or(())
-    {
+    match read {
         Ok(contents) => {
             append_bytes(guest, control, &contents)?;
             Ok(Out::Integer(1))
@@ -611,31 +632,196 @@ fn os_write_file(guest: &mut dyn Guest, values: &[Val], append: bool) -> R<Out> 
     if path.contains(&0) {
         return Err(fail(guest, "embedded null byte"));
     }
-    let mut options = fs::OpenOptions::new();
-    if append {
-        options.append(true).create(true);
-    } else {
-        options.write(true).create(true).truncate(true);
-    }
-    let Some(file) = guest.state().policy.file(&path) else {
+    let Some(file_path) = guest.state().policy.file(&path) else {
         return Ok(Out::Integer(0));
     };
-    // The checked path is opened without following a link in its last
-    // component, should one appear there after the check.
-    no_follow(&mut options);
-    let written = options
-        .open(file)
-        .and_then(|mut file| file.write_all(&contents));
+    let directories = guest.state().policy.directories.clone();
+    // Open and verify the parent directory fd first so intermediate-directory symlink swaps
+    // cannot redirect either existing-file opens or `create_new` outside the granted directories,
+    // and open existing files without O_TRUNC before post-open fd verification runs.
+    let mut existing_opts = fs::OpenOptions::new();
+    existing_opts.write(true).append(append);
+    no_follow_nonblock(&mut existing_opts);
+    let written = verified_open_target(&file_path, &directories).and_then(|(dir_guard, target)| {
+        let result = match existing_opts.open(&target) {
+            Ok(mut f) => {
+                if !verify_open_fd_allowed(&f, &directories) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "path outside allowed directories",
+                    ))
+                } else {
+                    let trunc = if append { Ok(()) } else { f.set_len(0) };
+                    trunc.and_then(|()| f.write_all(&contents))
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut create_opts = fs::OpenOptions::new();
+                create_opts.write(true).create_new(true);
+                no_follow_nonblock(&mut create_opts);
+                create_opts.open(&target).and_then(|mut f| {
+                    if !verify_open_fd_allowed(&f, &directories) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "path outside allowed directories",
+                        ));
+                    }
+                    f.write_all(&contents)
+                })
+            }
+            Err(e) => Err(e),
+        };
+        drop(dir_guard);
+        result
+    });
     Ok(Out::Integer(written.is_ok().into()))
 }
 
-/// O_NOFOLLOW, where its value is known.
-fn no_follow(options: &mut fs::OpenOptions) {
+/// Opens and verifies `file_path`'s parent directory on Linux so subsequent opens go through
+/// `/proc/self/fd/<dir_fd>/<leaf>`, jumping directly to the verified directory inode without
+/// re-traversing intermediate path components that could be swapped for symlinks.
+fn verified_open_target(
+    file_path: &Path,
+    directories: &[PathBuf],
+) -> std::io::Result<(Option<fs::File>, PathBuf)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::io::AsRawFd as _;
+        let Some(parent) = file_path.parent() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "missing parent directory",
+            ));
+        };
+        let Some(leaf) = file_path.file_name() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "invalid file name",
+            ));
+        };
+        let mut dir_opts = fs::OpenOptions::new();
+        dir_opts.read(true);
+        dir_open_flags(&mut dir_opts);
+        let dir_file = dir_opts.open(parent)?;
+        let meta = dir_file.metadata()?;
+        if !meta.is_dir() || meta.nlink() == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "parent is not a live directory",
+            ));
+        }
+        let actual_dir = fs::read_link(format!("/proc/self/fd/{}", dir_file.as_raw_fd()))?;
+        if !directories.iter().any(|dir| actual_dir.starts_with(dir)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "parent directory outside allowed directories",
+            ));
+        }
+        let target = PathBuf::from(format!("/proc/self/fd/{}", dir_file.as_raw_fd())).join(leaf);
+        Ok((Some(dir_file), target))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = directories;
+        Ok((None, file_path.to_path_buf()))
+    }
+}
+
+/// Verifies that an already-opened file descriptor refers to a live regular file whose
+/// kernel-resolved path lies inside one of `directories` (closing intermediate-directory
+/// symlink races on Linux without using `unsafe`).
+fn verify_open_fd_allowed(file: &fs::File, directories: &[PathBuf]) -> bool {
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::io::AsRawFd as _;
+        if meta.nlink() == 0 {
+            return false;
+        }
+        let proc_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        let Ok(actual) = fs::read_link(&proc_path) else {
+            return false;
+        };
+        directories.iter().any(|dir| actual.starts_with(dir))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = directories;
+        true
+    }
+}
+
+/// Reads at most `limit` bytes from `reader` using fallible allocations.
+fn read_bounded_bytes<R: Read>(mut reader: R, limit: u64) -> Result<Vec<u8>, &'static str> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => return Ok(out),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err("I/O read error"),
+        };
+        if (out.len() as u64).saturating_add(n as u64) > limit {
+            return Err("ResourceLimit: input limit");
+        }
+        out.try_reserve(n)
+            .map_err(|_| "ResourceLimit: memory allocation failed")?;
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
+/// `O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY` on Linux.
+#[cfg(target_os = "linux")]
+fn dir_open_flags(options: &mut fs::OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
-    options.custom_flags(0o400000);
-    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
-    options.custom_flags(0o100000);
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
+    options.custom_flags(0o40000 | 0o100000 | 0o4000 | 0o400);
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )))]
+    options.custom_flags(0o200000 | 0o400000 | 0o4000 | 0o400);
+}
+
+/// `O_NOFOLLOW | O_NONBLOCK | O_NOCTTY` on Linux (prevents final-symlink following and
+/// blocking on swapped FIFOs/devices), `O_NOFOLLOW` on macOS.
+fn no_follow_nonblock(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        )
+    ))]
+    options.custom_flags(0o100000 | 0o4000 | 0o400);
+    #[cfg(all(
+        target_os = "linux",
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        ))
+    ))]
+    options.custom_flags(0o400000 | 0o4000 | 0o400);
     #[cfg(target_os = "macos")]
     options.custom_flags(0x100);
     let _ = options;
@@ -656,13 +842,20 @@ fn os_write(guest: &mut dyn Guest, values: &[Val], error: bool) -> R<Out> {
     let (pointer, length) = Arguments::new(values, 1).slice(guest)?;
     charge(guest, u64::try_from(length).unwrap_or(u64::MAX))?;
     let text = read(guest, pointer, length)?;
-    let state = guest.state();
-    if error {
-        &mut state.err
+    let reserved = if error {
+        guest.state().err.try_reserve(text.len())
     } else {
-        &mut state.out
+        guest.state().out.try_reserve(text.len())
+    };
+    if reserved.is_err() {
+        return Err(fail(guest, "ResourceLimit: memory allocation failed"));
     }
-    .extend_from_slice(&text);
+    let buf = if error {
+        &mut guest.state().err
+    } else {
+        &mut guest.state().out
+    };
+    buf.extend_from_slice(&text);
     Ok(Out::Nothing)
 }
 
@@ -995,8 +1188,19 @@ pub fn main<G: Guest + 'static>(
             let margin = (stack_bytes / 8).max(4 << 20);
             STACK_FLOOR
                 .with(|floor| floor.set(here.saturating_sub(stack_bytes).saturating_add(margin)));
-            let mut input = Vec::new();
-            let _ = std::io::stdin().lock().read_to_end(&mut input);
+            let input = match read_bounded_bytes(std::io::stdin().lock(), INPUT_LIMIT) {
+                Ok(bytes) => bytes,
+                Err(msg) => {
+                    let _ = send.send(Outcome {
+                        stdout: Vec::new(),
+                        stderr: msg.to_string(),
+                        exit_code: 1,
+                        instantiate_ns: 0,
+                        start_ns: 0,
+                    });
+                    return;
+                }
+            };
             let _ = send.send(run(input, program, instantiate, policy));
         });
     if worker.is_err() {
@@ -1281,5 +1485,130 @@ mod tests {
             g.state.failure.as_deref(),
             Some("negative gs_find_pair distance is not supported by this host")
         );
+    }
+
+    #[test]
+    fn goose_write_charges_output_limit_before_reading_and_bounds_stdin_and_fd_policy() {
+        use super::{Guest, Policy, State, handler, read_bounded_bytes, verify_open_fd_allowed};
+        use crate::{LinearMemory, Memory, R, Trap, Val};
+        use std::io::Read;
+
+        struct DummyGuest {
+            mem: Memory,
+            state: State,
+        }
+        impl Guest for DummyGuest {
+            fn memory(&mut self) -> Option<&mut dyn LinearMemory> {
+                Some(&mut self.mem)
+            }
+            fn state(&mut self) -> &mut State {
+                &mut self.state
+            }
+            fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> {
+                None
+            }
+            fn start(&mut self) -> R<()> {
+                Ok(())
+            }
+        }
+
+        // 1. `goose.write` must fail with `ResourceLimit: output limit` BEFORE attempting to
+        //    read/allocate guest memory (even when the requested length exceeds memory or limit=0).
+        let policy = Policy {
+            output_limit: 4,
+            ..Policy::default()
+        };
+        let mut g = DummyGuest {
+            mem: Memory::new(1, Some(1), false).unwrap(),
+            state: State::new(vec![], vec![]).with_policy(policy),
+        };
+        g.mem.write(0, b"abcdefgh").unwrap();
+        let write_fn = handler("goose", "write").unwrap();
+        assert_eq!(
+            write_fn(&mut g, &[Val::I32(0), Val::I32(1024 * 1024)]).err(),
+            Some(Trap::Host)
+        );
+        assert_eq!(
+            g.state.failure.as_deref(),
+            Some("ResourceLimit: output limit")
+        );
+        assert!(g.state.out.is_empty());
+
+        // Within limit still succeeds cleanly.
+        g.state.failure = None;
+        assert!(write_fn(&mut g, &[Val::I32(0), Val::I32(4)]).is_ok());
+        assert_eq!(g.state.out, b"abcd");
+
+        // 2. Bounded stdin reader retries EINTR and rejects streams over the cap.
+        struct InterruptedReader {
+            step: usize,
+        }
+        impl Read for InterruptedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.step += 1;
+                match self.step {
+                    1 => {
+                        buf[..2].copy_from_slice(b"he");
+                        Ok(2)
+                    }
+                    2 => Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "EINTR",
+                    )),
+                    3 => {
+                        buf[..3].copy_from_slice(b"llo");
+                        Ok(3)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+        let ok = read_bounded_bytes(InterruptedReader { step: 0 }, 5).unwrap();
+        assert_eq!(ok, b"hello");
+        assert_eq!(
+            read_bounded_bytes(&b"hello!"[..], 5).unwrap_err(),
+            "ResourceLimit: input limit"
+        );
+
+        // 3. Verified parent-dir open & post-open fd verification accept files inside allowed dirs
+        //    and reject swapped intermediate symlinks before any file creation occurs.
+        let root = std::env::temp_dir().join(format!("wtime-aot-fd-check-{}", std::process::id()));
+        let (jail, outside) = (root.join("jail"), root.join("outside"));
+        std::fs::create_dir_all(&jail).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(jail.join("ok.txt"), b"ok").unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let allowed = vec![jail.canonicalize().unwrap()];
+        let f_ok = std::fs::File::open(jail.join("ok.txt")).unwrap();
+        assert!(verify_open_fd_allowed(&f_ok, &allowed));
+        #[cfg(target_os = "linux")]
+        {
+            use super::{no_follow_nonblock, verified_open_target};
+            use std::io::Write as _;
+
+            let f_out = std::fs::File::open(outside.join("secret.txt")).unwrap();
+            assert!(!verify_open_fd_allowed(&f_out, &allowed));
+
+            // Swapped intermediate directory symlink pointing outside `allowed` must be rejected
+            // by `verified_open_target` before `create_new` can ever run.
+            std::fs::create_dir_all(outside.join("sub")).unwrap();
+            let swapped = jail.join("link");
+            std::os::unix::fs::symlink(&outside, &swapped).unwrap();
+            assert!(verified_open_target(&swapped.join("sub/escape.txt"), &allowed).is_err());
+            assert!(!outside.join("sub/escape.txt").exists());
+
+            // Creating a file inside an allowed parent via `verified_open_target` succeeds.
+            let (dir_guard, target) =
+                verified_open_target(&jail.join("new.txt"), &allowed).unwrap();
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            no_follow_nonblock(&mut opts);
+            let mut created = opts.open(&target).unwrap();
+            assert!(verify_open_fd_allowed(&created, &allowed));
+            created.write_all(b"hi").unwrap();
+            drop(dir_guard);
+            assert_eq!(std::fs::read(jail.join("new.txt")).unwrap(), b"hi");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

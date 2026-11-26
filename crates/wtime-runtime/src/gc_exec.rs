@@ -65,21 +65,18 @@ impl Store {
             Ok(None)
         }
     }
-    fn gc_type(&self, ii: usize, n: usize) -> Result<SubType> {
-        self.instances[ii]
-            .module
-            .data
-            .inner
-            .decoded()
-            .type_groups
-            .iter()
-            .flat_map(|g| &g.types)
-            .nth(n)
-            .cloned()
-            .ok_or_else(|| trap("GC type out of bounds"))
+    fn gc_type(&self, ii: usize, n: usize) -> Result<&SubType> {
+        let mut rem = n;
+        for g in &self.instances[ii].module.data.inner.decoded().type_groups {
+            if rem < g.types.len() {
+                return Ok(&g.types[rem]);
+            }
+            rem -= g.types.len();
+        }
+        Err(trap("GC type out of bounds"))
     }
     fn gc_field(&self, ii: usize, n: usize) -> Result<FieldType> {
-        match self.gc_type(ii, n)?.composite {
+        match &self.gc_type(ii, n)?.composite {
             CompositeType::Array(a) => Ok(a.field),
             _ => Err(trap("expected array type")),
         }
@@ -260,7 +257,7 @@ impl Store {
         match op {
             0 | 1 => {
                 let n = index(i)?;
-                let CompositeType::Struct(t) = self.gc_type(ii, n)?.composite else {
+                let CompositeType::Struct(t) = &self.gc_type(ii, n)?.composite else {
                     return Err(trap("expected struct type"));
                 };
                 self.gc.check_payload(t.fields.len())?;
@@ -283,7 +280,7 @@ impl Store {
             }
             2..=5 => {
                 let (n, f) = pair(i)?;
-                let CompositeType::Struct(t) = self.gc_type(ii, n)?.composite else {
+                let CompositeType::Struct(t) = &self.gc_type(ii, n)?.composite else {
                     return Err(trap("expected struct type"));
                 };
                 let storage = t
@@ -329,7 +326,11 @@ impl Store {
                         .len()
                         .checked_sub(len)
                         .ok_or_else(|| trap("array operand underflow"))?;
-                    s.drain(start..).map(|v| packed(v, field.storage)).collect()
+                    let mut v = Vec::new();
+                    v.try_reserve_exact(len)
+                        .map_err(|_| err(ErrorKind::ResourceLimit, "array allocation failed"))?;
+                    v.extend(s.drain(start..).map(|val| packed(val, field.storage)));
+                    v
                 } else {
                     let value = if op == 6 {
                         packed(pop(s)?, field.storage)
@@ -356,10 +357,12 @@ impl Store {
                 } else {
                     None
                 };
-                if let Some((r, at)) = destination {
-                    range(at as u64, len, self.gc.get(r)?.fields.len())?;
-                }
-                let values = if op == 9 || op == 18 {
+                let dst_range = if let Some((r, at)) = destination {
+                    Some((r, range(at as u64, len, self.gc.get(r)?.fields.len())?))
+                } else {
+                    None
+                };
+                if op == 9 || op == 18 {
                     let bytes = self.instances[ii]
                         .data_segment(segment)
                         .ok_or_else(|| trap("data segment index"))?;
@@ -375,19 +378,11 @@ impl Store {
                         .checked_mul(width)
                         .ok_or_else(|| trap("data length overflow"))?;
                     let bytes = &bytes[range(from as u64, size, bytes.len())?];
-                    if len > self.engine.config.limits.max_table_elements as usize {
-                        return Err(err(ErrorKind::ResourceLimit, "array length budget"));
-                    }
-                    self.gc.check_payload(len)?;
-                    let mut values = Vec::new();
-                    values
-                        .try_reserve_exact(len)
-                        .map_err(|_| err(ErrorKind::ResourceLimit, "array allocation failed"))?;
-                    for chunk in bytes.chunks_exact(width) {
+                    let decode_chunk = |chunk: &[u8]| {
                         let mut raw = [0u8; 16];
                         raw[..width].copy_from_slice(chunk);
                         let bits = u64::from_le_bytes(raw[..8].try_into().unwrap());
-                        values.push(match field.storage {
+                        match field.storage {
                             StorageType::I8 | StorageType::I16 | StorageType::Val(ValType::I32) => {
                                 Value::I32(bits as i32)
                             }
@@ -396,9 +391,31 @@ impl Store {
                             StorageType::Val(ValType::F64) => Value::F64(bits),
                             StorageType::Val(ValType::V128) => Value::V128(V128(raw)),
                             _ => unreachable!(),
-                        })
+                        }
+                    };
+                    if let Some((r, target)) = dst_range {
+                        let object = self.gc.get_mut(r)?;
+                        for (slot, chunk) in object.fields[target]
+                            .iter_mut()
+                            .zip(bytes.chunks_exact(width))
+                        {
+                            *slot = decode_chunk(chunk);
+                        }
+                    } else {
+                        if len > self.engine.config.limits.max_table_elements as usize {
+                            return Err(err(ErrorKind::ResourceLimit, "array length budget"));
+                        }
+                        self.gc.check_payload(len)?;
+                        let mut values = Vec::new();
+                        values.try_reserve_exact(len).map_err(|_| {
+                            err(ErrorKind::ResourceLimit, "array allocation failed")
+                        })?;
+                        for chunk in bytes.chunks_exact(width) {
+                            values.push(decode_chunk(chunk));
+                        }
+                        let value = self.gc_alloc(ii, n, ObjectKind::Array, values)?;
+                        s.push(value);
                     }
-                    values
                 } else {
                     let values = self.instances[ii]
                         .elems
@@ -408,19 +425,22 @@ impl Store {
                         .unwrap_or(&[]);
                     let source = &values[range(from as u64, len, values.len())
                         .map_err(|_| trap("out of bounds table access"))?];
-                    if len > self.engine.config.limits.max_table_elements as usize {
-                        return Err(err(ErrorKind::ResourceLimit, "array length budget"));
+                    if let Some((r, target)) = dst_range {
+                        let object = self.gc.get_mut(r)?;
+                        object.fields[target].copy_from_slice(source);
+                    } else {
+                        if len > self.engine.config.limits.max_table_elements as usize {
+                            return Err(err(ErrorKind::ResourceLimit, "array length budget"));
+                        }
+                        self.gc.check_payload(len)?;
+                        let mut copied = Vec::new();
+                        copied.try_reserve_exact(len).map_err(|_| {
+                            err(ErrorKind::ResourceLimit, "array allocation failed")
+                        })?;
+                        copied.extend_from_slice(source);
+                        let value = self.gc_alloc(ii, n, ObjectKind::Array, copied)?;
+                        s.push(value);
                     }
-                    self.gc.check_payload(len)?;
-                    source.to_vec()
-                };
-                if let Some((r, at)) = destination {
-                    let object = self.gc.get_mut(r)?;
-                    let target = range(at as u64, len, object.fields.len())?;
-                    object.fields[target].copy_from_slice(&values)
-                } else {
-                    let value = self.gc_alloc(ii, n, ObjectKind::Array, values)?;
-                    s.push(value)
                 }
             }
             11..=14 => {
@@ -476,12 +496,7 @@ impl Store {
                 let dst = reference(s)?;
                 let src_range = range(from as u64, len, self.gc.get(src)?.fields.len())?;
                 let dst_range = range(to as u64, len, self.gc.get(dst)?.fields.len())?;
-                if src == dst {
-                    self.gc.get_mut(dst)?.fields.copy_within(src_range, to)
-                } else {
-                    let values = self.gc.get(src)?.fields[src_range].to_vec();
-                    self.gc.get_mut(dst)?.fields[dst_range].copy_from_slice(&values)
-                }
+                self.gc.copy_fields(src, src_range, dst, dst_range)?
             }
             20..=23 => {
                 let Immediate::Heap(heap) = i.immediate else {
@@ -529,8 +544,10 @@ impl Store {
             }
             32 | 33 => {
                 let n = index(i)?;
-                let t = self.gc_type(ii, n)?;
-                let descriptor_type = t.descriptor.ok_or_else(|| trap("type has no descriptor"))?;
+                let descriptor_type = self
+                    .gc_type(ii, n)?
+                    .descriptor
+                    .ok_or_else(|| trap("type has no descriptor"))?;
                 let descriptor = reference(s)?;
                 if !self.gc_matches(
                     ii,
@@ -539,7 +556,7 @@ impl Store {
                 )? {
                     return Err(trap("descriptor type mismatch"));
                 }
-                let CompositeType::Struct(t) = t.composite else {
+                let CompositeType::Struct(t) = &self.gc_type(ii, n)?.composite else {
                     return Err(trap("expected struct type"));
                 };
                 self.gc.check_payload(t.fields.len())?;

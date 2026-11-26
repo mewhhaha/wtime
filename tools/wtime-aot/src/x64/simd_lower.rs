@@ -643,31 +643,48 @@ pub fn emit_v128_un_full(
     }
 }
 
+/// Normalize `dst = a`, returning `rhs = b` without clobbering `b` if `dst == b`.
+/// Precondition: `dst != SFP2` and `a != SFP2`.
+#[inline]
+fn prep_bin(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm) -> Xmm {
+    if dst == b && dst != a {
+        asm.movaps_rr(SFP2, b);
+        asm.movaps_rr(dst, a);
+        SFP2
+    } else {
+        asm.movaps_rr(dst, a);
+        b
+    }
+}
+
+/// Swap normalization: `dst = b`, returning `rhs = a` without clobbering `a` or `b`
+/// even when `dst == a` AND `b == SFP2` (both `a`/`dst` and `b` spilled, or `dst == a` reg with spilled `b`).
+/// Precondition: `dst != SFP2` and `a != SFP2`.
+#[inline]
+fn prep_bin_swap(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm) -> Xmm {
+    if dst == a && dst != b {
+        if b == SFP2 {
+            // `a` lives in `dst` and `b` lives in `SFP2`: swap via `ctx_v128_tmp()` so
+            // saving `a` does not overwrite `b` in `SFP2`.
+            asm.movdqu_mx(ctx_v128_tmp(), a);
+            asm.movaps_rr(dst, b);
+            asm.movdqu_xm(SFP2, ctx_v128_tmp());
+        } else {
+            asm.movaps_rr(SFP2, a);
+            asm.movaps_rr(dst, b);
+        }
+        SFP2
+    } else {
+        asm.movaps_rr(dst, b);
+        a
+    }
+}
+
 /// Emits all `(V128, V128) -> V128` binary ops.
 /// `dst` may alias `a`, `b`, or `SFP1`, but NEVER equals `SFP2`.
 pub fn emit_v128_bin(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Result<(), String> {
-    // Normalize `dst = a`, `rhs = b` without clobbering `b` if `dst == b`!
-    let prep = |asm: &mut Asm| -> Xmm {
-        if dst == b && dst != a {
-            asm.movaps_rr(SFP2, b);
-            asm.movaps_rr(dst, a);
-            SFP2
-        } else {
-            asm.movaps_rr(dst, a);
-            b
-        }
-    };
-    // Swap normalization: `dst = b`, `rhs = a` without clobbering `a` if `dst == a`!
-    let prep_swap = |asm: &mut Asm| -> Xmm {
-        if dst == a && dst != b {
-            asm.movaps_rr(SFP2, a);
-            asm.movaps_rr(dst, b);
-            SFP2
-        } else {
-            asm.movaps_rr(dst, b);
-            a
-        }
-    };
+    let prep = |asm: &mut Asm| -> Xmm { prep_bin(asm, dst, a, b) };
+    let prep_swap = |asm: &mut Asm| -> Xmm { prep_bin_swap(asm, dst, a, b) };
 
     match op {
         0xfd0e => {
@@ -703,40 +720,20 @@ pub fn emit_v128_bin(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Result
 }
 
 fn emit_v128_bin_rest(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Result<(), String> {
-    let prep = |asm: &mut Asm| -> Xmm {
-        if dst == b && dst != a {
-            asm.movaps_rr(SFP2, b);
-            asm.movaps_rr(dst, a);
-            SFP2
-        } else {
-            asm.movaps_rr(dst, a);
-            b
-        }
-    };
-    let prep_swap = |asm: &mut Asm| -> Xmm {
-        if dst == a && dst != b {
-            asm.movaps_rr(SFP2, a);
-            asm.movaps_rr(dst, b);
-            SFP2
-        } else {
-            asm.movaps_rr(dst, b);
-            a
-        }
-    };
+    let prep = |asm: &mut Asm| -> Xmm { prep_bin(asm, dst, a, b) };
+    let prep_swap = |asm: &mut Asm| -> Xmm { prep_bin_swap(asm, dst, a, b) };
 
     // Helper for unsigned comparisons using `pminu`/`pmaxu` + `pcmpeq` (never aliases `dst` with `a`!).
     // `a <=_u b`  <=>  `min_u(a, b) == a`
     // `a >=_u b`  <=>  `max_u(a, b) == a`
     // `a <_u b`   <=>  `~(max_u(a, b) == a)`
     // `a >_u b`   <=>  `~(min_u(a, b) == a)`
-    // Put `a` into `SFP2`, compute `dst = min/max(b, a)` into `dst`, compare `dst == SFP2`!
+    // Put `b` into `dst` and `a` into `SFP2` (safe even when `dst == a` and `b == SFP2`),
+    // compute `dst = min/max(b, a)` into `dst`, then compare `dst == SFP2`.
     let emit_ucmp = |asm: &mut Asm, use_max: bool, invert: bool, width: u8| {
-        if dst == a && dst != b {
-            asm.movaps_rr(SFP2, a);
-            asm.movaps_rr(dst, b);
-        } else {
-            asm.movaps_rr(dst, b);
-            asm.movaps_rr(SFP2, a);
+        let a_reg = prep_swap(asm);
+        if a_reg != SFP2 {
+            asm.movaps_rr(SFP2, a_reg);
         }
         match (use_max, width) {
             (false, 1) => asm.pminub(dst, SFP2),
@@ -1045,37 +1042,37 @@ fn emit_v128_bin_rest(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Resul
             asm.pavgw(dst, r);
         }
         0xfd9c => {
-            // i16x8.extmul_low_i8x16_s
+            // i16x8.extmul_low_i8x16_s (read `r` into `SFP2` before widening `dst` in case `r == dst`)
             let r = prep(asm);
-            asm.pmovsxbw(dst, dst);
             asm.pmovsxbw(SFP2, r);
+            asm.pmovsxbw(dst, dst);
             asm.pmullw(dst, SFP2);
         }
         0xfd9d => {
             // i16x8.extmul_high_i8x16_s
             let r = prep(asm);
-            asm.psrldq_imm(dst, 8);
-            asm.pmovsxbw(dst, dst);
             asm.movaps_rr(SFP2, r);
             asm.psrldq_imm(SFP2, 8);
             asm.pmovsxbw(SFP2, SFP2);
+            asm.psrldq_imm(dst, 8);
+            asm.pmovsxbw(dst, dst);
             asm.pmullw(dst, SFP2);
         }
         0xfd9e => {
             // i16x8.extmul_low_i8x16_u
             let r = prep(asm);
-            asm.pmovzxbw(dst, dst);
             asm.pmovzxbw(SFP2, r);
+            asm.pmovzxbw(dst, dst);
             asm.pmullw(dst, SFP2);
         }
         0xfd9f => {
             // i16x8.extmul_high_i8x16_u
             let r = prep(asm);
-            asm.psrldq_imm(dst, 8);
-            asm.pmovzxbw(dst, dst);
             asm.movaps_rr(SFP2, r);
             asm.psrldq_imm(SFP2, 8);
             asm.pmovzxbw(SFP2, SFP2);
+            asm.psrldq_imm(dst, 8);
+            asm.pmovzxbw(dst, dst);
             asm.pmullw(dst, SFP2);
         }
 
@@ -1114,32 +1111,32 @@ fn emit_v128_bin_rest(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Resul
         } // i32x4.dot_i16x8_s
         0xfdbc => {
             let r = prep(asm);
-            asm.pmovsxwd(dst, dst);
             asm.pmovsxwd(SFP2, r);
+            asm.pmovsxwd(dst, dst);
             asm.pmulld(dst, SFP2);
         }
         0xfdbd => {
             let r = prep(asm);
-            asm.psrldq_imm(dst, 8);
-            asm.pmovsxwd(dst, dst);
             asm.movaps_rr(SFP2, r);
             asm.psrldq_imm(SFP2, 8);
             asm.pmovsxwd(SFP2, SFP2);
+            asm.psrldq_imm(dst, 8);
+            asm.pmovsxwd(dst, dst);
             asm.pmulld(dst, SFP2);
         }
         0xfdbe => {
             let r = prep(asm);
-            asm.pmovzxwd(dst, dst);
             asm.pmovzxwd(SFP2, r);
+            asm.pmovzxwd(dst, dst);
             asm.pmulld(dst, SFP2);
         }
         0xfdbf => {
             let r = prep(asm);
-            asm.psrldq_imm(dst, 8);
-            asm.pmovzxwd(dst, dst);
             asm.movaps_rr(SFP2, r);
             asm.psrldq_imm(SFP2, 8);
             asm.pmovzxwd(SFP2, SFP2);
+            asm.psrldq_imm(dst, 8);
+            asm.pmovzxwd(dst, dst);
             asm.pmulld(dst, SFP2);
         }
 
@@ -1185,29 +1182,29 @@ fn emit_v128_bin_rest(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Resul
         0xfddc => {
             // i64x2.extmul_low_i32x4_s
             let r = prep(asm);
-            asm.pshufd(dst, dst, 0x50);
             asm.pshufd(SFP2, r, 0x50);
+            asm.pshufd(dst, dst, 0x50);
             asm.pmuldq(dst, SFP2);
         }
         0xfddd => {
             // i64x2.extmul_high_i32x4_s
             let r = prep(asm);
-            asm.pshufd(dst, dst, 0xfa);
             asm.pshufd(SFP2, r, 0xfa);
+            asm.pshufd(dst, dst, 0xfa);
             asm.pmuldq(dst, SFP2);
         }
         0xfdde => {
             // i64x2.extmul_low_i32x4_u
             let r = prep(asm);
-            asm.pshufd(dst, dst, 0x50);
             asm.pshufd(SFP2, r, 0x50);
+            asm.pshufd(dst, dst, 0x50);
             asm.pmuludq(dst, SFP2);
         }
         0xfddf => {
             // i64x2.extmul_high_i32x4_u
             let r = prep(asm);
-            asm.pshufd(dst, dst, 0xfa);
             asm.pshufd(SFP2, r, 0xfa);
+            asm.pshufd(dst, dst, 0xfa);
             asm.pmuludq(dst, SFP2);
         }
 
@@ -1278,12 +1275,9 @@ pub fn emit_v128_bin_full(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> R
     match op {
         0xfd26 => {
             // i8x16.lt_u: ~(max_u(a, b) == a)
-            if dst == a && dst != b {
-                asm.movaps_rr(SFP2, a);
-                asm.movaps_rr(dst, b);
-            } else {
-                asm.movaps_rr(dst, b);
-                asm.movaps_rr(SFP2, a);
+            let a_reg = prep_bin_swap(asm, dst, a, b);
+            if a_reg != SFP2 {
+                asm.movaps_rr(SFP2, a_reg);
             }
             asm.pmaxub(dst, SFP2);
             asm.pcmpeqb(dst, SFP2);
@@ -1294,7 +1288,9 @@ pub fn emit_v128_bin_full(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> R
         0xfdd5 => {
             // i64x2.mul: uses only GP scratch (`SGP1`/`SGP2`) + `dst` + `SFP2`!
             // 2 scalar 64-bit multiplies (4 cycles latency, ZERO aliasing issues!).
-            let b_reg = if dst == b && dst != a {
+            // Must save `b` into `SFP2` whenever `dst == b` (including `dst == a == b`),
+            // because lane 0's `movq_xr(dst, SGP1)` zeroes lane 1 of `dst` before lane 1 reads `b_reg`.
+            let b_reg = if dst == b {
                 asm.movaps_rr(SFP2, b);
                 SFP2
             } else {

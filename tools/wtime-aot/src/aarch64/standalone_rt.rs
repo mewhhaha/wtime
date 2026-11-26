@@ -166,21 +166,31 @@ fn emit_streq_const(a: &mut A64Asm, s: &[u8]) {
     a.bind(done);
 }
 
-/// Parses unsigned decimal NUL-terminated string at `X0` into `X0`. Clobbers `X0, X1, X2, X3`.
-fn emit_parse_u64(a: &mut A64Asm) {
+/// Parses a non-empty unsigned decimal NUL-terminated string at `X0` into `X0`.
+/// Branches to `fail_usage` on empty input, non-digit characters, or `u64` overflow.
+/// Clobbers `X0, X1, X2, X3, X4`.
+fn emit_parse_u64(a: &mut A64Asm, fail_usage: Label) {
     a.mov_r(true, Reg::X1, Reg::X0);
     a.movz(true, Reg::X0, 0, 0);
+    a.ldrb_uimm(Reg::X2, Reg::X1, 0);
+    a.sub_imm(false, Reg::X2, Reg::X2, u16::from(b'0'));
+    a.cmp_imm(false, Reg::X2, 10);
+    a.b_cond(Cond::Hs, fail_usage);
     a.mov_imm32(Reg::X3, 10);
     let lp = a.new_label();
     let done = a.new_label();
     a.bind(lp);
     a.ldrb_uimm(Reg::X2, Reg::X1, 0);
+    a.cbz(false, Reg::X2, done);
     a.sub_imm(false, Reg::X2, Reg::X2, u16::from(b'0'));
     a.cmp_imm(false, Reg::X2, 10);
-    a.b_cond(Cond::Hs, done);
+    a.b_cond(Cond::Hs, fail_usage);
+    a.umulh(Reg::X4, Reg::X0, Reg::X3);
+    a.cbnz(true, Reg::X4, fail_usage);
     a.mul(true, Reg::X0, Reg::X0, Reg::X3);
     a.uxtw(Reg::X2, Reg::X2);
-    a.add_r(true, Reg::X0, Reg::X0, Reg::X2);
+    a.adds_r(true, Reg::X0, Reg::X0, Reg::X2);
+    a.b_cond(Cond::Hs, fail_usage);
     a.add_imm(true, Reg::X1, Reg::X1, 1);
     a.b(lp);
     a.bind(done);
@@ -239,6 +249,9 @@ pub fn emit_a64_standalone_start(
     a.mov_imm64(Reg::X1, GUEST_STACK_USABLE_BYTES as u64);
     a.mov_imm32(Reg::X2, 3);
     emit_syscall(&mut a, SYS_MPROTECT);
+    a.mov_imm64(Reg::X4, (-4095i64) as u64);
+    a.cmp_r(true, Reg::X0, Reg::X4);
+    a.b_cond(Cond::Hs, fail_alloc);
     a.mov_imm64(
         Reg::X4,
         (GUEST_STACK_GUARD_BYTES + GUEST_STACK_FLOOR_HEADROOM) as u64,
@@ -407,7 +420,7 @@ pub fn emit_a64_standalone_start(
     a.cmp_r(true, Reg::X23, Reg::X20);
     a.b_cond(Cond::Hs, fail_usage);
     a.ldr_reg_scaled(true, Reg::X0, Reg::X21, Reg::X23, false);
-    emit_parse_u64(&mut a);
+    emit_parse_u64(&mut a, fail_usage);
     emit_store_off(
         &mut a,
         Ty::I64,
@@ -429,7 +442,7 @@ pub fn emit_a64_standalone_start(
     a.cmp_r(true, Reg::X23, Reg::X20);
     a.b_cond(Cond::Hs, fail_usage);
     a.ldr_reg_scaled(true, Reg::X0, Reg::X21, Reg::X23, false);
-    emit_parse_u64(&mut a);
+    emit_parse_u64(&mut a, fail_usage);
     emit_store_off(
         &mut a,
         Ty::I64,
@@ -493,6 +506,9 @@ pub fn emit_a64_standalone_start(
     emit_syscall(&mut a, SYS_READLINKAT);
     a.cmp_imm(true, Reg::X0, 1);
     a.b_cond(Cond::Lt, fail_usage);
+    // Reject truncated paths (readlinkat returning bufsiz == 1023 means path >= 1023 bytes).
+    a.cmp_imm(true, Reg::X0, 1023);
+    a.b_cond(Cond::Ge, fail_usage);
     let lbl_notrim = a.new_label();
     a.cmp_imm(true, Reg::X0, 1);
     a.b_cond(Cond::Le, lbl_notrim);
@@ -679,7 +695,7 @@ pub fn emit_a64_standalone_start(
             OFF_MEM_RESERVE_BYTES,
             SGP3,
         );
-        if min_pages > 0 {
+        if min_pages > 0 && min_pages <= hard_cap {
             a.mov_imm64(MEM_LEN_REG, min_pages << 16);
             a.mov_r(true, Reg::X0, MEM_BASE_REG);
             a.mov_r(true, Reg::X1, MEM_LEN_REG);
@@ -704,12 +720,17 @@ pub fn emit_a64_standalone_start(
     // Reserve & commit additional linear memories `1..N` (`multi-memory`).
     for (mi, em) in module.extra_memories.iter().enumerate() {
         let desc_off = layout.extra_mem_offs[mi];
-        let hard_cap = if em.memory64 {
-            em.min_pages.max(131_072)
+        let hard_cap = if em.memory64 { 1u64 << 28 } else { 65_536 };
+        if em.min_pages > hard_cap {
+            a.b(fail_alloc);
+            continue;
+        }
+        let default_cap = if em.memory64 {
+            em.min_pages.max(131_072).min(hard_cap)
         } else {
             65_536
         };
-        let eff_max = em.max_pages.min(hard_cap);
+        let eff_max = em.max_pages.min(default_cap);
         if eff_max == 0 {
             continue;
         }
@@ -958,7 +979,11 @@ pub fn emit_a64_standalone_start(
         a.bind(not_exn);
     }
     a.sub_imm(false, Reg::X9, Reg::X9, 1);
-    a.cmp_imm(false, Reg::X9, 22);
+    a.cmp_imm(
+        false,
+        Reg::X9,
+        crate::x64::runtime::TRAP_MESSAGES.len() as u16,
+    );
     a.b_cond(Cond::Hs, exit_one);
     a.adr_reloc(Reg::X10, A64RelocTarget::Rodata(tables.trap_table_off));
     a.lsl_imm(true, Reg::X9, Reg::X9, 3);

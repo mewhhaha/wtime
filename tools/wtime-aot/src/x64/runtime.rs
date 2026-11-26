@@ -1672,6 +1672,12 @@ fn emit_export_new(
     } else {
         a.xor_rr(false, Gp::Rbp, Gp::Rbp);
     }
+    for em in &module.extra_memories {
+        let hard_cap = if em.memory64 { 1u64 << 28 } else { 65_536 };
+        if em.min_pages > hard_cap {
+            a.jmp(lbl_fail_mem_too_large);
+        }
+    }
 
     // ---- Step C1: mmap Ctx ----
     a.xor_rr(false, Gp::Rdi, Gp::Rdi);
@@ -1773,7 +1779,8 @@ fn emit_export_new(
             Gp::Rbx,
         );
 
-        if mem_min > 0 {
+        let mem0_hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
+        if mem_min > 0 && mem_min <= mem0_hard_cap {
             a.mov_ri64(Gp::R13, mem_min << 16);
             a.mov_rr(true, Gp::Rdi, Gp::R14);
             a.mov_rr(true, Gp::Rsi, Gp::R13);
@@ -1789,12 +1796,17 @@ fn emit_export_new(
     // ---- Step C3b: Additional linear memories `1..N` (`multi-memory`) ----
     for (mi, em) in module.extra_memories.iter().enumerate() {
         let desc_off = layout.extra_mem_offs[mi];
-        let hard_cap = if em.memory64 {
-            em.min_pages.max(131_072)
+        let hard_cap = if em.memory64 { 1u64 << 28 } else { 65_536 };
+        if em.min_pages > hard_cap {
+            // Already rejected unconditionally in Step B above; skip dead compile-time shift.
+            continue;
+        }
+        let default_cap = if em.memory64 {
+            em.min_pages.max(131_072).min(hard_cap)
         } else {
             65_536
         };
-        let eff_max = em.max_pages.min(hard_cap);
+        let eff_max = em.max_pages.min(default_cap);
         if eff_max == 0 {
             continue;
         }

@@ -4390,3 +4390,369 @@ fn heapsort_sift_down_hoists_root_and_linearizes_right_child() {
         "both right-child LoadScaled triangle arms must be linearized inline (found {linear_tri_count}, non_linear={non_linear:?})"
     );
 }
+
+#[test]
+fn stack_elision_keeps_checks_for_call_ref_and_dyn_table_targets() {
+    // type 0: (i32) -> i32  (used by f0 via call_ref and f1 via dynamic call_indirect)
+    // type 1: (i64) -> i64  (used by f2 via direct call only)
+    // type 2: (i32) -> i32  (entry)
+    let types = type_sec(&[(&[0x7f], &[0x7f]), (&[0x7e], &[0x7e]), (&[0x7f], &[0x7f])]);
+    let mut tbl = vec![1, 0x70, 0x00];
+    leb_u32(&mut tbl, 2);
+    // elem declarative for func 0 and func 1 so `ref.func 0`/`ref.func 1` validate.
+    let elem = section(9, &[1, 0x03, 0x00, 2, 0, 1]);
+    let f0 = enc_body(&[], &[0x20, 0, 0x41, 1, 0x6a]); // x + 1
+    let f1 = enc_body(&[], &[0x20, 0, 0x41, 2, 0x6a]); // x + 2
+    let f2 = enc_body(&[], &[0x20, 0, 0x42, 3, 0x7c]); // x + 3
+    // f3 (entry): table.set 0 (0, ref.func 1); call_ref 0 (x, ref.func 0) + call_indirect 0 (x, 0) + i32.wrap(call 2 (i64.extend_u x))
+    let f3 = enc_body(
+        &[],
+        &[
+            0x41, 0, 0xd2, 1, 0x26, 0, // table.set 0 (0, ref.func 1)
+            0x20, 0, 0xd2, 0, 0x14, 0, // call_ref 0 (x, ref.func 0)
+            0x20, 0, 0x41, 0, 0x11, 0, 0,    // call_indirect type=0 tbl=0
+            0x6a, // add
+            0x20, 0, 0xad, 0x10, 2, 0xa7, // i32.wrap(call 2 (i64.extend_u x))
+            0x6a,
+        ],
+    );
+    let wasm = wasm_module(&[
+        types,
+        func_sec(&[0, 0, 1, 2]),
+        section(4, &tbl),
+        export_sec(&[("entry", 0, 3)]),
+        elem,
+        code_sec(&[f0, f1, f2, f3]),
+    ]);
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let allocs: Vec<_> = irs.iter().map(|ir| allocate(ir).unwrap()).collect();
+    super::opt::run_stack_and_trap_elision(&mut irs, &allocs, &module, None).unwrap();
+    assert!(
+        irs[0].needs_stack_check,
+        "call_ref target f0 must NOT have its stack check elided"
+    );
+    assert!(
+        irs[1].needs_stack_check,
+        "dynamic call_indirect target f1 must NOT have its stack check elided"
+    );
+    assert!(
+        !irs[2].needs_stack_check,
+        "distinct-signature direct-only leaf f2 may still elide its stack check"
+    );
+}
+
+#[test]
+fn memory64_max_min_pages_compiles_without_shift_overflow() {
+    fn encode_mem64(flags: u8, min_pages: u64) -> Vec<u8> {
+        let mut out = vec![flags];
+        let mut v = min_pages;
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+        out
+    }
+    let max_m64_pages: u64 = 1u64 << 48;
+    // Module A: memory 0 has min_pages == 1 << 48 (MAX_MEM64_PAGES).
+    let mut mem_a = vec![1];
+    mem_a.extend_from_slice(&encode_mem64(0x04, max_m64_pages));
+    let wasm_a = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(5, &mem_a),
+        export_sec(&[("_start", 0, 0)]),
+        code_sec(&[enc_body(&[], &[])]),
+    ]);
+    // Module B: memory 0 is small (1 page), extra memory 1 has min_pages == 1 << 48.
+    let mut mem_b = vec![2, 0x00, 1];
+    mem_b.extend_from_slice(&encode_mem64(0x04, max_m64_pages));
+    let wasm_b = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(5, &mem_b),
+        export_sec(&[("_start", 0, 0)]),
+        code_sec(&[enc_body(&[], &[])]),
+    ]);
+    for (label, wasm) in [("mem0_1shl48", &wasm_a), ("mem1_1shl48", &wasm_b)] {
+        for target in [
+            super::module::X64Target::BlotCdylib,
+            super::module::X64Target::StandaloneExec,
+        ] {
+            let x64_opts = X64CompileOptions {
+                target,
+                ..Default::default()
+            };
+            compile_wasm_to_x64_so(wasm, &x64_opts)
+                .unwrap_or_else(|e| panic!("x64 {label} {target:?} compile failed: {e:?}"));
+            let a64_opts = crate::aarch64::A64CompileOptions {
+                target,
+                ..Default::default()
+            };
+            crate::aarch64::compile_wasm_to_aarch64(wasm, &a64_opts)
+                .unwrap_or_else(|e| panic!("aarch64 {label} {target:?} compile failed: {e:?}"));
+        }
+    }
+}
+
+#[test]
+fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_checks() {
+    use super::ir::{CmpBranchKind, CmpOp, FloatBinOp, LoadKind, StoreKind};
+    // Build a minimal admitted module with 1 page of memory for IR verification.
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f, 0x7f, 0x7c], &[])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x00, 1]),
+        export_sec(&[("f", 0, 0)]),
+        code_sec(&[enc_body(&[], &[])]),
+    ]);
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+
+    // 1. Boundary-clamped loop containing `LoadScaled` + `AddScaled` + `StoreScaled` + boundary select.
+    let mut ir = IrFunc {
+        func_index: 0,
+        memory64: false,
+        params: vec![Val(0), Val(1), Val(2)],
+        result_tys: vec![],
+        val_tys: vec![
+            Ty::I32, // v0: init
+            Ty::I32, // v1: limit
+            Ty::F64, // v2: unused param
+            Ty::I32, // v3: iv
+            Ty::I32, // v4: next_i = iv + 1
+            Ty::I32, // v5: clamped = (iv == 0) ? v0 : iv
+            Ty::I32, // v6: loaded = LoadScaled(I32, clamped, 4, 0)
+            Ty::I32, // v7: scaled = AddScaled(v6, clamped, 2, 16)
+        ],
+        blocks: vec![
+            Block {
+                params: vec![Val(0), Val(1), Val(2)],
+                insts: vec![],
+                term: Term::Jump {
+                    target: BlockId(1),
+                    args: ValRange { start: 0, len: 1 },
+                },
+                preds: 0,
+                is_loop_header: false,
+            },
+            Block {
+                params: vec![Val(3)],
+                insts: vec![
+                    Inst {
+                        res: Some(Val(4)),
+                        op: Op::I32BinImm(IntBinOp::Add, Val(3), 1),
+                    },
+                    Inst {
+                        res: Some(Val(5)),
+                        op: Op::CmpSelect {
+                            kind: CmpBranchKind::I32Imm(CmpOp::Eq, 0),
+                            a: Val(3),
+                            b: Val(3),
+                            tv: Val(0),
+                            fv: Val(3),
+                        },
+                    },
+                    Inst {
+                        res: Some(Val(6)),
+                        op: Op::LoadScaled {
+                            kind: LoadKind::I32,
+                            addr: Val(5),
+                            scale: 4,
+                            offset: 0,
+                        },
+                    },
+                    Inst {
+                        res: Some(Val(7)),
+                        op: Op::AddScaled {
+                            is64: false,
+                            base: Val(6),
+                            idx: Val(5),
+                            shift: 2,
+                            disp: 16,
+                        },
+                    },
+                    Inst {
+                        res: None,
+                        op: Op::StoreScaled {
+                            kind: StoreKind::I32,
+                            addr: Val(3),
+                            val: Val(7),
+                            scale: 4,
+                            offset: 0,
+                        },
+                    },
+                ],
+                term: Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::LtU),
+                    a: Val(4),
+                    b: Val(1),
+                    then_bb: BlockId(1),
+                    then_args: ValRange { start: 1, len: 1 },
+                    else_bb: BlockId(2),
+                    else_args: ValRange::EMPTY,
+                },
+                preds: 2,
+                is_loop_header: true,
+            },
+            Block {
+                params: vec![],
+                insts: vec![],
+                term: Term::Return {
+                    vals: ValRange::EMPTY,
+                },
+                preds: 1,
+                is_loop_header: false,
+            },
+        ],
+        val_pool: vec![Val(0), Val(4)],
+        v128_consts: vec![],
+        br_tables: vec![],
+        early_pruned: 0,
+        needs_stack_check: true,
+        elided_callee_stack_bytes: 0,
+    };
+    let eff = super::opt::compute_module_effects(std::slice::from_ref(&ir), &module, None).unwrap();
+    super::opt::optimize_func_stage2(&mut ir, &module, &eff, None).unwrap();
+    verify_ir(&ir, &module)
+        .expect("peeled loop with LoadScaled/AddScaled/StoreScaled must stay valid SSA");
+
+    // 2. AXPY loop with an unrelated trapping `BoundsCheck` (addr = limit, end_off = 999999)
+    // must NOT be vectorized into `Op::F64AxpyLoop` (which would silently drop the BoundsCheck!).
+    let mut axpy = IrFunc {
+        func_index: 0,
+        memory64: false,
+        params: vec![Val(0), Val(1), Val(2)],
+        result_tys: vec![],
+        val_tys: vec![
+            Ty::I32, // v0: init (0)
+            Ty::I32, // v1: limit
+            Ty::F64, // v2: scale
+            Ty::I32, // v3: iv
+            Ty::I32, // v4: byte_off = iv << 3
+            Ty::F64, // v5: dst_val = load(F64, byte_off, 0)
+            Ty::F64, // v6: src_val = load(F64, byte_off, 256)
+            Ty::F64, // v7: prod = src_val * scale
+            Ty::F64, // v8: out = dst_val + prod
+            Ty::I32, // v9: next = iv + 1
+        ],
+        blocks: vec![
+            Block {
+                params: vec![Val(0), Val(1), Val(2)],
+                insts: vec![],
+                term: Term::Jump {
+                    target: BlockId(1),
+                    args: ValRange { start: 0, len: 1 },
+                },
+                preds: 0,
+                is_loop_header: false,
+            },
+            Block {
+                params: vec![Val(3)],
+                insts: vec![
+                    Inst {
+                        res: None,
+                        op: Op::BoundsCheck {
+                            addr: Val(1),
+                            end_off: 999_999,
+                            for_bulk: false,
+                        },
+                    },
+                    Inst {
+                        res: Some(Val(4)),
+                        op: Op::I32BinImm(IntBinOp::Shl, Val(3), 3),
+                    },
+                    Inst {
+                        res: Some(Val(5)),
+                        op: Op::Load {
+                            kind: LoadKind::F64,
+                            addr: Val(4),
+                            offset: 0,
+                            checked: false,
+                        },
+                    },
+                    Inst {
+                        res: Some(Val(6)),
+                        op: Op::Load {
+                            kind: LoadKind::F64,
+                            addr: Val(4),
+                            offset: 256,
+                            checked: false,
+                        },
+                    },
+                    Inst {
+                        res: Some(Val(7)),
+                        op: Op::F64Bin(FloatBinOp::Mul, Val(6), Val(2)),
+                    },
+                    Inst {
+                        res: Some(Val(8)),
+                        op: Op::F64Bin(FloatBinOp::Add, Val(5), Val(7)),
+                    },
+                    Inst {
+                        res: None,
+                        op: Op::Store {
+                            kind: StoreKind::F64,
+                            addr: Val(4),
+                            val: Val(8),
+                            offset: 0,
+                            checked: true,
+                        },
+                    },
+                    Inst {
+                        res: Some(Val(9)),
+                        op: Op::I32BinImm(IntBinOp::Add, Val(3), 1),
+                    },
+                ],
+                term: Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::LtU),
+                    a: Val(9),
+                    b: Val(1),
+                    then_bb: BlockId(1),
+                    then_args: ValRange { start: 1, len: 1 },
+                    else_bb: BlockId(2),
+                    else_args: ValRange::EMPTY,
+                },
+                preds: 2,
+                is_loop_header: true,
+            },
+            Block {
+                params: vec![],
+                insts: vec![],
+                term: Term::Return {
+                    vals: ValRange::EMPTY,
+                },
+                preds: 1,
+                is_loop_header: false,
+            },
+        ],
+        val_pool: vec![Val(0), Val(9)],
+        v128_consts: vec![],
+        br_tables: vec![],
+        early_pruned: 0,
+        needs_stack_check: true,
+        elided_callee_stack_bytes: 0,
+    };
+    let eff2 =
+        super::opt::compute_module_effects(std::slice::from_ref(&axpy), &module, None).unwrap();
+    super::opt::optimize_func_stage2(&mut axpy, &module, &eff2, None).unwrap();
+    verify_ir(&axpy, &module).unwrap();
+    assert!(
+        !axpy.blocks.iter().any(|b| b
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::F64AxpyLoop { .. }))),
+        "AXPY vectorization must NOT drop an unrelated BoundsCheck"
+    );
+}

@@ -1496,15 +1496,35 @@ fn build_aarch64(
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(&staged)
-        .and_then(|mut f| f.write_all(&elf_bytes))
-        .map_err(|e| BuildError::Failed(format!("{}: {e}", staged.display())))?;
-    mark_file_immutable(&staged, 0o555).map_err(BuildError::Failed)?;
-    fs::rename(&staged, &program)
-        .map_err(|e| BuildError::Failed(format!("{}: {e}", program.display())))?;
     let sha_hex = crate::sha256::artifact_sidecar_digest(&elf_bytes);
-    publish_digest_sidecar(&entry, artifact_name, &sha_hex, &digest_file)
-        .map_err(BuildError::Failed)?;
+    let mut staged_created = false;
+    let mut program_published = false;
+    let publish_res = opts
+        .open(&staged)
+        .map_err(|e| format!("{}: {e}", staged.display()))
+        .and_then(|mut f| {
+            staged_created = true;
+            f.write_all(&elf_bytes)
+                .map_err(|e| format!("{}: {e}", staged.display()))
+        })
+        .and_then(|()| mark_file_immutable(&staged, 0o555))
+        .and_then(|()| {
+            fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
+            staged_created = false;
+            program_published = true;
+            Ok(())
+        })
+        .and_then(|()| publish_digest_sidecar(&entry, artifact_name, &sha_hex, &digest_file));
+    if let Err(e) = publish_res {
+        if program_published {
+            let _ = fs::remove_file(&digest_file);
+            let _ = fs::remove_file(&program);
+        }
+        if staged_created {
+            let _ = fs::remove_file(&staged);
+        }
+        return Err(BuildError::Failed(e));
+    }
     publish_lock.release_checked(options.time_limit)?;
     Ok(program)
 }

@@ -3,7 +3,7 @@
 
 use wtime_types::ValType;
 
-use super::asm::{Asm, Cond, Gp, Mem, RelocTarget, Xmm};
+use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::lower::TargetIsa;
 use super::module::X64Module;
 use super::runtime::{RuntimeTables, RuntimeTestHooks};
@@ -187,18 +187,29 @@ fn emit_streq_const(a: &mut Asm, s: &[u8]) {
     a.bind(lbl_done);
 }
 
-/// Parses unsigned decimal NUL-terminated string at `Rdi` into `Rax`.
-fn emit_parse_u64(a: &mut Asm) {
+/// Parses a non-empty unsigned decimal NUL-terminated string at `Rdi` into `Rax`.
+/// Jumps to `lbl_fail` on empty input, non-digit characters, or `u64` overflow.
+/// Clobbers `Rax, Rcx, Rdx, Rdi, R8`.
+fn emit_parse_u64(a: &mut Asm, lbl_fail: Label) {
     a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.movzx_rm8(false, Gp::Rcx, Mem::base(Gp::Rdi));
+    a.sub_ri(false, Gp::Rcx, b'0' as i32);
+    a.cmp_ri(false, Gp::Rcx, 10);
+    a.jcc(Cond::Ae, lbl_fail);
+    a.mov_ri32(Gp::R8, 10);
     let lbl_lp = a.new_label();
     let lbl_done = a.new_label();
     a.bind(lbl_lp);
     a.movzx_rm8(false, Gp::Rcx, Mem::base(Gp::Rdi));
+    a.test_rr(false, Gp::Rcx, Gp::Rcx);
+    a.jcc(Cond::E, lbl_done);
     a.sub_ri(false, Gp::Rcx, b'0' as i32);
     a.cmp_ri(false, Gp::Rcx, 10);
-    a.jcc(Cond::Ae, lbl_done);
-    a.imul_rri(true, Gp::Rax, Gp::Rax, 10);
+    a.jcc(Cond::Ae, lbl_fail);
+    a.mul_r(true, Gp::R8); // RDX:RAX = RAX * 10; CF=1 iff overflow
+    a.jcc(Cond::B, lbl_fail);
     a.add_rr(true, Gp::Rax, Gp::Rcx);
+    a.jcc(Cond::B, lbl_fail);
     a.add_ri(true, Gp::Rdi, 1);
     a.jmp(lbl_lp);
     a.bind(lbl_done);
@@ -355,7 +366,7 @@ pub fn emit_standalone_entry(
     a.cmp_rr(true, Gp::Rbx, Gp::R12);
     a.jcc(Cond::Ae, lbl_fail_usage);
     a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
-    emit_parse_u64(&mut a);
+    emit_parse_u64(&mut a, lbl_fail_usage);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 48), Gp::Rax);
     a.add_ri(true, Gp::Rbx, 1);
     a.jmp(lbl_arg_loop);
@@ -370,7 +381,7 @@ pub fn emit_standalone_entry(
     a.cmp_rr(true, Gp::Rbx, Gp::R12);
     a.jcc(Cond::Ae, lbl_fail_usage);
     a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
-    emit_parse_u64(&mut a);
+    emit_parse_u64(&mut a, lbl_fail_usage);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 128), Gp::Rax);
     a.add_ri(true, Gp::Rbx, 1);
     a.jmp(lbl_arg_loop);
@@ -434,6 +445,9 @@ pub fn emit_standalone_entry(
     a.syscall();
     a.cmp_ri(true, Gp::Rax, 1);
     a.jcc(Cond::L, lbl_fail_usage);
+    // Reject truncated paths (readlinkat returning bufsiz == 1023 means path >= 1023 bytes).
+    a.cmp_ri(true, Gp::Rax, 1023);
+    a.jcc(Cond::Ge, lbl_fail_usage);
     // Recompute idx (R8) & dst_buf (Rdx)
     a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rbp, POLICY_OFF_DIR_COUNT));
     a.mov_rr(true, Gp::R9, Gp::R8);
@@ -739,7 +753,7 @@ pub fn emit_standalone_entry(
             Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
             Gp::Rbx,
         );
-        if mem_min > 0 {
+        if mem_min > 0 && mem_min <= hard_cap {
             a.mov_ri64(Gp::R13, mem_min << 16);
             a.mov_rr(true, Gp::Rdi, Gp::R14);
             a.mov_rr(true, Gp::Rsi, Gp::R13);
@@ -756,12 +770,17 @@ pub fn emit_standalone_entry(
     // ---- Step 3a2: Additional linear memories `1..N` (`multi-memory`) ----
     for (mi, em) in module.extra_memories.iter().enumerate() {
         let desc_off = layout.extra_mem_offs[mi];
-        let hard_cap = if em.memory64 {
-            em.min_pages.max(131_072)
+        let hard_cap = if em.memory64 { 1u64 << 28 } else { 65_536 };
+        if em.min_pages > hard_cap {
+            a.jmp(lbl_fail_alloc);
+            continue;
+        }
+        let default_cap = if em.memory64 {
+            em.min_pages.max(131_072).min(hard_cap)
         } else {
             65_536
         };
-        let eff_max = em.max_pages.min(hard_cap);
+        let eff_max = em.max_pages.min(default_cap);
         if eff_max == 0 {
             continue;
         }

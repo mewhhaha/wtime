@@ -55,6 +55,14 @@ struct A64Vm {
     sigsegv_handler: Option<u64>,
     /// Pending guard-page fault address to dispatch to `sigsegv_handler`.
     pending_fault_addr: Option<u64>,
+    /// Recorded `(base, len)` of every `SYS_MMAP` call (for leak-free cleanup assertions).
+    mmap_log: Vec<(u64, u64)>,
+    /// Recorded `(base, len)` of every `SYS_MUNMAP` call.
+    munmap_log: Vec<(u64, u64)>,
+    /// Optional 1-based `SYS_MPROTECT` call index on which to inject `-ENOMEM`.
+    fail_mprotect_at: Option<usize>,
+    /// Total `SYS_MPROTECT` calls observed so far.
+    mprotect_calls: usize,
 }
 
 const RET_SENTINEL: u64 = 0xdead_beef_0000_0000;
@@ -79,6 +87,10 @@ impl A64Vm {
             stdin_pos: 0,
             sigsegv_handler: None,
             pending_fault_addr: None,
+            mmap_log: Vec::new(),
+            munmap_log: Vec::new(),
+            fail_mprotect_at: None,
+            mprotect_calls: 0,
         };
         vm.segs.push((
             img.rodata_vaddr,
@@ -352,20 +364,27 @@ impl A64Vm {
                     } else {
                         self.alloc_seg(len as usize)
                     };
+                    self.mmap_log.push((ptr, len));
                     self.x[0] = ptr;
                 }
                 226 => {
                     // mprotect(addr, len, prot)
-                    let addr = self.x[0];
-                    let len = self.x[1];
-                    let prot = self.x[2];
-                    if prot != 0 {
-                        self.mprotect_rw(addr, len);
+                    self.mprotect_calls += 1;
+                    if self.fail_mprotect_at == Some(self.mprotect_calls) {
+                        self.x[0] = (-12i64) as u64; // -ENOMEM
+                    } else {
+                        let addr = self.x[0];
+                        let len = self.x[1];
+                        let prot = self.x[2];
+                        if prot != 0 {
+                            self.mprotect_rw(addr, len);
+                        }
+                        self.x[0] = 0;
                     }
-                    self.x[0] = 0;
                 }
                 215 => {
-                    // munmap -> ok (0)
+                    // munmap(addr, len) -> ok (0)
+                    self.munmap_log.push((self.x[0], self.x[1]));
                     self.x[0] = 0;
                 }
                 63 => {
@@ -4307,4 +4326,461 @@ fn aarch64_blot_abi8_full_18_exports_callbacks_reentry_globals_and_mem_grow() {
 
     vm.x[0] = ctx;
     vm.run_until_ret(exp["blot_aot_drop"], 10_000).unwrap();
+}
+
+#[test]
+fn a64_hardening_large_spill_store_tableset_addscaled_and_simd_spills() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, leb_u32, section, type_sec, wasm_module,
+    };
+
+    // 1. Large spill frame (>4200 live i64 values => spill offsets > 32760 B, triggering the
+    //    `emit_load_off` large-offset path that clobbers `SGP3`):
+    //    - `Op::Store` with non-zero offset storing a deeply spilled i64 value to linear memory
+    //    - `Op::TableSet` storing a deeply spilled funcref to a dynamic table
+    //    - `Op::AddScaled` with `|disp| >= 4096` targeting a spilled destination
+    let n_spill: u32 = 4300;
+    let mut f0_body = Vec::new();
+    // Compute v_0..v_{n_spill-1} as `param0 + k` and keep them live across the store!
+    // Use an opaque helper call `f_id` so optimizer cannot fold/rematerialize them.
+    for k in 0..n_spill {
+        f0_body.push(0x20);
+        leb_u32(&mut f0_body, 0);
+        f0_body.push(0x42);
+        leb_i32(&mut f0_body, (k + 1) as i32);
+        f0_body.push(0x7c); // i64.add
+        f0_body.push(0x10);
+        leb_u32(&mut f0_body, 0); // call f_id(i64) -> i64
+        f0_body.push(0x21);
+        leb_u32(&mut f0_body, k + 1);
+    }
+    // Store deeply spilled local 1 and local n_spill at offset=16 and offset=24 (non-zero offsets!).
+    f0_body.extend_from_slice(&[0x41, 0]);
+    f0_body.push(0x20);
+    leb_u32(&mut f0_body, 1);
+    f0_body.extend_from_slice(&[0x37, 3, 16]); // i64.store offset=16
+    f0_body.extend_from_slice(&[0x41, 0]);
+    f0_body.push(0x20);
+    leb_u32(&mut f0_body, n_spill);
+    f0_body.extend_from_slice(&[0x37, 3, 24]); // i64.store offset=24
+    // Also exercise dynamic `table.set` with deeply spilled funcref (stored in last local)
+    f0_body.push(0xd2);
+    leb_u32(&mut f0_body, 0); // ref.func 0
+    f0_body.push(0x21);
+    leb_u32(&mut f0_body, n_spill + 1);
+    // Keep all locals live by summing local 1 + local n_spill + reloaded mem[16] + mem[24]
+    // plus `AddScaled` with disp=5000 (`(local_1 + (local_2 << 2)) + 5000`).
+    f0_body.push(0x20);
+    leb_u32(&mut f0_body, 1);
+    f0_body.push(0x20);
+    leb_u32(&mut f0_body, 2);
+    f0_body.extend_from_slice(&[0x42, 2, 0x86, 0x7c]); // local_1 + (local_2 << 2)
+    f0_body.push(0x42);
+    leb_i32(&mut f0_body, 5000);
+    f0_body.push(0x7c); // + 5000 (disp >= 4096)
+    f0_body.push(0x21);
+    leb_u32(&mut f0_body, n_spill + 2);
+    // Dynamic table.set 0[0] = spilled funcref
+    f0_body.extend_from_slice(&[0x41, 0]);
+    f0_body.push(0x20);
+    leb_u32(&mut f0_body, n_spill + 1);
+    f0_body.extend_from_slice(&[0x26, 0]); // table.set 0
+    // Final sum touching every spilled local so none are DCE'd and stack frame stays > 34 KiB!
+    f0_body.extend_from_slice(&[0x41, 0, 0x29, 3, 16]); // mem[16]
+    f0_body.extend_from_slice(&[0x41, 0, 0x29, 3, 24, 0x7c]); // + mem[24]
+    f0_body.push(0x20);
+    leb_u32(&mut f0_body, n_spill + 2);
+    f0_body.push(0x7c);
+    for k in 1..=n_spill {
+        f0_body.push(0x20);
+        leb_u32(&mut f0_body, k);
+        f0_body.push(0x7c);
+    }
+
+    // 2. SIMD spill-aliasing stress test (>36 live v128 locals so `a`, `b`, `c`, `r` spill to SFP1/SFP2):
+    //    exercises `v128.bitselect`, `f32x4.pmin`, `f32x4.pmax`, `f64x2.pmin`, `f64x2.pmax`,
+    //    and `i8x16.shuffle` (lanes 16..31 only, so `!uses_a` and `b == SFP2`).
+    let n_vec: u32 = 40;
+    let mut f1_body = Vec::new();
+    // Create 40 distinct live v128 values via an opaque helper `v_id` (func 1).
+    for k in 0..n_vec {
+        f1_body.push(0x20);
+        leb_u32(&mut f1_body, 0);
+        f1_body.push(0x41);
+        leb_i32(&mut f1_body, (k as i32) - 20);
+        f1_body.push(0x6a); // x + k - 20
+        f1_body.push(0xb2); // f32.convert_i32_s
+        f1_body.extend_from_slice(&[0xfd, 0x13]); // f32x4.splat
+        f1_body.push(0x10);
+        leb_u32(&mut f1_body, 1); // call v_id(v128) -> v128
+        f1_body.push(0x21);
+        leb_u32(&mut f1_body, k + 1);
+    }
+    // Now perform `bitselect`, `f32x4.pmin`, `f32x4.pmax`, `f64x2.pmin`, `f64x2.pmax`,
+    // and `i8x16.shuffle` (lanes 16..31 only) across the spilled locals, storing results into more locals.
+    // local 41 = v128.bitselect(local 1, local 2, local 3)
+    for l in [1u32, 2, 3] {
+        f1_body.push(0x20);
+        leb_u32(&mut f1_body, l);
+    }
+    f1_body.extend_from_slice(&[0xfd, 0x52]); // v128.bitselect
+    f1_body.push(0x21);
+    leb_u32(&mut f1_body, n_vec + 1);
+    // local 42 = f32x4.pmin(local 4, local 5)
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 4);
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 5);
+    f1_body.extend_from_slice(&[0xfd, 0xea, 0x01]); // f32x4.pmin
+    f1_body.push(0x21);
+    leb_u32(&mut f1_body, n_vec + 2);
+    // local 43 = f32x4.pmax(local 5, local 4)
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 5);
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 4);
+    f1_body.extend_from_slice(&[0xfd, 0xeb, 0x01]); // f32x4.pmax
+    f1_body.push(0x21);
+    leb_u32(&mut f1_body, n_vec + 3);
+    // local 44 = f64x2.pmin(local 6, local 7)
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 6);
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 7);
+    f1_body.extend_from_slice(&[0xfd, 0xf6, 0x01]); // f64x2.pmin
+    f1_body.push(0x21);
+    leb_u32(&mut f1_body, n_vec + 4);
+    // local 45 = i8x16.shuffle(local 8, local 9, [31,30,...,16])  (!uses_a, b spilled!)
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 8);
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 9);
+    f1_body.extend_from_slice(&[0xfd, 0x0d]);
+    for lane in (16u8..32).rev() {
+        f1_body.push(lane);
+    }
+    f1_body.push(0x21);
+    leb_u32(&mut f1_body, n_vec + 5);
+    // XOR-fold ALL 45 vector locals so every one stays live simultaneously across the SIMD ops!
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, 1);
+    for k in 2..=(n_vec + 5) {
+        f1_body.push(0x20);
+        leb_u32(&mut f1_body, k);
+        f1_body.extend_from_slice(&[0xfd, 0x51]); // v128.xor
+    }
+    // Extract both i64 lanes and XOR to return an i64 checksum.
+    f1_body.push(0x21);
+    leb_u32(&mut f1_body, n_vec + 6);
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, n_vec + 6);
+    f1_body.extend_from_slice(&[0xfd, 0x1d, 0]); // i64x2.extract_lane 0
+    f1_body.push(0x20);
+    leb_u32(&mut f1_body, n_vec + 6);
+    f1_body.extend_from_slice(&[0xfd, 0x1d, 1]); // i64x2.extract_lane 1
+    f1_body.push(0x85); // i64.xor
+
+    // Helper func 0: f_id(i64) -> i64 (non-inlinable dummy branch)
+    let fid_body = enc_body(
+        &[],
+        &[
+            0x20, 0, 0x41, 0, 0x29, 3, 0,
+            0x85, // x ^ mem[0] (mem[0]==0, prevents constant folding)
+        ],
+    );
+    // Helper func 1: v_id(v128) -> v128 (XOR with mem[0..16]==0 so it stays opaque)
+    let vid_body = enc_body(&[], &[0x20, 0, 0x41, 0, 0xfd, 0x00, 0, 0, 0xfd, 0x51]);
+    // Build length-prefixed code bodies with local declarations.
+    let mut f0_raw = Vec::new();
+    leb_u32(&mut f0_raw, 3);
+    leb_u32(&mut f0_raw, n_spill);
+    f0_raw.push(0x7e); // i64
+    leb_u32(&mut f0_raw, 1);
+    f0_raw.push(0x70); // funcref
+    leb_u32(&mut f0_raw, 1);
+    f0_raw.push(0x7e); // i64
+    f0_raw.extend_from_slice(&f0_body);
+    f0_raw.push(0x0b);
+    let mut f0_full = Vec::new();
+    leb_u32(&mut f0_full, f0_raw.len() as u32);
+    f0_full.extend_from_slice(&f0_raw);
+
+    let mut f1_raw = Vec::new();
+    leb_u32(&mut f1_raw, 1);
+    leb_u32(&mut f1_raw, n_vec + 6);
+    f1_raw.push(0x7b); // v128
+    f1_raw.extend_from_slice(&f1_body);
+    f1_raw.push(0x0b);
+    let mut f1_full = Vec::new();
+    leb_u32(&mut f1_full, f1_raw.len() as u32);
+    f1_full.extend_from_slice(&f1_raw);
+
+    let mut tbl = vec![1, 0x70, 0x00];
+    leb_u32(&mut tbl, 4);
+    let elem = section(9, &[1, 0x03, 0x00, 1, 0]); // declarative ref.func 0
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7e], &[0x7e]), (&[0x7b], &[0x7b]), (&[0x7f], &[0x7e])]),
+        func_sec(&[0, 1, 0, 2]),
+        section(4, &tbl),
+        section(5, &[1, 0x00, 1]),
+        export_sec(&[("large_spill", 0, 2), ("simd_spills", 0, 3)]),
+        elem,
+        code_sec(&[fid_body, vid_body, f0_full, f1_full]),
+    ]);
+
+    // Compute oracle expectations with wtime-runtime.
+    let eng = wtime_runtime::Engine::new(wtime_runtime::Config::default()).unwrap();
+    let compiled = eng.compile(&wasm).unwrap();
+    let mut store = wtime_runtime::Store::new(&eng);
+    let inst = wtime_runtime::Linker::new(&eng)
+        .instantiate(&mut store, &compiled)
+        .unwrap();
+    let run_ref =
+        |store: &mut wtime_runtime::Store, name: &str, arg: wtime_runtime::Value| -> u64 {
+            let wtime_runtime::External::Func(f) = inst.export(store, name).unwrap() else {
+                panic!()
+            };
+            let wtime_runtime::RunOutcome::Returned(vals) = store.invoke(f, &[arg]).unwrap() else {
+                panic!()
+            };
+            match vals[0] {
+                wtime_runtime::Value::I64(v) => v as u64,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+    let exp_large = run_ref(&mut store, "large_spill", wtime_runtime::Value::I64(17));
+    let exp_simd = run_ref(&mut store, "simd_spills", wtime_runtime::Value::I32(13));
+
+    // Compile to AArch64 and execute on A64Vm.
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            ..Default::default()
+        },
+    )
+    .expect("compile aarch64 large_spill + simd_spills");
+    let exp: std::collections::HashMap<&str, u64> = img
+        .export_vaddrs
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    let mut vm = A64Vm::new(&img);
+    let p0 = vm.alloc_seg(64);
+    let p1 = vm.alloc_seg(64);
+    let sbuf = vm.alloc_seg(64);
+
+    vm.x[0] = 0;
+    vm.x[1] = 0;
+    vm.x[2] = 0;
+    vm.x[3] = p0;
+    vm.run_until_ret(exp["blot_aot_new"], 10_000_000).unwrap();
+    let ctx = vm.x[0];
+    assert_ne!(ctx, 0);
+
+    vm.write_bytes(sbuf, b"large_spill").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 11;
+    vm.x[3] = 17;
+    vm.x[4] = p0;
+    vm.x[5] = p1;
+    vm.run_until_ret(exp["blot_aot_call_export"], 50_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0, "large_spill trapped");
+    assert_eq!(
+        vm.read_u64(p0).unwrap(),
+        exp_large,
+        "large_spill result mismatch"
+    );
+
+    vm.write_bytes(sbuf, b"simd_spills").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = sbuf;
+    vm.x[2] = 11;
+    vm.x[3] = 13;
+    vm.x[4] = p0;
+    vm.x[5] = p1;
+    vm.run_until_ret(exp["blot_aot_call_export"], 50_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0, "simd_spills trapped");
+    assert_eq!(
+        vm.read_u64(p0).unwrap(),
+        exp_simd,
+        "simd_spills result mismatch"
+    );
+
+    vm.x[0] = ctx;
+    vm.run_until_ret(exp["blot_aot_drop"], 10_000).unwrap();
+}
+
+#[test]
+fn a64_hardening_long_export_name_and_blot_new_cleanup_and_inc_cache_symlink() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_u32, section, type_sec, wasm_module,
+    };
+
+    // 1. Export name >= 4096 bytes (5000 bytes) must compile without `ldrb_uimm` panic AND run!
+    let long_name = "e".repeat(5000);
+    let wasm_long = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        export_sec(&[(long_name.as_str(), 0, 0)]),
+        code_sec(&[enc_body(&[], &[0x20, 0, 0x41, 7, 0x6a])]),
+    ]);
+    let img_long = compile_wasm_to_aarch64_for_test(
+        &wasm_long,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            ..Default::default()
+        },
+    )
+    .expect("5000-byte export name must compile on aarch64");
+    let exp_l: std::collections::HashMap<&str, u64> = img_long
+        .export_vaddrs
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    let mut vm = A64Vm::new(&img_long);
+    let p0 = vm.alloc_seg(64);
+    let p1 = vm.alloc_seg(64);
+    let nbuf = vm.alloc_seg(5120);
+    vm.write_bytes(nbuf, long_name.as_bytes()).unwrap();
+    vm.x[0] = 0;
+    vm.x[1] = 0;
+    vm.x[2] = 0;
+    vm.x[3] = p0;
+    vm.run_until_ret(exp_l["blot_aot_new"], 10_000_000).unwrap();
+    let ctx = vm.x[0];
+    assert_ne!(ctx, 0);
+    vm.x[0] = ctx;
+    vm.x[1] = nbuf;
+    vm.x[2] = long_name.len() as u64;
+    vm.x[3] = 35;
+    vm.x[4] = p0;
+    vm.x[5] = p1;
+    vm.run_until_ret(exp_l["blot_aot_call_export"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm.x[0], 0);
+    assert_eq!(vm.read_u64(p0).unwrap(), 42);
+    vm.x[0] = ctx;
+    vm.run_until_ret(exp_l["blot_aot_drop"], 10_000).unwrap();
+
+    // 2. `blot_aot_new` trapping start fn + extra memory + dyn table must unmap EVERY mmap!
+    let mut tbl = vec![1, 0x70, 0x00];
+    leb_u32(&mut tbl, 2);
+    let wasm_trap_start = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(4, &tbl),
+        section(5, &[2, 0x00, 1, 0x00, 1]), // mem0 + extra mem1
+        section(8, &[0]),                   // start = func 0
+        code_sec(&[enc_body(&[], &[0x41, 0, 0xd0, 0x70, 0x26, 0, 0x00])]), // table.set 0; unreachable
+    ]);
+    let img_tr = compile_wasm_to_aarch64_for_test(
+        &wasm_trap_start,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let exp_tr: std::collections::HashMap<&str, u64> = img_tr
+        .export_vaddrs
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    let mut vm_tr = A64Vm::new(&img_tr);
+    let trap_out = vm_tr.alloc_seg(16);
+    vm_tr.x[0] = 0;
+    vm_tr.x[1] = 0;
+    vm_tr.x[2] = 0;
+    vm_tr.x[3] = trap_out;
+    vm_tr
+        .run_until_ret(exp_tr["blot_aot_new"], 10_000_000)
+        .unwrap();
+    assert_eq!(vm_tr.x[0], 0, "trapping start must return NULL");
+    assert_eq!(
+        vm_tr.read_bytes(trap_out, 1).unwrap()[0],
+        crate::x64::TRAP_UNREACHABLE
+    );
+    let mut mapped = vm_tr.mmap_log.clone();
+    let mut unmapped = vm_tr.munmap_log.clone();
+    mapped.sort_unstable();
+    unmapped.sort_unstable();
+    assert!(!mapped.is_empty());
+    assert_eq!(
+        mapped, unmapped,
+        "every mmap during failing blot_aot_new must be munmap'd"
+    );
+
+    // 3. `blot_aot_new` must check `SYS_MPROTECT` failure (guest stack = 1, mem0 = 2) and clean up!
+    let wasm_ok = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x00, 1]),
+        export_sec(&[("noop", 0, 0)]),
+        code_sec(&[enc_body(&[], &[])]),
+    ]);
+    let img_ok = compile_wasm_to_aarch64_for_test(
+        &wasm_ok,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let exp_ok: std::collections::HashMap<&str, u64> = img_ok
+        .export_vaddrs
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    for fail_at in [1usize, 2usize] {
+        let mut vm_mp = A64Vm::new(&img_ok);
+        vm_mp.fail_mprotect_at = Some(fail_at);
+        let tr = vm_mp.alloc_seg(16);
+        vm_mp.x[0] = 0;
+        vm_mp.x[1] = 0;
+        vm_mp.x[2] = 0;
+        vm_mp.x[3] = tr;
+        vm_mp
+            .run_until_ret(exp_ok["blot_aot_new"], 10_000_000)
+            .unwrap();
+        assert_eq!(
+            vm_mp.x[0], 0,
+            "mprotect failure #{fail_at} must return NULL"
+        );
+        assert_eq!(
+            vm_mp.read_bytes(tr, 1).unwrap()[0],
+            crate::x64::TRAP_ALLOC_FAILED
+        );
+        let mut m = vm_mp.mmap_log.clone();
+        let mut u = vm_mp.munmap_log.clone();
+        m.sort_unstable();
+        u.sort_unstable();
+        assert_eq!(
+            m, u,
+            "mprotect failure #{fail_at} must unmap all prior mappings"
+        );
+    }
+
+    // 4. `load_a64_inc_cache` rejects symlinks fail-closed.
+    #[cfg(unix)]
+    {
+        let dir =
+            std::env::temp_dir().join(format!("wtime-a64-inc-symlink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("real.bin");
+        std::fs::write(&target, vec![0u8; 128]).unwrap();
+        let abi = [0x42u8; 32];
+        let link = dir.join(format!("{}.bin", crate::sha256::to_hex(&abi)));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            super::inc_cache::load_a64_inc_cache(&dir, &abi, 1, 1, 0).is_none(),
+            "load_a64_inc_cache must reject symlink cache files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

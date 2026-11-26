@@ -522,6 +522,16 @@ struct Lower<'a> {
     live_flags: Option<LiveFlags>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoreAddrScratch {
+    /// `mem` does not reference `SCRATCH_GP1`.
+    None,
+    /// `SCRATCH_GP1` holds a wide byte offset relative to `R14` (memory 0 base).
+    Mem0OffsetInSgp1,
+    /// `SCRATCH_GP1` holds an absolute host pointer (extra memory `1..N`).
+    AbsPtrInSgp1,
+}
+
 impl<'a> Lower<'a> {
     fn is_upper32_zero(&mut self, v: Val) -> bool {
         if matches!(self.loc(v), Loc::Remat(RematConst::I32(_))) {
@@ -982,7 +992,13 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn emit_store_to_mem(&mut self, kind: StoreKind, val: Val, mem: Mem, wide_offset: bool) {
+    fn emit_store_to_mem(
+        &mut self,
+        kind: StoreKind,
+        val: Val,
+        mem: Mem,
+        addr_scratch: StoreAddrScratch,
+    ) {
         match kind {
             StoreKind::F32 => {
                 if let Loc::Remat(RematConst::F32(bits)) = self.loc(val) {
@@ -1036,10 +1052,19 @@ impl<'a> Lower<'a> {
                     }
                     _ => {}
                 }
-                let (mem, vr) = if wide_offset && !matches!(self.loc(val), Loc::Gp(_)) {
+                let (mem, vr) = if addr_scratch != StoreAddrScratch::None
+                    && !matches!(self.loc(val), Loc::Gp(_))
+                {
                     self.asm.mov_rr(true, SCRATCH_GP2, SCRATCH_GP1);
                     let vr = self.gp_read(val, SCRATCH_GP1);
-                    (Mem::indexed(Gp::R14, SCRATCH_GP2, 1, 0), vr)
+                    let relocated = match addr_scratch {
+                        StoreAddrScratch::Mem0OffsetInSgp1 => {
+                            Mem::indexed(Gp::R14, SCRATCH_GP2, 1, 0)
+                        }
+                        StoreAddrScratch::AbsPtrInSgp1 => Mem::base(SCRATCH_GP2),
+                        StoreAddrScratch::None => unreachable!(),
+                    };
+                    (relocated, vr)
                 } else {
                     let vr = self.gp_read(val, SCRATCH_GP1);
                     (mem, vr)
@@ -3794,7 +3819,16 @@ impl<'a> Lower<'a> {
                 }
                 // Careful: if `offset > i32::MAX`, `mem_addr` uses `SCRATCH_GP1`, so read `val` cleanly!
                 let mem = self.mem_addr(ar, offset);
-                self.emit_store_to_mem(kind, val, mem, offset > i32::MAX as u64);
+                self.emit_store_to_mem(
+                    kind,
+                    val,
+                    mem,
+                    if offset > i32::MAX as u64 {
+                        StoreAddrScratch::Mem0OffsetInSgp1
+                    } else {
+                        StoreAddrScratch::None
+                    },
+                );
             }
             Op::StoreScaled {
                 kind,
@@ -3805,7 +3839,7 @@ impl<'a> Lower<'a> {
             } => {
                 let ar = self.gp_read(addr, SCRATCH_GP2);
                 let mem = Mem::indexed(Gp::R14, ar, scale, offset as i32);
-                self.emit_store_to_mem(kind, val, mem, false);
+                self.emit_store_to_mem(kind, val, mem, StoreAddrScratch::None);
             }
             Op::V128LoadLane {
                 width,
@@ -4008,7 +4042,12 @@ impl<'a> Lower<'a> {
                         self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                     }
                 }
-                self.emit_store_to_mem(kind, val, Mem::base(SCRATCH_GP1), true);
+                self.emit_store_to_mem(
+                    kind,
+                    val,
+                    Mem::base(SCRATCH_GP1),
+                    StoreAddrScratch::AbsPtrInSgp1,
+                );
             }
             Op::V128LoadLaneMem {
                 mem,

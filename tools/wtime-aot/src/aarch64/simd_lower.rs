@@ -33,13 +33,15 @@ pub fn emit_a64_v128_shuffle(asm: &mut A64Asm, d: VReg, a: VReg, b: VReg, lanes:
         }
     }
     if !uses_b {
-        load_v128_const(asm, SFP2, mask_a);
-        asm.tbl_16b(d, a, SFP2);
+        let mask_reg = if a == SFP2 { SFP1 } else { SFP2 };
+        load_v128_const(asm, mask_reg, mask_a);
+        asm.tbl_16b(d, a, mask_reg);
         return;
     }
     if !uses_a {
-        load_v128_const(asm, SFP2, mask_b);
-        asm.tbl_16b(d, b, SFP2);
+        let mask_reg = if b == SFP2 { SFP1 } else { SFP2 };
+        load_v128_const(asm, mask_reg, mask_b);
+        asm.tbl_16b(d, b, mask_reg);
         return;
     }
     // Both inputs used: preserve `b` in GP scratch (`X16:X17`) and `tbl_a` in `[CTX+OFF_SCRATCH_V128]`
@@ -444,26 +446,53 @@ pub fn emit_a64_v128_bin(
             // pmax(a, b) = a < b ? b : a  (mask = b > a)
             let is64 = matches!(op, 0xfdf6 | 0xfdf7);
             let is_pmax = matches!(op, 0xfdeb | 0xfdf7);
-            let b_safe = if a == b {
-                a
-            } else if d == b {
-                asm.mov_16b(SFP2, b);
-                SFP2
+            if a == b {
+                // `x < x` is always false (even for NaN and ±0.0), so pmin(x, x) == pmax(x, x) == x.
+                if d != a {
+                    asm.mov_16b(d, a);
+                }
+            } else if d == SFP1 || d == SFP2 {
+                // Spilled destination (`d` aliases scratch): compute `(b & mask) | (a & ~mask)`
+                // preserving `a` in `[CTX_REG + OFF_SCRATCH_V128]` and `b` in `SGP1:SGP2` so
+                // every alias combination (including `d == a == SFP1`, `b == SFP2`) is exact.
+                asm.str_q_uimm(a, CTX_REG, OFF_SCRATCH_V128 as u32);
+                asm.umov(3, SGP1, b, 0);
+                asm.umov(3, SGP2, b, 1);
+                if is_pmax {
+                    asm.fcmgt_v128(is64, SFP2, b, a);
+                } else {
+                    asm.fcmgt_v128(is64, SFP2, a, b);
+                }
+                asm.ldr_q_uimm(SFP1, CTX_REG, OFF_SCRATCH_V128 as u32);
+                asm.bic_16b(SFP1, SFP1, SFP2);
+                asm.str_q_uimm(SFP1, CTX_REG, OFF_SCRATCH_V128 as u32);
+                asm.ins_gp(3, SFP1, 0, SGP1);
+                asm.ins_gp(3, SFP1, 1, SGP2);
+                asm.and_16b(SFP1, SFP1, SFP2);
+                asm.ldr_q_uimm(SFP2, CTX_REG, OFF_SCRATCH_V128 as u32);
+                asm.orr_16b(d, SFP1, SFP2);
             } else {
-                b
-            };
-            let a_safe = if d == a {
-                asm.mov_16b(SFP1, a);
-                SFP1
-            } else {
-                a
-            };
-            if is_pmax {
-                asm.fcmgt_v128(is64, d, b_safe, a_safe);
-            } else {
-                asm.fcmgt_v128(is64, d, a_safe, b_safe);
+                let b_safe = if d == b {
+                    let tmp = if a == SFP2 { SFP1 } else { SFP2 };
+                    asm.mov_16b(tmp, b);
+                    tmp
+                } else {
+                    b
+                };
+                let a_safe = if d == a {
+                    let tmp = if b_safe == SFP1 { SFP2 } else { SFP1 };
+                    asm.mov_16b(tmp, a);
+                    tmp
+                } else {
+                    a
+                };
+                if is_pmax {
+                    asm.fcmgt_v128(is64, d, b_safe, a_safe);
+                } else {
+                    asm.fcmgt_v128(is64, d, a_safe, b_safe);
+                }
+                asm.bsl_16b(d, b_safe, a_safe);
             }
-            asm.bsl_16b(d, b_safe, a_safe);
         }
 
         // f64x2 arithmetic

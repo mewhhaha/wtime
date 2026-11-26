@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 10;
+const FORMAT_VERSION: u32 = 11;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -509,7 +509,7 @@ fn unix_nofollow_flag() -> i32 {
 
 /// Opens `path` strictly as an owner-private, non-symlink regular file without blocking on FIFOs
 /// and reads at most `MAX_CACHE_FILE_BYTES` bytes.
-fn read_private_cache_file(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_private_cache_file(path: &Path) -> Option<Vec<u8>> {
     let smeta = fs::symlink_metadata(path).ok()?;
     if smeta.file_type().is_symlink() || !smeta.file_type().is_file() {
         return None;

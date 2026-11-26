@@ -1521,7 +1521,11 @@ pub fn emit_a64_exports(
         let skip_l = a.new_label();
         a.uxtb(Reg::X0, Reg::X0);
         a.sub_imm(false, Reg::X0, Reg::X0, 1);
-        a.cmp_imm(false, Reg::X0, 22);
+        a.cmp_imm(
+            false,
+            Reg::X0,
+            crate::x64::runtime::TRAP_MESSAGES.len() as u16,
+        );
         a.b_cond(Cond::Hs, bad);
         a.adr_reloc(Reg::X3, A64RelocTarget::Rodata(tables.trap_table_off));
         a.uxtw(Reg::X4, Reg::X0);
@@ -1608,8 +1612,10 @@ pub fn emit_a64_exports(
         let mut a = A64Asm::new();
         let fail_mem_limit = a.new_label();
         let fail_mem_too_large = a.new_label();
-        let fail_alloc = a.new_label();
-        let fail_trap = a.new_label();
+        let fail_alloc_no_ctx = a.new_label();
+        let fail_alloc_cleanup = a.new_label();
+        let fail_trap_cleanup = a.new_label();
+        let fail_no_ctx = a.new_label();
         let skip_mem = a.new_label();
         let done_ok = a.new_label();
         // Save callee-saved regs X19..X28, FP, LR (12 regs = 96 B, 16-byte aligned).
@@ -1626,6 +1632,7 @@ pub fn emit_a64_exports(
         a.mov_r(true, Reg::X22, Reg::X3); // out_trap
 
         let (min_pages, declared_max) = module.memory.unwrap_or((0, 0));
+        let mem0_hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
         if module.memory.is_some() {
             let have_lim = a.new_label();
             let default_lim = if module.memory64 {
@@ -1633,7 +1640,6 @@ pub fn emit_a64_exports(
             } else {
                 65_536
             };
-            let hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
             a.cbnz(true, Reg::X21, have_lim);
             a.mov_imm64(Reg::X21, default_lim);
             a.bind(have_lim);
@@ -1642,7 +1648,7 @@ pub fn emit_a64_exports(
             a.cmp_r(true, Reg::X4, Reg::X21);
             a.b_cond(Cond::Hi, fail_mem_limit);
 
-            a.mov_imm64(Reg::X23, declared_max.min(hard_cap));
+            a.mov_imm64(Reg::X23, declared_max.min(mem0_hard_cap));
             a.cmp_r(true, Reg::X21, Reg::X23);
             a.csel(true, Reg::X23, Reg::X21, Reg::X23, Cond::Lo);
 
@@ -1650,6 +1656,12 @@ pub fn emit_a64_exports(
             a.b_cond(Cond::Hi, fail_mem_too_large);
         } else {
             a.movz(true, Reg::X23, 0, 0);
+        }
+        for em in &module.extra_memories {
+            let hard_cap = if em.memory64 { 1u64 << 28 } else { 65_536 };
+            if em.min_pages > hard_cap {
+                a.b(fail_mem_too_large);
+            }
         }
 
         // mmap Ctx (`layout.total_bytes`)
@@ -1662,7 +1674,7 @@ pub fn emit_a64_exports(
         emit_syscall(&mut a, SYS_MMAP);
         a.mov_imm64(Reg::X4, (-4095i64) as u64);
         a.cmp_r(true, Reg::X0, Reg::X4);
-        a.b_cond(Cond::Hs, fail_alloc);
+        a.b_cond(Cond::Hs, fail_alloc_no_ctx);
         a.mov_r(true, CTX_REG, Reg::X0);
         a.mov_imm64(Reg::X4, layout.total_bytes as u64);
         emit_store_off(
@@ -1712,7 +1724,7 @@ pub fn emit_a64_exports(
         emit_syscall(&mut a, SYS_MMAP);
         a.mov_imm64(Reg::X4, (-4095i64) as u64);
         a.cmp_r(true, Reg::X0, Reg::X4);
-        a.b_cond(Cond::Hs, fail_alloc);
+        a.b_cond(Cond::Hs, fail_alloc_cleanup);
         a.mov_r(true, Reg::X24, Reg::X0);
         emit_store_off(
             &mut a,
@@ -1728,6 +1740,9 @@ pub fn emit_a64_exports(
         a.mov_imm64(Reg::X1, GUEST_STACK_USABLE_BYTES as u64);
         a.mov_imm32(Reg::X2, 3);
         emit_syscall(&mut a, SYS_MPROTECT);
+        a.mov_imm64(Reg::X4, (-4095i64) as u64);
+        a.cmp_r(true, Reg::X0, Reg::X4);
+        a.b_cond(Cond::Hs, fail_alloc_cleanup);
         a.mov_imm64(Reg::X4, GUEST_STACK_TOTAL_BYTES as u64);
         a.add_r(true, Reg::X4, Reg::X24, Reg::X4);
         emit_store_off(
@@ -1768,7 +1783,7 @@ pub fn emit_a64_exports(
         emit_syscall(&mut a, SYS_MMAP);
         a.mov_imm64(Reg::X4, (-4095i64) as u64);
         a.cmp_r(true, Reg::X0, Reg::X4);
-        a.b_cond(Cond::Hs, fail_alloc);
+        a.b_cond(Cond::Hs, fail_alloc_cleanup);
         a.mov_r(true, MEM_BASE_REG, Reg::X0);
         emit_store_off(
             &mut a,
@@ -1788,12 +1803,15 @@ pub fn emit_a64_exports(
             OFF_MEM_RESERVE_BYTES,
             SGP3,
         );
-        if min_pages > 0 {
+        if min_pages > 0 && min_pages <= mem0_hard_cap {
             a.mov_imm64(MEM_LEN_REG, min_pages << 16);
             a.mov_r(true, Reg::X0, MEM_BASE_REG);
             a.mov_r(true, Reg::X1, MEM_LEN_REG);
             a.mov_imm32(Reg::X2, 3);
             emit_syscall(&mut a, SYS_MPROTECT);
+            a.mov_imm64(Reg::X4, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X4);
+            a.b_cond(Cond::Hs, fail_alloc_cleanup);
             emit_store_off(
                 &mut a,
                 Ty::I64,
@@ -1809,12 +1827,17 @@ pub fn emit_a64_exports(
         // Additional linear memories `1..N` (`multi-memory`).
         for (mi, em) in module.extra_memories.iter().enumerate() {
             let desc_off = layout.extra_mem_offs[mi];
-            let hard_cap = if em.memory64 {
-                em.min_pages.max(131_072)
+            let hard_cap = if em.memory64 { 1u64 << 28 } else { 65_536 };
+            if em.min_pages > hard_cap {
+                // Already rejected unconditionally before `mmap Ctx`; skip dead compile-time shift.
+                continue;
+            }
+            let default_cap = if em.memory64 {
+                em.min_pages.max(131_072).min(hard_cap)
             } else {
                 65_536
             };
-            let eff_max = em.max_pages.min(hard_cap);
+            let eff_max = em.max_pages.min(default_cap);
             if eff_max == 0 {
                 continue;
             }
@@ -1839,7 +1862,7 @@ pub fn emit_a64_exports(
             emit_syscall(&mut a, SYS_MMAP);
             a.mov_imm64(Reg::X4, (-4095i64) as u64);
             a.cmp_r(true, Reg::X0, Reg::X4);
-            a.b_cond(Cond::Hs, fail_alloc);
+            a.b_cond(Cond::Hs, fail_alloc_cleanup);
             a.mov_r(true, Reg::X20, Reg::X0);
             emit_store_off(
                 &mut a,
@@ -1865,6 +1888,9 @@ pub fn emit_a64_exports(
                 a.mov_imm64(Reg::X1, init_len);
                 a.mov_imm32(Reg::X2, 3);
                 emit_syscall(&mut a, SYS_MPROTECT);
+                a.mov_imm64(Reg::X4, (-4095i64) as u64);
+                a.cmp_r(true, Reg::X0, Reg::X4);
+                a.b_cond(Cond::Hs, fail_alloc_cleanup);
                 a.mov_imm64(Reg::X4, init_len);
                 emit_store_off(
                     &mut a,
@@ -1889,7 +1915,7 @@ pub fn emit_a64_exports(
             emit_syscall(&mut a, SYS_MMAP);
             a.mov_imm64(Reg::X4, (-4095i64) as u64);
             a.cmp_r(true, Reg::X0, Reg::X4);
-            a.b_cond(Cond::Hs, fail_alloc);
+            a.b_cond(Cond::Hs, fail_alloc_cleanup);
             emit_store_off(
                 &mut a,
                 Ty::I64,
@@ -1938,7 +1964,7 @@ pub fn emit_a64_exports(
                 emit_syscall(&mut a, SYS_MMAP);
                 a.mov_imm64(Reg::X4, (-4095i64) as u64);
                 a.cmp_r(true, Reg::X0, Reg::X4);
-                a.b_cond(Cond::Hs, fail_alloc);
+                a.b_cond(Cond::Hs, fail_alloc_cleanup);
                 emit_store_off(
                     &mut a,
                     Ty::I64,
@@ -2025,27 +2051,150 @@ pub fn emit_a64_exports(
         );
         a.mov_r(true, Reg::SP, SGP2);
         a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
-        a.cbnz(false, SGP1, fail_trap);
+        a.cbnz(false, SGP1, fail_trap_cleanup);
         a.mov_r(true, Reg::X0, CTX_REG);
         a.b(done_ok);
 
+        // Pre-Ctx allocation failure paths (nothing mapped yet).
         a.bind(fail_mem_limit);
-        a.mov_imm32(SGP1, u32::from(TRAP_MEM_LIMIT));
-        a.b(fail_trap);
+        a.mov_imm32(Reg::X25, u32::from(TRAP_MEM_LIMIT));
+        a.b(fail_no_ctx);
         a.bind(fail_mem_too_large);
-        a.mov_imm32(SGP1, u32::from(TRAP_MEM_TOO_LARGE));
-        a.b(fail_trap);
-        a.bind(fail_alloc);
+        a.mov_imm32(Reg::X25, u32::from(TRAP_MEM_TOO_LARGE));
+        a.b(fail_no_ctx);
+        a.bind(fail_alloc_no_ctx);
+        a.mov_imm32(Reg::X25, u32::from(TRAP_ALLOC_FAILED));
+        a.b(fail_no_ctx);
+
+        // Post-Ctx failure paths: save mapped trap byte in callee-saved `X25`, then unmap every
+        // allocated mapping (mirroring `blot_aot_drop`) before returning NULL.
+        a.bind(fail_alloc_cleanup);
         a.mov_imm32(SGP1, u32::from(TRAP_ALLOC_FAILED));
-        a.bind(fail_trap);
+        a.bind(fail_trap_cleanup);
         let not_exn_init = a.new_label();
         a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
         a.b_cond(Cond::Ne, not_exn_init);
         a.mov_imm32(SGP1, u32::from(TRAP_UNREACHABLE));
         a.bind(not_exn_init);
+        a.mov_r(false, Reg::X25, SGP1);
+
+        let skip_cl_m = a.new_label();
+        let skip_cl_s = a.new_label();
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X0),
+            None,
+            CTX_REG,
+            OFF_MEM_BASE,
+            Reg::X15,
+        );
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X1),
+            None,
+            CTX_REG,
+            OFF_MEM_RESERVE_BYTES,
+            Reg::X15,
+        );
+        a.cbz(true, Reg::X0, skip_cl_m);
+        emit_syscall(&mut a, SYS_MUNMAP);
+        a.bind(skip_cl_m);
+        for &desc_off in &layout.extra_mem_offs {
+            let skip_em = a.new_label();
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                CTX_REG,
+                desc_off,
+                Reg::X15,
+            );
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X1),
+                None,
+                CTX_REG,
+                desc_off + 24,
+                Reg::X15,
+            );
+            a.cbz(true, Reg::X1, skip_em);
+            emit_syscall(&mut a, SYS_MUNMAP);
+            a.bind(skip_em);
+        }
+        if let Some(exn_off) = layout.exn_state_off {
+            let skip_exn = a.new_label();
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                CTX_REG,
+                exn_off + 8,
+                Reg::X15,
+            );
+            a.cbz(true, Reg::X0, skip_exn);
+            a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
+            emit_syscall(&mut a, SYS_MUNMAP);
+            a.bind(skip_exn);
+        }
+        for &(desc_off, _, _) in layout.dyn_tables.values() {
+            let skip_dt = a.new_label();
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                CTX_REG,
+                desc_off,
+                Reg::X15,
+            );
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X1),
+                None,
+                CTX_REG,
+                desc_off + 16,
+                Reg::X15,
+            );
+            a.cbz(true, Reg::X1, skip_dt);
+            emit_syscall(&mut a, SYS_MUNMAP);
+            a.bind(skip_dt);
+        }
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X0),
+            None,
+            CTX_REG,
+            OFF_GUEST_STACK_BASE,
+            Reg::X15,
+        );
+        a.cbz(true, Reg::X0, skip_cl_s);
+        a.mov_imm64(Reg::X1, GUEST_STACK_TOTAL_BYTES as u64);
+        emit_syscall(&mut a, SYS_MUNMAP);
+        a.bind(skip_cl_s);
+        // Load `OFF_HANDLE_ALLOC_BYTES` BEFORE unmapping `CTX_REG`!
+        a.mov_r(true, Reg::X0, CTX_REG);
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X1),
+            None,
+            CTX_REG,
+            OFF_HANDLE_ALLOC_BYTES,
+            Reg::X15,
+        );
+        emit_syscall(&mut a, SYS_MUNMAP);
+
+        a.bind(fail_no_ctx);
         let skip_tr = a.new_label();
         a.cbz(true, Reg::X22, skip_tr);
-        a.strb_uimm(SGP1, Reg::X22, 0);
+        a.strb_uimm(Reg::X25, Reg::X22, 0);
         a.bind(skip_tr);
         a.movz(true, Reg::X0, 0, 0);
 
@@ -2282,17 +2431,27 @@ pub fn emit_a64_exports(
         );
         emit_a64_pinned_load(&mut a, module, layout);
 
-        // Linear scan over exported functions comparing name bytes.
+        // Linear scan over exported functions comparing name bytes against local rodata
+        // (supports arbitrary export name lengths without `ldrb_uimm` 4095-byte overflow).
         for (exp_name, func_index) in &module.exported_funcs {
             let next_exp = a.new_label();
             let nb = exp_name.as_bytes();
             a.mov_imm64(Reg::X6, nb.len() as u64);
             a.cmp_r(true, Reg::X20, Reg::X6);
             a.b_cond(Cond::Ne, next_exp);
-            for (bi, &ch) in nb.iter().enumerate() {
-                a.ldrb_uimm(Reg::X7, Reg::X19, bi as u32);
-                a.cmp_imm(false, Reg::X7, u16::from(ch));
+            if !nb.is_empty() {
+                let name_off = a.add_local_rodata(1, nb);
+                a.adr_reloc(Reg::X6, A64RelocTarget::LocalRodata(name_off));
+                a.movz(true, Reg::X8, 0, 0);
+                let cmp_lp = a.new_label();
+                a.bind(cmp_lp);
+                a.ldrb_reg(Reg::X7, Reg::X19, Reg::X8, false);
+                a.ldrb_reg(Reg::X9, Reg::X6, Reg::X8, false);
+                a.cmp_r(false, Reg::X7, Reg::X9);
                 a.b_cond(Cond::Ne, next_exp);
+                a.add_imm(true, Reg::X8, Reg::X8, 1);
+                a.cmp_r(true, Reg::X8, Reg::X20);
+                a.b_cond(Cond::Lo, cmp_lp);
             }
             // Matched export! Marshal up to 1 arg (i32/i64/f32/f64/ref) and call.
             let ty_sig = module
