@@ -13,6 +13,7 @@ mod aarch64;
 mod build;
 mod cgen;
 mod codegen;
+mod pgo;
 mod sha256;
 mod x64;
 
@@ -25,7 +26,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -54,6 +55,8 @@ fn main() {
     let mut target = codegen::Target::GooseBin;
     let mut backend = build::Backend::Rust;
     let mut spectre_mitigations = false;
+    let mut pgo_gen: Option<PathBuf> = None;
+    let mut pgo_use: Option<PathBuf> = None;
     let mut c_opt = cgen::COpt::Auto;
     let mut c_opt_explicit = false;
     let mut target_cpu = String::from("native");
@@ -78,6 +81,20 @@ fn main() {
                 }
             },
             "--spectre-mitigations" => spectre_mitigations = true,
+            "--pgo-gen" => match args.next() {
+                Some(p) if !p.is_empty() => pgo_gen = Some(PathBuf::from(p)),
+                _ => {
+                    eprintln!("{USAGE}\n--pgo-gen needs a profile output path");
+                    exit(2);
+                }
+            },
+            "--pgo-use" => match args.next() {
+                Some(p) if !p.is_empty() => pgo_use = Some(PathBuf::from(p)),
+                _ => {
+                    eprintln!("{USAGE}\n--pgo-use needs a WTPGO1 profile path");
+                    exit(2);
+                }
+            },
             "--c-opt" => match args.next().as_deref().map(cgen::COpt::parse) {
                 Some(Ok(v)) => {
                     c_opt = v;
@@ -143,6 +160,34 @@ fn main() {
         eprintln!("wtime-aot: {}", build::SPECTRE_RUST_ERROR);
         exit(2);
     }
+    if pgo_gen.is_some() && pgo_use.is_some() {
+        eprintln!("wtime-aot: --pgo-gen and --pgo-use cannot be used together");
+        exit(2);
+    }
+    if (pgo_gen.is_some() || pgo_use.is_some())
+        && !matches!(backend, build::Backend::X64 | build::Backend::Aarch64)
+    {
+        eprintln!(
+            "wtime-aot: --pgo-gen/--pgo-use are only supported with --backend x64 or --backend aarch64"
+        );
+        exit(2);
+    }
+    if let Some(ref pg) = pgo_gen
+        && let Err(e) = pgo::validate_pgo_gen_path(pg)
+    {
+        eprintln!("wtime-aot: {e}");
+        exit(2);
+    }
+    let loaded_pgo_use = match pgo_use {
+        Some(ref pu) => match pgo::PgoProfile::load_file(pu) {
+            Ok(prof) => Some(prof),
+            Err(e) => {
+                eprintln!("wtime-aot: {e}");
+                exit(1);
+            }
+        },
+        None => None,
+    };
     let (Some(module), Some(out)) = (module, out) else {
         eprintln!("{USAGE}");
         exit(2)
@@ -189,6 +234,8 @@ fn main() {
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
             spectre_mitigations,
+            pgo_gen_path: pgo_gen,
+            pgo_use: loaded_pgo_use,
             ..Default::default()
         };
         let elf_bytes = match x64::compile_wasm_to_x64_so(&bytes, &opts) {
@@ -246,6 +293,8 @@ fn main() {
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
             spectre_mitigations,
+            pgo_gen_path: pgo_gen,
+            pgo_use: loaded_pgo_use,
             ..Default::default()
         };
         let elf_bytes = match aarch64::compile_wasm_to_aarch64(&bytes, &opts) {

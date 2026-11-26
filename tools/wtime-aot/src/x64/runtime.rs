@@ -22,9 +22,14 @@ use super::{
     TRAP_UNREACHABLE, TRAP_UNSUPPORTED_ISA,
 };
 
+const SYS_WRITE: u32 = 1;
+const SYS_CLOSE: u32 = 3;
 const SYS_MMAP: u32 = 9;
 const SYS_MPROTECT: u32 = 10;
 const SYS_MUNMAP: u32 = 11;
+const SYS_OPENAT: u32 = 257;
+const AT_FDCWD_I32: i32 = -100;
+const O_WRONLY_CREAT_TRUNC: u32 = 0x241;
 
 const PROT_NONE: u32 = 0;
 const PROT_RW: u32 = 3; // PROT_READ | PROT_WRITE
@@ -1943,6 +1948,30 @@ fn emit_export_new(
         }
     }
 
+    // ---- Step C3e: Native PGO counter buffer (`--pgo-gen` only) ----
+    if let Some(ref pgo) = layout.pgo_gen {
+        a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_ri64(Gp::Rsi, pgo.alloc_bytes as u64);
+        a.mov_ri32(Gp::Rdx, PROT_RW);
+        a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+        a.mov_ri64(Gp::R8, u64::MAX);
+        a.xor_rr(false, Gp::R9, Gp::R9);
+        a.mov_ri32(Gp::Rax, SYS_MMAP);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, pgo.ctx_ptr_off), Gp::Rax);
+        // Write 32-byte WTPGO1 header into the start of the buffer.
+        a.mov_ri64(Gp::Rcx, crate::pgo::WTPGO1_MAGIC_U64);
+        a.mov_mr(true, Mem::base_disp(Gp::Rax, 0), Gp::Rcx);
+        a.mov_mi32(false, Mem::base_disp(Gp::Rax, 8), pgo.n_defs as i32);
+        a.mov_mi32(false, Mem::base_disp(Gp::Rax, 12), pgo.n_ci_sites as i32);
+        a.mov_ri64(Gp::Rcx, pgo.module_hash_lo);
+        a.mov_mr(true, Mem::base_disp(Gp::Rax, 16), Gp::Rcx);
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::Rax, 24), Gp::Rcx);
+    }
+
     // ---- Step D: Switch to guest stack and run wt_initialize ----
     a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 1);
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rsp);
@@ -2115,6 +2144,16 @@ fn emit_x64_cleanup_ctx(a: &mut Asm, ctx_reg: Gp, layout: &CtxLayout) {
         a.syscall();
         a.bind(lbl_skip);
     }
+    if let Some(ref pgo) = layout.pgo_gen {
+        let lbl_skip = a.new_label();
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, pgo.ctx_ptr_off));
+        a.test_rr(true, Gp::Rdi, Gp::Rdi);
+        a.jcc(Cond::E, lbl_skip);
+        a.mov_ri64(Gp::Rsi, pgo.alloc_bytes as u64);
+        a.mov_ri32(Gp::Rax, SYS_MUNMAP);
+        a.syscall();
+        a.bind(lbl_skip);
+    }
 
     // Load `OFF_HANDLE_ALLOC_BYTES` BEFORE scrubbing/unmapping `ctx_reg`!
     a.mov_rm(
@@ -2132,6 +2171,50 @@ fn emit_x64_cleanup_ctx(a: &mut Asm, ctx_reg: Gp, layout: &CtxLayout) {
     a.syscall();
 }
 
+/// Flushes the `WTPGO1` profile buffer to `pgo.path_ro_off` on clean exit (`--pgo-gen` only).
+/// Clobbers Rax, Rcx, Rdx, Rdi, Rsi, R8, R9, R10, R11; preserves callee-saved `ctx_reg`.
+pub(crate) fn emit_x64_flush_pgo_profile(a: &mut Asm, ctx_reg: Gp, pgo: &super::PgoGenLayout) {
+    let lbl_done = a.new_label();
+    a.mov_rm(true, Gp::R8, Mem::base_disp(ctx_reg, pgo.ctx_ptr_off));
+    a.test_rr(true, Gp::R8, Gp::R8);
+    a.jcc(Cond::E, lbl_done);
+    // fd = openat(AT_FDCWD, path_ro, O_WRONLY|O_CREAT|O_TRUNC, 0o600)
+    a.mov_ri64(Gp::Rdi, i64::from(AT_FDCWD_I32) as u64);
+    a.lea_rip(Gp::Rsi, RelocTarget::Rodata(pgo.path_ro_off));
+    a.mov_ri32(Gp::Rdx, O_WRONLY_CREAT_TRUNC);
+    a.mov_ri32(Gp::R10, 0o600);
+    a.mov_ri32(Gp::Rax, SYS_OPENAT);
+    a.syscall();
+    a.cmp_ri(true, Gp::Rax, 0);
+    a.jcc(Cond::L, lbl_done);
+    // R9 = fd, R8 = ptr, R10 = remaining bytes
+    a.mov_rr(true, Gp::R9, Gp::Rax);
+    a.mov_ri64(Gp::R10, pgo.payload_bytes as u64);
+    let lbl_wloop = a.new_label();
+    let lbl_close = a.new_label();
+    a.bind(lbl_wloop);
+    a.test_rr(true, Gp::R10, Gp::R10);
+    a.jcc(Cond::E, lbl_close);
+    a.mov_rr(true, Gp::Rdi, Gp::R9);
+    a.mov_rr(true, Gp::Rsi, Gp::R8);
+    a.mov_rr(true, Gp::Rdx, Gp::R10);
+    a.mov_ri32(Gp::Rax, SYS_WRITE);
+    a.syscall();
+    // Retry on EINTR (-4), stop on <= 0.
+    a.cmp_ri(true, Gp::Rax, -4);
+    a.jcc(Cond::E, lbl_wloop);
+    a.cmp_ri(true, Gp::Rax, 0);
+    a.jcc(Cond::Le, lbl_close);
+    a.add_rr(true, Gp::R8, Gp::Rax);
+    a.sub_rr(true, Gp::R10, Gp::Rax);
+    a.jmp(lbl_wloop);
+    a.bind(lbl_close);
+    a.mov_rr(true, Gp::Rdi, Gp::R9);
+    a.mov_ri32(Gp::Rax, SYS_CLOSE);
+    a.syscall();
+    a.bind(lbl_done);
+}
+
 fn emit_export_drop(layout: &CtxLayout) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(192);
     let lbl_done = a.new_label();
@@ -2145,6 +2228,9 @@ fn emit_export_drop(layout: &CtxLayout) -> Result<Asm, String> {
 
     a.push(Gp::Rbx);
     a.mov_rr(true, Gp::Rbx, Gp::Rdi);
+    if let Some(ref pgo) = layout.pgo_gen {
+        emit_x64_flush_pgo_profile(&mut a, Gp::Rbx, pgo);
+    }
     emit_x64_cleanup_ctx(&mut a, Gp::Rbx, layout);
     a.pop(Gp::Rbx);
     a.bind(lbl_done);

@@ -1121,6 +1121,13 @@ pub fn allocate_with_config_and_scratch(
                         xmm_mask: (1 << 0) | (1 << 1) | (1 << 2),
                     });
                 }
+                Op::PgoRecordCi { .. } => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: 1 << Gp::Rax.id(),
+                        xmm_mask: 0,
+                    });
+                }
                 _ => {}
             }
             if let Some(res) = inst.res {

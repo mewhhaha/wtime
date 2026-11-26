@@ -2736,7 +2736,7 @@ fn stage3_council_round1_regressions() {
         let module = admit_x64_module(dec).unwrap();
         let layout = CtxLayout::compute(&module, Vec::new()).unwrap();
         let budget = CompileBudget::new(None);
-        let shared = build_shared_rodata(dec, &module, &layout.global_offs, &budget).unwrap();
+        let shared = build_shared_rodata(dec, &module, &layout.global_offs, None, &budget).unwrap();
         let mut ir = lower_wasm_to_ir(dec, &module, 0).unwrap();
         let effects =
             opt::compute_module_effects(std::slice::from_ref(&ir), &module, None).unwrap();
@@ -5745,5 +5745,175 @@ fn x64_avx512_evex_and_general_counted_loop_autovec() {
                 "vec_{tag} parity mismatch"
             );
         }
+    }
+}
+
+#[test]
+fn x64_pgo_gen_use_speculative_devirt_and_inlining() {
+    // Module with 3 functions:
+    //   f0(x: i32) -> i32: cold helper `x * 13 + 7` (type 0)
+    //   f1(x: i32) -> i32: hot target `x * 3 + 5` (type 0)
+    //   f2(slot: i32) -> i32: `run(slot)` loops 500x calling `call_indirect type 0 table 0 (acc, slot)`
+    // Table 0: len 4, slots [f0, f1, null, f3(bad sig)]
+    // f3() -> () (type 1)
+    let f0 = vec![0x20, 0, 0x41, 13, 0x6c, 0x41, 7, 0x6a];
+    let f1 = vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 5, 0x6a];
+    // f2(slot): acc=1, i=0; loop { if i >=u 500 break; acc = call_indirect(acc, slot); i += 1; br 0 }; return acc
+    let mut f2 = vec![
+        0x41, 1, 0x21, 1, // acc = 1
+        0x41, 0, 0x21, 2, // i = 0
+        0x02, 0x40, 0x03, 0x40, // block, loop
+        0x20, 2, 0x41,
+    ];
+    leb_i32(&mut f2, 500);
+    f2.extend_from_slice(&[
+        0x4f, 0x0d, 1, // br_if 1 (i >=u 500)
+        0x20, 1, 0x20, 0, 0x11, 0, 0, 0x21, 1, // acc = call_indirect(acc, slot)
+        0x20, 2, 0x41, 1, 0x6a, 0x21, 2, // i += 1
+        0x0c, 0, 0x0b, 0x0b, // br 0, end, end
+        0x20, 1,
+    ]);
+    let f3 = Vec::new();
+    let tbl = vec![1, 0x70, 0x00, 4]; // funcref min=4
+    // active elem at 0: [0, 1], active elem at 3: [3] (slot 2 stays null!)
+    let elem = vec![2, 0x00, 0x41, 0, 0x0b, 2, 0, 1, 0x00, 0x41, 3, 0x0b, 1, 3];
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[], &[])]),
+        func_sec(&[0, 0, 0, 1]),
+        section(4, &tbl),
+        export_sec(&[("run", 0, 2)]),
+        section(9, &elem),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[(2, 0x7f)], &f2),
+            enc_body(&[], &f3),
+        ]),
+    ]);
+
+    let root = crate::build::create_fresh_test_root("wtime-aot-x64-pgo");
+    let prof_path = root.0.join("train.wtpgo1");
+    let gen_so = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            pgo_gen_path: Some(prof_path.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = gen_so;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let expected = |slot: u32| -> u32 {
+            let mut acc = 1u32;
+            for _ in 0..500 {
+                acc = if slot == 0 {
+                    acc.wrapping_mul(13).wrapping_add(7)
+                } else {
+                    acc.wrapping_mul(3).wrapping_add(5)
+                };
+            }
+            acc
+        };
+
+        // 1. Run instrumented training binary (`blot_aot_drop` flushes `train.wtpgo1`).
+        let gen_path = root.0.join("gen.so");
+        std::fs::write(&gen_path, &gen_so).unwrap();
+        let mut child = Command::new(driver)
+            .arg(&gen_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"call run 1\n")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            std::str::from_utf8(&out.stdout).unwrap(),
+            format!("NEW_OK\nCALL 0 {:016x} 0 0\n", expected(1))
+        );
+
+        // 2. Verify exact `WTPGO1` profile contents!
+        let prof = crate::pgo::PgoProfile::load_file(&prof_path).unwrap();
+        assert_eq!(prof.n_defs, 4);
+        assert_eq!(prof.n_ci_sites, 1);
+        assert_eq!(prof.func_counts, vec![0, 500, 1, 0]);
+        assert_eq!(prof.ci_sites[0].total_hits, 500);
+        assert_eq!(prof.ci_sites[0].top_hits, 500);
+        assert_eq!(prof.ci_sites[0].top_target, 1);
+        assert_eq!(prof.hot_devirt_target(0), Some(1));
+        assert_eq!(prof.text_layout_order(), vec![1, 2, 0, 3]);
+
+        // 3. Verify IR devirtualization + inlining actually fires with `--pgo-use`!
+        let val = wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits())
+            .unwrap();
+        let module = admit_x64_module(val.decoded()).unwrap();
+        let mut irs: Vec<_> = (0..4)
+            .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+            .collect();
+        let devirted =
+            super::opt::devirtualize_hot_indirect_calls(&mut irs, &module, &prof).unwrap();
+        assert_eq!(
+            devirted, 1,
+            "expected hot monomorphic CallIndirect to devirtualize"
+        );
+        super::opt::inline_small_helpers_with_pgo(&mut irs, &module, Some(&prof), None).unwrap();
+        verify_ir(&irs[2], &module).unwrap();
+        // `f1` (`x * 3 + 5`) must now be INLINED directly into `run` (zero direct `Op::Call` remaining!).
+        let has_direct_call = irs[2]
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .any(|ins| matches!(ins.op, Op::Call { .. }));
+        assert!(
+            !has_direct_call,
+            "devirtualized hot callee f1 must be inlined into run"
+        );
+
+        // 4. Compile & run `--pgo-use` `.so` across hot slot 1, cold fallback slot 0, null slot 2, bad sig slot 3, OOB slot 9!
+        let use_so = compile_wasm_to_x64_so(
+            &wasm,
+            &X64CompileOptions {
+                verify: true,
+                pgo_use: Some(prof),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let use_path = root.0.join("use.so");
+        std::fs::write(&use_path, &use_so).unwrap();
+        let mut child2 = Command::new(driver)
+            .arg(&use_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child2
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"call run 1\ncall run 0\ncall run 2\ncall run 3\ncall run 9\n")
+            .unwrap();
+        let out2 = child2.wait_with_output().unwrap();
+        assert!(out2.status.success());
+        assert_eq!(
+            std::str::from_utf8(&out2.stdout).unwrap(),
+            format!(
+                "NEW_OK\nCALL 0 {:016x} 0 0\nCALL 0 {:016x} 0 0\nCALL 1 deadbeefcafebabe 4 0\nCALL 1 deadbeefcafebabe 4 0\nCALL 1 deadbeefcafebabe 3 0\n",
+                expected(1),
+                expected(0),
+            )
+        );
     }
 }

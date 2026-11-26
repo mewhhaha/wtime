@@ -945,6 +945,29 @@ pub fn emit_standalone_entry(
         }
     }
 
+    // ---- Step 3a5: Native PGO counter buffer (`--pgo-gen` only) ----
+    if let Some(ref pgo) = layout.pgo_gen {
+        a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_ri64(Gp::Rsi, pgo.alloc_bytes as u64);
+        a.mov_ri32(Gp::Rdx, PROT_RW);
+        a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+        a.mov_ri64(Gp::R8, u64::MAX);
+        a.xor_rr(false, Gp::R9, Gp::R9);
+        a.mov_ri32(Gp::Rax, SYS_MMAP);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_fail_alloc);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, pgo.ctx_ptr_off), Gp::Rax);
+        a.mov_ri64(Gp::Rcx, crate::pgo::WTPGO1_MAGIC_U64);
+        a.mov_mr(true, Mem::base_disp(Gp::Rax, 0), Gp::Rcx);
+        a.mov_mi32(false, Mem::base_disp(Gp::Rax, 8), pgo.n_defs as i32);
+        a.mov_mi32(false, Mem::base_disp(Gp::Rax, 12), pgo.n_ci_sites as i32);
+        a.mov_ri64(Gp::Rcx, pgo.module_hash_lo);
+        a.mov_mr(true, Mem::base_disp(Gp::Rax, 16), Gp::Rcx);
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::Rax, 24), Gp::Rcx);
+    }
+
     // ---- Step 3b: Install SIGSEGV guard-page handler (standalone memory32 ONLY) ----
     let lbl_sig_handler = a.new_label();
     let lbl_sig_restorer = a.new_label();
@@ -1102,6 +1125,9 @@ pub fn emit_standalone_entry(
     a.jmp(lbl_fail_trap);
 
     a.bind(lbl_normal_exit);
+    if let Some(ref pgo) = layout.pgo_gen {
+        super::runtime::emit_x64_flush_pgo_profile(&mut a, Gp::R15, pgo);
+    }
     a.mov_rm(false, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_EXEC_EXIT_CODE));
     a.mov_ri32(Gp::Rax, SYS_EXIT_GROUP);
     a.syscall();

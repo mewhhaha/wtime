@@ -5175,3 +5175,76 @@ fn aarch64_general_counted_loop_autovec_neon_parity_and_overlap_fallback() {
     let calls = [0, 1, 3, 4, 7, 17, 35].map(|n| ("run", Value::I32(n)));
     assert_aarch64_image_matches_oracle("aarch64 autovec", &wasm, &calls, 16, &img);
 }
+
+#[test]
+fn aarch64_pgo_gen_and_use_speculative_devirt_parity() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, section, type_sec, wasm_module,
+    };
+
+    let f0 = vec![0x20, 0, 0x41, 13, 0x6c, 0x41, 7, 0x6a];
+    let f1 = vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 5, 0x6a];
+    let mut f2 = vec![
+        0x41, 1, 0x21, 1, 0x41, 0, 0x21, 2, 0x02, 0x40, 0x03, 0x40, 0x20, 2, 0x41,
+    ];
+    leb_i32(&mut f2, 100);
+    f2.extend_from_slice(&[
+        0x4f, 0x0d, 1, 0x20, 1, 0x20, 0, 0x11, 0, 0, 0x21, 1, 0x20, 2, 0x41, 1, 0x6a, 0x21, 2,
+        0x0c, 0, 0x0b, 0x0b, 0x20, 1,
+    ]);
+    let tbl = vec![1, 0x70, 0x00, 3];
+    let elem = vec![1, 0x00, 0x41, 0, 0x0b, 2, 0, 1];
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0]),
+        section(4, &tbl),
+        export_sec(&[("run", 0, 2)]),
+        section(9, &elem),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[(2, 0x7f)], &f2),
+        ]),
+    ]);
+
+    // 1. `--pgo-gen` compiles cleanly & disassembles cleanly on AArch64.
+    let gen_img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            pgo_gen_path: Some(std::path::PathBuf::from("/tmp/a64-test.wtpgo1")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_pgo_gen", &gen_img.elf);
+
+    // 2. `--pgo-use` devirtualizes slot 1 (`f1`), reorders `.text`, disassembles cleanly,
+    //    and matches the `wtime-runtime` oracle across hot slot 1, cold slot 0, null slot 2, and OOB slot 7!
+    let raw_prof = crate::pgo::PgoProfile {
+        n_defs: 3,
+        n_ci_sites: 1,
+        module_hash_lo: crate::pgo::module_hash_lo(&wasm),
+        func_counts: vec![0, 500, 5],
+        ci_sites: vec![crate::pgo::CiSiteProfile {
+            total_hits: 500,
+            top_hits: 500,
+            top_target: 1,
+        }],
+        total_func_calls: 0,
+        hot_threshold: 0,
+        digest: [0; 32],
+    }
+    .to_bytes();
+    let prof = crate::pgo::PgoProfile::parse(&raw_prof).unwrap();
+    let use_img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            pgo_use: Some(prof),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_pgo_use", &use_img.elf);
+    let calls = [1, 0, 2, 7].map(|s| ("run", Value::I32(s)));
+    assert_aarch64_image_matches_oracle("aarch64 pgo_use", &wasm, &calls, 0, &use_img);
+}

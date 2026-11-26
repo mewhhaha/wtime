@@ -159,6 +159,8 @@ pub struct CiTableLayout {
     pub min_slot: u32,
     pub span: u32,
     pub rodata_off: u32,
+    /// Optional `.rodata` offset of `[u32; span]` holding 1-based `func_idx + 1` (or `0`) for `--pgo-gen`.
+    pub pgo_func_id_ro_off: u32,
     /// `Ctx` descriptor offset for dynamic `funcref` tables (`-1` for static `.rodata` tables).
     pub dyn_table_desc_off: i32,
     /// Canonical deduplicated signature ID (used when `dyn_table_desc_off >= 0`).
@@ -167,6 +169,22 @@ pub struct CiTableLayout {
     pub is_call_ref: bool,
     /// `true` iff the target table uses 64-bit (`table64`) indexing.
     pub table_is64: bool,
+}
+
+/// Optional native PGO counter buffer metadata embedded in `Ctx` (`--pgo-gen` builds only).
+#[derive(Clone, Debug)]
+pub struct PgoGenLayout {
+    /// Byte offset in `Ctx` holding the `u64` pointer to the `mmap`'d `WTPGO1` buffer.
+    pub ctx_ptr_off: i32,
+    /// Exact serialized `WTPGO1` byte length (`32 + n_defs*8 + n_ci_sites*24`).
+    pub payload_bytes: usize,
+    /// Page-aligned `mmap` allocation size (`align_up(payload_bytes, 4096)`).
+    pub alloc_bytes: usize,
+    pub n_defs: u32,
+    pub n_ci_sites: u32,
+    pub module_hash_lo: u64,
+    /// `.rodata` offset of the NUL-terminated output profile file path.
+    pub path_ro_off: u32,
 }
 
 /// Checked `Ctx` layout consumed by `lower.rs` and `runtime.rs`.
@@ -213,6 +231,8 @@ pub struct CtxLayout {
     /// Per-tag payload field `(Ty, offset)` list and 16B-aligned total record size (empty for non-EH modules).
     pub tag_layouts: Vec<(Vec<(ir::Ty, i32)>, u32)>,
     pub ci_tables: Vec<CiTableLayout>,
+    /// Present only for `--pgo-gen` instrumented builds; `None` for normal and `--pgo-use` builds.
+    pub pgo_gen: Option<PgoGenLayout>,
     pub total_bytes: usize,
 }
 
@@ -221,6 +241,40 @@ impl CtxLayout {
         self.spectre_mitigations = enabled;
         self.use_guard_pages &= !enabled;
         self
+    }
+
+    /// Reserves an 8-byte `Ctx` slot for `--pgo-gen` and records the `PgoGenLayout`.
+    pub(crate) fn with_pgo_gen(
+        mut self,
+        payload_bytes: usize,
+        alloc_bytes: usize,
+        n_defs: u32,
+        n_ci_sites: u32,
+        module_hash_lo: u64,
+        path_ro_off: u32,
+    ) -> Result<Self, String> {
+        let cur = self.total_bytes;
+        let ctx_ptr_off = i32::try_from(cur).map_err(|_| "x64: Ctx pgo_gen offset exceeds i32")?;
+        let next = cur
+            .checked_add(8)
+            .and_then(|v| align_up_checked(v, 4096).ok())
+            .ok_or("x64: Ctx size overflow with pgo_gen")?;
+        if next > MAX_CTX_BYTES {
+            return Err(format!(
+                "x64: page-aligned Ctx size ({next} B) exceeds cap {MAX_CTX_BYTES} B"
+            ));
+        }
+        self.pgo_gen = Some(PgoGenLayout {
+            ctx_ptr_off,
+            payload_bytes,
+            alloc_bytes,
+            n_defs,
+            n_ci_sites,
+            module_hash_lo,
+            path_ro_off,
+        });
+        self.total_bytes = next;
+        Ok(self)
     }
 
     /// Returns the `Ctx` byte offset of memory `mem`'s 32-byte descriptor (`0` for memory 0).
@@ -413,6 +467,7 @@ impl CtxLayout {
             exn_state_off,
             tag_layouts,
             ci_tables,
+            pgo_gen: None,
             total_bytes,
         })
     }
@@ -482,6 +537,10 @@ pub struct X64CompileOptions {
     pub inc_cache_dir: Option<PathBuf>,
     /// Cryptographic salt (e.g. compiler binary SHA-256) bound into incremental cache keys.
     pub cache_key_salt: Option<[u8; 32]>,
+    /// Optional `--pgo-gen` profile output path (mutually exclusive with `pgo_use`).
+    pub pgo_gen_path: Option<PathBuf>,
+    /// Optional verified `WTPGO1` profile (`--pgo-use`) driving devirt, inlining, and `.text` layout.
+    pub pgo_use: Option<crate::pgo::PgoProfile>,
     pub hooks: RuntimeTestHooks,
 }
 
@@ -502,6 +561,8 @@ impl Default for X64CompileOptions {
             verify: true,
             inc_cache_dir: None,
             cache_key_salt: None,
+            pgo_gen_path: None,
+            pgo_use: None,
             hooks: RuntimeTestHooks::default(),
         }
     }
@@ -684,12 +745,14 @@ struct SharedRodata {
     tables: RuntimeTables,
     ci_tables: Vec<CiTableLayout>,
     call_export_patches: Vec<CallExportPatch>,
+    pgo_path_ro_off: u32,
 }
 
 fn build_shared_rodata(
     decoded: &DecodedModule,
     module: &X64Module,
     layout_global_offs: &[i32],
+    pgo_gen_path_nul: Option<&[u8]>,
     budget: &CompileBudget,
 ) -> Result<SharedRodata, String> {
     let mut rb = RodataBuilder::new();
@@ -932,11 +995,26 @@ fn build_shared_rodata(
         } else {
             rb.push_zeros(4, bytes)?
         };
+        let pgo_func_id_ro_off =
+            if pgo_gen_path_nul.is_some() && !ci.is_dynamic && !ci.is_call_ref && ci.span > 0 {
+                let mut ids = vec![0u32; ci.span as usize];
+                for &(slot, fidx) in &ci.targets {
+                    ids[(slot - ci.min_slot) as usize] = fidx + 1;
+                }
+                let off = rb.align(4)?;
+                for id in ids {
+                    rb.push_u32(id)?;
+                }
+                off
+            } else {
+                0
+            };
         ci_tables.push(CiTableLayout {
             table_len: ci.table_len,
             min_slot: ci.min_slot,
             span: ci.span,
             rodata_off: ro_off,
+            pgo_func_id_ro_off,
             dyn_table_desc_off: -1,
             canon_sig: ci.canon_sig,
             is_call_ref: ci.is_call_ref,
@@ -1054,6 +1132,12 @@ fn build_shared_rodata(
         0
     };
 
+    let pgo_path_ro_off = if let Some(path_nul) = pgo_gen_path_nul {
+        rb.push_bytes(1, path_nul)?
+    } else {
+        0
+    };
+
     budget.charge_rodata(rb.buf.len())?;
 
     let tables = RuntimeTables {
@@ -1081,6 +1165,7 @@ fn build_shared_rodata(
         tables,
         ci_tables,
         call_export_patches,
+        pgo_path_ro_off,
     })
 }
 
@@ -1420,8 +1505,12 @@ fn compile_wasm_to_x64_so_inner(
     let default_hooks = matches!(opts.hooks.cpuid, runtime::CpuidSource::Real)
         && matches!(opts.hooks.rdssp, runtime::RdsspSource::Real)
         && matches!(opts.hooks.syscall_fault, runtime::SyscallFault::None);
-    let inc_enabled =
-        opts.inc_cache_dir.is_some() && opts.cache_key_salt.is_some() && opts.opt && default_hooks;
+    let inc_enabled = opts.inc_cache_dir.is_some()
+        && opts.cache_key_salt.is_some()
+        && opts.opt
+        && default_hooks
+        && opts.pgo_gen_path.is_none()
+        && opts.pgo_use.is_none();
 
     // 1. Validate Wasm under Stage 1's strict feature profile and resource limits.
     //    Unlock up to 16 parallel decode/validate workers for large modules (>= 256 KiB).
@@ -1594,6 +1683,33 @@ fn compile_wasm_to_x64_so_inner(
     let d_admit = t0.elapsed();
     check_dl()?;
 
+    if opts.pgo_gen_path.is_some() && opts.pgo_use.is_some() {
+        return Err(X64CompileError::Failed(
+            "x64: --pgo-gen and --pgo-use cannot be used together".into(),
+        ));
+    }
+    let pgo_gen_path_nul = match opts.pgo_gen_path.as_deref() {
+        Some(p) => Some(crate::pgo::validate_pgo_gen_path(p).map_err(X64CompileError::Failed)?),
+        None => None,
+    };
+    let pgo_n_ci_sites = if pgo_gen_path_nul.is_some() || opts.pgo_use.is_some() {
+        crate::pgo::count_wasm_ci_sites(validated.decoded()).map_err(X64CompileError::Failed)?
+    } else {
+        0
+    };
+    let pgo_mod_hash_lo = if pgo_gen_path_nul.is_some() || opts.pgo_use.is_some() {
+        crate::pgo::module_hash_lo(wasm)
+    } else {
+        0
+    };
+    if let Some(ref prof) = opts.pgo_use {
+        let n_defs_u32 = u32::try_from(validated.decoded().code.len()).map_err(|_| {
+            X64CompileError::Failed("x64: defined function count exceeds u32".into())
+        })?;
+        prof.verify_matches_module(n_defs_u32, pgo_n_ci_sites, pgo_mod_hash_lo)
+            .map_err(X64CompileError::Failed)?;
+    }
+
     // 3. Compute Ctx global/extern-table offsets first, then build shared `.rodata` + `ci_tables`,
     //    then finalize `CtxLayout` with `ci_tables`.
     let preliminary_layout = CtxLayout::compute(&module, Vec::new())
@@ -1605,10 +1721,12 @@ fn compile_wasm_to_x64_so_inner(
         tables,
         ci_tables,
         call_export_patches,
+        pgo_path_ro_off,
     } = build_shared_rodata(
         validated.decoded(),
         &module,
         &preliminary_layout.global_offs,
+        pgo_gen_path_nul.as_deref(),
         &budget,
     )
     .map_err(|e| {
@@ -1625,12 +1743,30 @@ fn compile_wasm_to_x64_so_inner(
             ci_lay.canon_sig = ci_sig.canon_sig;
         }
     }
-    let layout = CtxLayout {
+    let mut layout = CtxLayout {
         ci_tables,
         func_sig_ro_off: tables.func_sig_ro_off,
         func_addr_ro_off: tables.func_addr_ro_off,
         ..preliminary_layout
     };
+    if pgo_gen_path_nul.is_some() {
+        let n_defs_u32 = u32::try_from(validated.decoded().code.len()).map_err(|_| {
+            X64CompileError::Failed("x64: defined function count exceeds u32".into())
+        })?;
+        let (payload_bytes, alloc_bytes) =
+            crate::pgo::compute_pgo_buffer_sizes(n_defs_u32, pgo_n_ci_sites)
+                .map_err(X64CompileError::AdmissionRejected)?;
+        layout = layout
+            .with_pgo_gen(
+                payload_bytes,
+                alloc_bytes,
+                n_defs_u32,
+                pgo_n_ci_sites,
+                pgo_mod_hash_lo,
+                pgo_path_ro_off,
+            )
+            .map_err(X64CompileError::AdmissionRejected)?;
+    }
 
     // 4. Emit shared runtime helpers, import trampolines, and target entry points / exports.
     let mut export_asms = match opts.target {
@@ -1721,6 +1857,8 @@ fn compile_wasm_to_x64_so_inner(
         (opts.inc_cache_dir.as_deref(), opts.cache_key_salt)
         && opts.opt
         && default_hooks
+        && opts.pgo_gen_path.is_none()
+        && opts.pgo_use.is_none()
         && n_defs > 0
     {
         let abi_hash = inc_cache::compute_abi_hash(
@@ -2120,6 +2258,19 @@ fn compile_wasm_to_x64_so_inner(
             .collect::<Result<Vec<_>, _>>()?;
         check_dl()?;
 
+        if layout.pgo_gen.is_some() {
+            opt::instrument_pgo(&mut irs, pgo_n_ci_sites).map_err(X64CompileError::Failed)?;
+            pre_summary_complete = false;
+        } else if let Some(ref prof) = opts.pgo_use
+            && opts.opt
+        {
+            let devirted = opt::devirtualize_hot_indirect_calls(&mut irs, &module, prof)
+                .map_err(X64CompileError::Failed)?;
+            if devirted > 0 {
+                pre_summary_complete = false;
+            }
+        }
+
         let mut capture_cache = inc_ctx.is_some() && pre_summary_complete;
         if !capture_cache {
             inc_ctx = None;
@@ -2259,7 +2410,13 @@ fn compile_wasm_to_x64_so_inner(
                     } else {
                         capture_cache = false;
                         inc_ctx = None;
-                        if pre_summary_complete {
+                        if layout.pgo_gen.is_some() {
+                            // Keep exact un-inlined call-entry counts during `--pgo-gen` training runs!
+                            let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
+                                .map_err(map_worker_err)?;
+                            d_inline_effects = ti.elapsed();
+                            Ok(Some(eff))
+                        } else if pre_summary_complete && opts.pgo_use.is_none() {
                             let mut counts = vec![0u32; n_defs];
                             for cs in &pre_inline_callees {
                                 for &(c, cnt) in cs {
@@ -2317,8 +2474,13 @@ fn compile_wasm_to_x64_so_inner(
                             d_inline_effects = ti.elapsed();
                             Ok(Some(eff))
                         } else {
-                            opt::inline_small_helpers(&mut irs, &module, Some(&budget))
-                                .map_err(map_worker_err)?;
+                            opt::inline_small_helpers_with_pgo(
+                                &mut irs,
+                                &module,
+                                opts.pgo_use.as_ref(),
+                                Some(&budget),
+                            )
+                            .map_err(map_worker_err)?;
                             let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
                                 .map_err(map_worker_err)?;
                             d_inline_effects = ti.elapsed();
@@ -2913,24 +3075,31 @@ fn compile_wasm_to_x64_so_inner(
         for asm in &import_asms {
             func_text_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
         }
+        let text_order: Vec<usize> = match opts.pgo_use.as_ref() {
+            Some(prof) if link_cache.is_none() => prof.text_layout_order(),
+            _ => (0..n_defs).collect(),
+        };
         let prefix_end_len = planned_text_len;
+        func_text_offs.resize(n_imports + n_defs, 0);
         if let Some(ref cache_arc) = link_cache {
             for (bi, cf) in cache_arc.funcs.iter().enumerate() {
                 if (bi & 1023) == 1023 {
                     check_dl()?;
                 }
-                func_text_offs.push(reserve_text_off(&mut planned_text_len, cf.code.len())?);
+                func_text_offs[n_imports + bi] =
+                    reserve_text_off(&mut planned_text_len, cf.code.len())?;
             }
         } else {
-            for (bi, asm) in def_asms.iter().enumerate() {
-                if (bi & 1023) == 1023 {
+            for (pos, &bi) in text_order.iter().enumerate() {
+                if (pos & 1023) == 1023 {
                     check_dl()?;
                 }
-                func_text_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
+                func_text_offs[n_imports + bi] =
+                    reserve_text_off(&mut planned_text_len, def_asms[bi].code.len())?;
             }
         }
         let defs_start_off: usize = if n_defs > 0 {
-            func_text_offs[n_imports] as usize
+            func_text_offs[n_imports + text_order[0]] as usize
         } else {
             planned_text_len
         };
@@ -3170,19 +3339,20 @@ fn compile_wasm_to_x64_so_inner(
             let link_cache_ref = link_cache.as_deref();
             let def_asms_ref = def_asms.as_slice();
             let fn_local_rodata_ref = fn_local_rodata_offs.as_slice();
+            let text_order_ref = text_order.as_slice();
             let link_ctx_ref = &link_ctx;
             let budget_ref = &budget;
-            let write_and_patch_range = |start_bi: usize,
-                                         end_bi: usize,
+            let write_and_patch_range = |start_pos: usize,
+                                         end_pos: usize,
                                          chunk_base_off: u64,
                                          chunk: &mut [u8]|
              -> Result<(), String> {
                 if let Some(cache_arc) = link_cache_ref {
                     let backing = cache_arc.backing.as_deref().map(Vec::as_slice);
                     for (rel_bi, &lro_off) in
-                        fn_local_rodata_ref[start_bi..end_bi].iter().enumerate()
+                        fn_local_rodata_ref[start_pos..end_pos].iter().enumerate()
                     {
-                        let bi = start_bi + rel_bi;
+                        let bi = start_pos + rel_bi;
                         if (bi & 1023) == 1023 {
                             budget_ref.check_deadline()?;
                         }
@@ -3192,7 +3362,7 @@ fn compile_wasm_to_x64_so_inner(
                         let code = cf.code.as_slice(backing);
                         let code_end = local_off + code.len();
                         chunk[local_off..code_end].copy_from_slice(code);
-                        let next_off = if bi + 1 < end_bi {
+                        let next_off = if bi + 1 < end_pos {
                             (link_ctx_ref.func_text_offs[n_imports + bi + 1] - chunk_base_off)
                                 as usize
                         } else {
@@ -3212,11 +3382,10 @@ fn compile_wasm_to_x64_so_inner(
                         )?;
                     }
                 } else {
-                    for (rel_bi, &lro_off) in
-                        fn_local_rodata_ref[start_bi..end_bi].iter().enumerate()
-                    {
-                        let bi = start_bi + rel_bi;
-                        if (bi & 1023) == 1023 {
+                    for pos in start_pos..end_pos {
+                        let bi = text_order_ref[pos];
+                        let lro_off = fn_local_rodata_ref[bi];
+                        if (pos & 1023) == 1023 {
                             budget_ref.check_deadline()?;
                         }
                         let asm = &def_asms_ref[bi];
@@ -3224,8 +3393,9 @@ fn compile_wasm_to_x64_so_inner(
                         let local_off = (fn_off - chunk_base_off) as usize;
                         let code_end = local_off + asm.code.len();
                         chunk[local_off..code_end].copy_from_slice(&asm.code);
-                        let next_off = if bi + 1 < end_bi {
-                            (link_ctx_ref.func_text_offs[n_imports + bi + 1] - chunk_base_off)
+                        let next_off = if pos + 1 < end_pos {
+                            let next_bi = text_order_ref[pos + 1];
+                            (link_ctx_ref.func_text_offs[n_imports + next_bi] - chunk_base_off)
                                 as usize
                         } else {
                             chunk.len()
@@ -3261,25 +3431,27 @@ fn compile_wasm_to_x64_so_inner(
                 let target_bytes = total_def_bytes.div_ceil(link_workers);
                 let mut ranges: [(usize, usize); 8] = [(0, 0); 8];
                 let mut n_ranges = 0usize;
-                let mut cur_bi = 0usize;
+                let mut cur_pos = 0usize;
                 let mut cur_byte = defs_start_off as u64;
-                while cur_bi < n_defs {
-                    let start_bi = cur_bi;
+                while cur_pos < n_defs {
+                    let start_pos = cur_pos;
                     if n_ranges + 1 == link_workers {
-                        cur_bi = n_defs;
+                        cur_pos = n_defs;
                     } else {
                         let goal = cur_byte + target_bytes as u64;
-                        while cur_bi < n_defs && func_text_offs[n_imports + cur_bi] < goal {
-                            cur_bi += 1;
+                        while cur_pos < n_defs
+                            && func_text_offs[n_imports + text_order[cur_pos]] < goal
+                        {
+                            cur_pos += 1;
                         }
-                        if cur_bi == start_bi {
-                            cur_bi += 1;
+                        if cur_pos == start_pos {
+                            cur_pos += 1;
                         }
                     }
-                    ranges[n_ranges] = (start_bi, cur_bi);
+                    ranges[n_ranges] = (start_pos, cur_pos);
                     n_ranges += 1;
-                    if cur_bi < n_defs {
-                        cur_byte = func_text_offs[n_imports + cur_bi];
+                    if cur_pos < n_defs {
+                        cur_byte = func_text_offs[n_imports + text_order[cur_pos]];
                     }
                 }
 
@@ -3292,7 +3464,7 @@ fn compile_wasm_to_x64_so_inner(
                     let mut cur_base = defs_start_off as u64;
                     for &(start_bi, end_bi) in &ranges[..n_ranges] {
                         let next_base = if end_bi < n_defs {
-                            func_text_offs[n_imports + end_bi]
+                            func_text_offs[n_imports + text_order[end_bi]]
                         } else {
                             planned_text_len as u64
                         };

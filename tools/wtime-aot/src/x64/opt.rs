@@ -497,8 +497,11 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::TableSize(_)
         | Op::ExnGetActive
         | Op::ExnClearActive
+        | Op::PgoFuncEnter(_)
         | Op::Trap(_) => {}
         Op::Copy(a)
+        | Op::PgoRecordCi { idx: a, .. }
+        | Op::CiCheckTarget { idx: a, .. }
         | Op::I32Eqz(a)
         | Op::I64Eqz(a)
         | Op::I32Clz(a)
@@ -2210,7 +2213,9 @@ pub fn try_collect_pre_inline_summary(
                 | Op::ExnGetActive
                 | Op::ExnClearActive
                 | Op::ExnGetTag(_)
-                | Op::ExnGetPayload { .. } => {
+                | Op::ExnGetPayload { .. }
+                | Op::PgoFuncEnter(_)
+                | Op::PgoRecordCi { .. } => {
                     has_disallowed = true;
                 }
                 _ => {}
@@ -2300,6 +2305,8 @@ pub fn is_inlinable_ir(ir: &IrFunc) -> bool {
                     | Op::ExnClearActive
                     | Op::ExnGetTag(_)
                     | Op::ExnGetPayload { .. }
+                    | Op::PgoFuncEnter(_)
+                    | Op::PgoRecordCi { .. }
             )
         })
     })
@@ -3095,9 +3102,20 @@ fn clone_callee_into_caller(
                 | Op::ExnGetActive
                 | Op::ExnClearActive
                 | Op::ExnGetTag(_)
-                | Op::ExnGetPayload { .. } => {
-                    unreachable!("EH callee excluded by is_inlinable_ir")
+                | Op::ExnGetPayload { .. }
+                | Op::PgoFuncEnter(_)
+                | Op::PgoRecordCi { .. } => {
+                    unreachable!("EH/PGO-gen callee excluded by is_inlinable_ir")
                 }
+                Op::CiCheckTarget {
+                    ci_id,
+                    idx,
+                    expected_func,
+                } => Op::CiCheckTarget {
+                    ci_id,
+                    idx: map_v(idx),
+                    expected_func,
+                },
                 Op::Trap(code) => Op::Trap(code),
             };
             insts.push(Inst { res, op });
@@ -3201,7 +3219,7 @@ pub struct InlineTrack {
 ///   and completes the exact single deterministic inlining pass without mutating and retrying;
 ///   core inlining OOM returns `Err(...)`.
 /// - `InlineMode::ColdNoCache`: no tracking allocations; core inlining OOM returns `Err(...)`.
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn inline_small_helpers_subset(
     irs: &mut [Option<IrFunc>],
     in_cycle: &[bool],
@@ -3235,6 +3253,13 @@ struct CallerInlineOutcome {
     became_inlinable: bool,
 }
 
+const PGO_HOT_INLINE_CALLEE_INSTS: usize = 128;
+const PGO_HOT_INLINE_CALLEE_BLOCKS: usize = 16;
+const PGO_HOT_INLINE_CALLEE_VALS: usize = 256;
+const PGO_HOT_INLINE_ADDED_PER_CALLER: usize = 512;
+const PGO_HOT_INLINE_CALLER_INSTS: usize = 2048;
+const PGO_COLD_INLINE_CALLEE_INSTS: usize = 8;
+
 #[allow(clippy::too_many_arguments)]
 fn inline_single_caller(
     caller_ir: &mut IrFunc,
@@ -3251,8 +3276,11 @@ fn inline_single_caller(
     max_total_add: usize,
     mut track_ok: bool,
     warm: bool,
+    pgo: Option<&crate::pgo::PgoProfile>,
     budget: Option<&CompileBudget>,
 ) -> Res<Option<CallerInlineOutcome>> {
+    let caller_is_hot = pgo.is_some_and(|p| p.is_hot_func(caller_bi));
+    let caller_is_cold = pgo.is_some_and(|p| p.is_cold_func(caller_bi));
     let mut caller_insts = caller_init_insts;
     let mut caller_in_loop: Option<Vec<bool>> = None;
     let mut caller_const_nz: Option<Vec<bool>> = None;
@@ -3276,9 +3304,17 @@ fn inline_single_caller(
                 hit_module_cap = true;
                 break;
             }
-            if caller_added >= INLINE_MAX_CONST_DIV_ADDED_PER_CALLER
-                || caller_insts >= INLINE_MAX_CONST_DIV_CALLER_INSTS
-            {
+            let max_added_cap = if caller_is_hot {
+                INLINE_MAX_CONST_DIV_ADDED_PER_CALLER.max(PGO_HOT_INLINE_ADDED_PER_CALLER)
+            } else {
+                INLINE_MAX_CONST_DIV_ADDED_PER_CALLER
+            };
+            let max_caller_cap = if caller_is_hot {
+                INLINE_MAX_CONST_DIV_CALLER_INSTS.max(PGO_HOT_INLINE_CALLER_INSTS)
+            } else {
+                INLINE_MAX_CONST_DIV_CALLER_INSTS
+            };
+            if caller_added >= max_added_cap || caller_insts >= max_caller_cap {
                 break;
             }
             let Op::Call { func, args, rets } = caller_ir.blocks[bi].insts[ii].op else {
@@ -3302,17 +3338,43 @@ fn inline_single_caller(
             let c_insts = inst_counts[callee_bi];
             let c_blocks = callee_ir.blocks.len();
             let c_vals = callee_ir.val_tys.len();
+            if caller_is_cold && c_insts > PGO_COLD_INLINE_CALLEE_INSTS {
+                ii += 1;
+                continue;
+            }
+            let pgo_hot_pair = caller_is_hot && pgo.is_some_and(|p| p.is_hot_func(callee_bi));
+            let hard_max_insts = if pgo_hot_pair {
+                INLINE_MAX_CONST_DIV_CALLEE_INSTS.max(PGO_HOT_INLINE_CALLEE_INSTS)
+            } else {
+                INLINE_MAX_CONST_DIV_CALLEE_INSTS
+            };
+            let hard_max_blocks = if pgo_hot_pair {
+                INLINE_MAX_CONST_DIV_CALLEE_BLOCKS.max(PGO_HOT_INLINE_CALLEE_BLOCKS)
+            } else {
+                INLINE_MAX_CONST_DIV_CALLEE_BLOCKS
+            };
+            let hard_max_vals = if pgo_hot_pair {
+                INLINE_MAX_CONST_DIV_CALLEE_VALS.max(PGO_HOT_INLINE_CALLEE_VALS)
+            } else {
+                INLINE_MAX_CONST_DIV_CALLEE_VALS
+            };
             // Reject obviously oversized callees BEFORE computing `try_compute_in_loop_blocks`!
             if !callee_ir.br_tables.is_empty()
-                || c_insts > INLINE_MAX_CONST_DIV_CALLEE_INSTS
-                || c_blocks > INLINE_MAX_CONST_DIV_CALLEE_BLOCKS
-                || c_vals > INLINE_MAX_CONST_DIV_CALLEE_VALS
+                || c_insts > hard_max_insts
+                || c_blocks > hard_max_blocks
+                || c_vals > hard_max_vals
                 || caller_ir.blocks.len() + c_blocks + 1 > INLINE_MAX_CONST_DIV_CALLER_BLOCKS
                 || caller_ir.val_tys.len() + c_vals > INLINE_MAX_CONST_DIV_CALLER_VALS
             {
                 ii += 1;
                 continue;
             }
+            let qualifies_pgo_hot = pgo_hot_pair
+                && caller_added < PGO_HOT_INLINE_ADDED_PER_CALLER
+                && caller_insts < PGO_HOT_INLINE_CALLER_INSTS
+                && c_insts <= PGO_HOT_INLINE_CALLEE_INSTS
+                && c_blocks <= PGO_HOT_INLINE_CALLEE_BLOCKS
+                && c_vals <= PGO_HOT_INLINE_CALLEE_VALS;
             let caller_fits_standard = caller_added < INLINE_MAX_ADDED_PER_CALLER
                 && caller_insts < INLINE_MAX_CALLER_INSTS
                 && caller_ir.blocks.len() + c_blocks < INLINE_MAX_CALLER_BLOCKS
@@ -3321,7 +3383,7 @@ fn inline_single_caller(
                 && c_insts <= INLINE_MAX_SINGLE_CALLEE_INSTS
                 && c_blocks <= INLINE_MAX_SINGLE_CALLEE_BLOCKS
                 && c_vals <= INLINE_MAX_SINGLE_CALLEE_VALS;
-            let div_param_mask = if !fits_single_cap {
+            let div_param_mask = if !fits_single_cap && !qualifies_pgo_hot {
                 let m = callee_div_rem_param_mask(callee_ir);
                 if m == 0 {
                     ii += 1;
@@ -3334,7 +3396,7 @@ fn inline_single_caller(
             let is_single_site = fits_single_cap
                 && !ext_ref[callee_bi]
                 && total_call_counts.get(callee_bi).copied().unwrap_or(0) == 1;
-            let block_in_loop = if is_single_site {
+            let block_in_loop = if is_single_site || qualifies_pgo_hot {
                 false
             } else if fits_single_cap
                 && c_insts <= INLINE_MAX_CALLEE_INSTS
@@ -3367,30 +3429,31 @@ fn inline_single_caller(
                     .and_then(|v| v.get(bi).copied())
                     .unwrap_or(false)
             };
-            let qualifies_standard = if caller_fits_standard {
-                let (max_insts, max_blocks, max_vals) = if is_single_site {
-                    (
-                        INLINE_MAX_SINGLE_CALLEE_INSTS,
-                        INLINE_MAX_SINGLE_CALLEE_BLOCKS,
-                        INLINE_MAX_SINGLE_CALLEE_VALS,
-                    )
-                } else if block_in_loop {
-                    (
-                        INLINE_MAX_LOOP_CALLEE_INSTS,
-                        INLINE_MAX_LOOP_CALLEE_BLOCKS,
-                        INLINE_MAX_LOOP_CALLEE_VALS,
-                    )
+            let qualifies_standard = qualifies_pgo_hot
+                || if caller_fits_standard {
+                    let (max_insts, max_blocks, max_vals) = if is_single_site {
+                        (
+                            INLINE_MAX_SINGLE_CALLEE_INSTS,
+                            INLINE_MAX_SINGLE_CALLEE_BLOCKS,
+                            INLINE_MAX_SINGLE_CALLEE_VALS,
+                        )
+                    } else if block_in_loop {
+                        (
+                            INLINE_MAX_LOOP_CALLEE_INSTS,
+                            INLINE_MAX_LOOP_CALLEE_BLOCKS,
+                            INLINE_MAX_LOOP_CALLEE_VALS,
+                        )
+                    } else {
+                        (
+                            INLINE_MAX_CALLEE_INSTS,
+                            INLINE_MAX_CALLEE_BLOCKS,
+                            INLINE_MAX_CALLEE_VALS,
+                        )
+                    };
+                    c_insts <= max_insts && c_blocks <= max_blocks && c_vals <= max_vals
                 } else {
-                    (
-                        INLINE_MAX_CALLEE_INSTS,
-                        INLINE_MAX_CALLEE_BLOCKS,
-                        INLINE_MAX_CALLEE_VALS,
-                    )
+                    false
                 };
-                c_insts <= max_insts && c_blocks <= max_blocks && c_vals <= max_vals
-            } else {
-                false
-            };
             let qualifies_const_div = if !qualifies_standard && block_in_loop {
                 let mask = if div_param_mask != 0 {
                     div_param_mask
@@ -3570,6 +3633,42 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
     pre_was_inlinable: Option<&[bool]>,
     budget: Option<&CompileBudget>,
 ) -> Res<Option<InlineTrack>> {
+    inline_small_helpers_subset_parallel_with_pre_and_pgo(
+        irs,
+        in_cycle,
+        topo_bottom_up,
+        total_call_counts,
+        module,
+        initial_added_insts,
+        mode,
+        n_workers,
+        pre_callees,
+        pre_inst_counts,
+        pre_was_inlinable,
+        None,
+        budget,
+    )
+}
+
+/// Same as `inline_small_helpers_subset_parallel_with_pre`, additionally guided by an optional
+/// verified `WTPGO1` profile (`--pgo-use`) that expands inlining for hot caller/callee pairs and
+/// suppresses non-tiny inlining inside cold callers.
+#[allow(clippy::too_many_arguments)]
+pub fn inline_small_helpers_subset_parallel_with_pre_and_pgo(
+    irs: &mut [Option<IrFunc>],
+    in_cycle: &[bool],
+    topo_bottom_up: &[usize],
+    total_call_counts: &[u32],
+    module: &X64Module,
+    initial_added_insts: usize,
+    mode: InlineMode,
+    n_workers: usize,
+    pre_callees: Option<&[Vec<(u32, u32)>]>,
+    pre_inst_counts: Option<&[usize]>,
+    pre_was_inlinable: Option<&[bool]>,
+    pgo: Option<&crate::pgo::PgoProfile>,
+    budget: Option<&CompileBudget>,
+) -> Res<Option<InlineTrack>> {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3662,8 +3761,12 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
         }));
     }
 
-    let max_worst_per_caller =
-        INLINE_MAX_CONST_DIV_ADDED_PER_CALLER + INLINE_MAX_CONST_DIV_CALLEE_INSTS;
+    let max_worst_per_caller = if pgo.is_some() {
+        (INLINE_MAX_CONST_DIV_ADDED_PER_CALLER + INLINE_MAX_CONST_DIV_CALLEE_INSTS)
+            .max(PGO_HOT_INLINE_ADDED_PER_CALLER + PGO_HOT_INLINE_CALLEE_INSTS)
+    } else {
+        INLINE_MAX_CONST_DIV_ADDED_PER_CALLER + INLINE_MAX_CONST_DIV_CALLEE_INSTS
+    };
     let active_some_count = if warm {
         irs.iter().filter(|o| o.is_some()).count()
     } else {
@@ -3680,6 +3783,8 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
         let may_inline_callee = |c: usize, has_div: &[bool]| -> bool {
             inst_counts[c] <= INLINE_MAX_SINGLE_CALLEE_INSTS
                 || (inst_counts[c] <= INLINE_MAX_CONST_DIV_CALLEE_INSTS && has_div[c])
+                || (inst_counts[c] <= PGO_HOT_INLINE_CALLEE_INSTS
+                    && pgo.is_some_and(|p| p.is_hot_func(c)))
         };
         if let Some(pc) = pre_callees
             && pc.len() == n_defs
@@ -3906,6 +4011,7 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
                                     rem_cap,
                                     track_ok,
                                     warm,
+                                    pgo,
                                     budget,
                                 ) {
                                     Ok(Some(outcome)) => {
@@ -3994,6 +4100,7 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
                         rem_cap,
                         track_ok,
                         warm,
+                        pgo,
                         budget,
                     )?;
                     irs[bi] = Some(caller_ir);
@@ -4045,7 +4152,12 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
         {
             bg.check_deadline()?;
         }
-        if irs[caller_bi].is_none() || inst_counts[caller_bi] >= INLINE_MAX_CONST_DIV_CALLER_INSTS {
+        let max_caller_cap = if pgo.is_some_and(|p| p.is_hot_func(caller_bi)) {
+            INLINE_MAX_CONST_DIV_CALLER_INSTS.max(PGO_HOT_INLINE_CALLER_INSTS)
+        } else {
+            INLINE_MAX_CONST_DIV_CALLER_INSTS
+        };
+        if irs[caller_bi].is_none() || inst_counts[caller_bi] >= max_caller_cap {
             continue;
         }
         if total_added_insts >= INLINE_MAX_MODULE_ADDED_INSTS {
@@ -4069,6 +4181,7 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
             rem_cap,
             track_ok,
             warm,
+            pgo,
             budget,
         )?;
         irs[caller_bi] = Some(caller_ir);
@@ -4111,6 +4224,16 @@ pub fn inline_small_helpers(
     module: &X64Module,
     budget: Option<&CompileBudget>,
 ) -> Res<()> {
+    inline_small_helpers_with_pgo(irs, module, None, budget)
+}
+
+/// Budgeted bottom-up small-helper inlining across the module, optionally guided by a `WTPGO1` profile.
+pub fn inline_small_helpers_with_pgo(
+    irs: &mut [IrFunc],
+    module: &X64Module,
+    pgo: Option<&crate::pgo::PgoProfile>,
+    budget: Option<&CompileBudget>,
+) -> Res<()> {
     let n_imports = module.imports.len();
     let n_defs = irs.len();
     if n_defs <= 1 {
@@ -4151,7 +4274,7 @@ pub fn inline_small_helpers(
             ))
         })
         .collect();
-    let res = inline_small_helpers_subset(
+    let res = inline_small_helpers_subset_parallel_with_pre_and_pgo(
         &mut opt_irs,
         &in_cycle,
         &topo_bottom_up,
@@ -4159,12 +4282,294 @@ pub fn inline_small_helpers(
         module,
         0,
         InlineMode::ColdNoCache,
+        1,
+        None,
+        None,
+        None,
+        pgo,
         budget,
     );
     for (dst, src) in irs.iter_mut().zip(opt_irs) {
         *dst = src.unwrap();
     }
     res.map(|_| ())
+}
+
+/// Instruments lowered SSA IR (`--pgo-gen`) with per-function entry counters (`Op::PgoFuncEnter`)
+/// and per-`CallIndirect`/`call_ref` Boyer–Moore heavy-hitter trackers (`Op::PgoRecordCi`) in a
+/// deterministic `(bi, bb, inst)` site order shared identically with `devirtualize_hot_indirect_calls`.
+pub fn instrument_pgo(irs: &mut [IrFunc], max_ci_sites: u32) -> Res<u32> {
+    let mut next_site: u32 = 0;
+    for (bi, ir) in irs.iter_mut().enumerate() {
+        let def_idx = u32::try_from(bi).map_err(|_| "pgo: defined function index exceeds u32")?;
+        if !ir.blocks.is_empty() {
+            ir.blocks[0].insts.insert(
+                0,
+                Inst {
+                    res: None,
+                    op: Op::PgoFuncEnter(def_idx),
+                },
+            );
+        }
+        for bb in &mut ir.blocks {
+            let mut ii = 0usize;
+            while ii < bb.insts.len() {
+                if let Op::CallIndirect { ci_id, idx, .. } = bb.insts[ii].op {
+                    if next_site >= max_ci_sites {
+                        return Err(format!(
+                            "pgo: indirect call site {next_site} exceeds upper bound {max_ci_sites}"
+                        ));
+                    }
+                    let site = next_site;
+                    next_site += 1;
+                    bb.insts.insert(
+                        ii,
+                        Inst {
+                            res: None,
+                            op: Op::PgoRecordCi { site, ci_id, idx },
+                        },
+                    );
+                    ii += 2;
+                } else {
+                    ii += 1;
+                }
+            }
+        }
+    }
+    Ok(next_site)
+}
+
+/// Speculatively devirtualizes hot monomorphic `Op::CallIndirect` / `call_ref` sites using a
+/// verified `WTPGO1` profile (`--pgo-use`). Runs right BEFORE `inline_small_helpers` so hot
+/// devirtualized callees are inlined directly into the fast arm, while the slow arm preserves
+/// exact Wasm traps and polymorphic fallback semantics.
+pub fn devirtualize_hot_indirect_calls(
+    irs: &mut [IrFunc],
+    module: &X64Module,
+    pgo: &crate::pgo::PgoProfile,
+) -> Res<usize> {
+    let mut next_site: usize = 0;
+    let mut devirt_count: usize = 0;
+
+    for ir in irs.iter_mut() {
+        let orig_blocks = ir.blocks.len();
+        for orig_bi in 0..orig_blocks {
+            // Walk a block (following any newly split `merge_bb` tails in original order so
+            // sequential `site_id`s match `instrument_pgo` 1:1 even with multiple CallIndirects per block!).
+            let mut cur_bi = orig_bi;
+            let mut ii = 0usize;
+            loop {
+                if ii >= ir.blocks[cur_bi].insts.len() {
+                    break;
+                }
+                let Op::CallIndirect {
+                    ci_id,
+                    idx,
+                    args,
+                    rets,
+                } = ir.blocks[cur_bi].insts[ii].op
+                else {
+                    ii += 1;
+                    continue;
+                };
+                let site = next_site;
+                next_site += 1;
+
+                let Some(expected_func) = pgo.hot_devirt_target(site) else {
+                    ii += 1;
+                    continue;
+                };
+                let Some(ci) = module.ci_sigs.get(ci_id as usize) else {
+                    ii += 1;
+                    continue;
+                };
+                if (expected_func as usize) >= module.func_canon_sig.len()
+                    || module.func_canon_sig[expected_func as usize] != ci.canon_sig
+                {
+                    ii += 1;
+                    continue;
+                }
+                if ir.blocks.len() + 3 > MAX_BLOCKS_PER_FN
+                    || ir.val_tys.len() + 64 > MAX_IR_VALS_PER_FN
+                    || ir.val_pool.len() + 128 > MAX_VAL_POOL_PER_FN
+                {
+                    ii += 1;
+                    continue;
+                }
+
+                // Choose the cheapest exact non-trapping guard:
+                // - `call_ref`: `idx == expected_func + 1` (pure register compare!)
+                // - static table where `expected_func` occupies a unique slot `k`: `idx == k` (pure register compare!)
+                // - dynamic table or multi-slot static table: `Op::CiCheckTarget { ci_id, idx, expected_func }`
+                enum GuardKind {
+                    CallRefEq(i64),
+                    UniqueSlot32(i32),
+                    UniqueSlot64(i64),
+                    TableCheck,
+                }
+                let guard_kind = if ci.is_call_ref {
+                    GuardKind::CallRefEq(i64::from(expected_func) + 1)
+                } else if !ci.is_dynamic {
+                    let mut found_slot: Option<u32> = None;
+                    let mut multi = false;
+                    for &(slot, fi) in &ci.targets {
+                        if fi == expected_func {
+                            if found_slot.is_some() {
+                                multi = true;
+                                break;
+                            }
+                            found_slot = Some(slot);
+                        }
+                    }
+                    match (found_slot, multi) {
+                        (None, _) => {
+                            // Function is not present in this static table; do not devirtualize.
+                            ii += 1;
+                            continue;
+                        }
+                        (Some(slot), false) if !ci.table_is64 => {
+                            GuardKind::UniqueSlot32(slot as i32)
+                        }
+                        (Some(slot), false) => GuardKind::UniqueSlot64(i64::from(slot)),
+                        (Some(_), true) => GuardKind::TableCheck,
+                    }
+                } else {
+                    GuardKind::TableCheck
+                };
+
+                let orig_rets: Vec<Val> = ir.pool_slice(rets).to_vec();
+                let mut fast_rets = Vec::with_capacity(orig_rets.len());
+                let mut slow_rets = Vec::with_capacity(orig_rets.len());
+                for &rv in &orig_rets {
+                    let ty = ir.val_tys[rv.0 as usize];
+                    fast_rets.push(ir.push_val(ty));
+                    slow_rets.push(ir.push_val(ty));
+                }
+                let fast_rets_r = ir.push_pool(&fast_rets)?;
+                let slow_rets_r = ir.push_pool(&slow_rets)?;
+                let args_copy: Vec<Val> = ir.pool_slice(args).to_vec();
+                let fast_args_r = ir.push_pool(&args_copy)?;
+                let slow_args_r = ir.push_pool(&args_copy)?;
+
+                // Split `cur_bi` right at instruction `ii`:
+                //   cur_bi:  ...prefix..., guard -> BranchIf(cond, fast_bb, slow_bb)
+                //   fast_bb: Call(expected_func, fast_args) -> fast_rets; Jump(merge_bb, fast_rets)
+                //   slow_bb: CallIndirect(ci_id, idx, slow_args) -> slow_rets; Jump(merge_bb, slow_rets)
+                //   merge_bb(params = orig_rets): ...tail..., orig_term
+                let tail_insts = ir.blocks[cur_bi].insts.split_off(ii + 1);
+                ir.blocks[cur_bi].insts.pop(); // remove original Op::CallIndirect
+                let orig_term = std::mem::replace(&mut ir.blocks[cur_bi].term, Term::Unreachable);
+
+                let cond_v = match guard_kind {
+                    GuardKind::CallRefEq(tag) => {
+                        let cv = ir.push_val(Ty::I64);
+                        ir.blocks[cur_bi].insts.push(Inst {
+                            res: Some(cv),
+                            op: Op::ConstI64(tag),
+                        });
+                        let c = ir.push_val(Ty::I32);
+                        ir.blocks[cur_bi].insts.push(Inst {
+                            res: Some(c),
+                            op: Op::I64Cmp(CmpOp::Eq, idx, cv),
+                        });
+                        c
+                    }
+                    GuardKind::UniqueSlot32(slot) => {
+                        let c = ir.push_val(Ty::I32);
+                        ir.blocks[cur_bi].insts.push(Inst {
+                            res: Some(c),
+                            op: Op::I32CmpImm(CmpOp::Eq, idx, slot),
+                        });
+                        c
+                    }
+                    GuardKind::UniqueSlot64(slot) => {
+                        let cv = ir.push_val(Ty::I64);
+                        ir.blocks[cur_bi].insts.push(Inst {
+                            res: Some(cv),
+                            op: Op::ConstI64(slot),
+                        });
+                        let c = ir.push_val(Ty::I32);
+                        ir.blocks[cur_bi].insts.push(Inst {
+                            res: Some(c),
+                            op: Op::I64Cmp(CmpOp::Eq, idx, cv),
+                        });
+                        c
+                    }
+                    GuardKind::TableCheck => {
+                        let c = ir.push_val(Ty::I32);
+                        ir.blocks[cur_bi].insts.push(Inst {
+                            res: Some(c),
+                            op: Op::CiCheckTarget {
+                                ci_id,
+                                idx,
+                                expected_func,
+                            },
+                        });
+                        c
+                    }
+                };
+
+                let fast_bb_id = BlockId(ir.blocks.len() as u32);
+                let slow_bb_id = BlockId((ir.blocks.len() + 1) as u32);
+                let merge_bb_id = BlockId((ir.blocks.len() + 2) as u32);
+
+                ir.blocks[cur_bi].term = Term::BranchIf {
+                    cond: cond_v,
+                    then_bb: fast_bb_id,
+                    then_args: ValRange::EMPTY,
+                    else_bb: slow_bb_id,
+                    else_args: ValRange::EMPTY,
+                };
+                ir.blocks.push(Block {
+                    params: Vec::new(),
+                    insts: vec![Inst {
+                        res: None,
+                        op: Op::Call {
+                            func: expected_func,
+                            args: fast_args_r,
+                            rets: fast_rets_r,
+                        },
+                    }],
+                    term: Term::Jump {
+                        target: merge_bb_id,
+                        args: fast_rets_r,
+                    },
+                    is_loop_header: false,
+                    preds: 1,
+                });
+                ir.blocks.push(Block {
+                    params: Vec::new(),
+                    insts: vec![Inst {
+                        res: None,
+                        op: Op::CallIndirect {
+                            ci_id,
+                            idx,
+                            args: slow_args_r,
+                            rets: slow_rets_r,
+                        },
+                    }],
+                    term: Term::Jump {
+                        target: merge_bb_id,
+                        args: slow_rets_r,
+                    },
+                    is_loop_header: false,
+                    preds: 1,
+                });
+                ir.blocks.push(Block {
+                    params: orig_rets,
+                    insts: tail_insts,
+                    term: orig_term,
+                    is_loop_header: false,
+                    preds: 2,
+                });
+
+                devirt_count += 1;
+                cur_bi = merge_bb_id.0 as usize;
+                ii = 0;
+            }
+        }
+    }
+    Ok(devirt_count)
 }
 
 // ============================================================================
@@ -8943,8 +9348,11 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::TableSize(_)
         | Op::ExnGetActive
         | Op::ExnClearActive
+        | Op::PgoFuncEnter(_)
         | Op::Trap(_) => {}
         Op::Copy(a)
+        | Op::PgoRecordCi { idx: a, .. }
+        | Op::CiCheckTarget { idx: a, .. }
         | Op::I32Eqz(a)
         | Op::I64Eqz(a)
         | Op::I32Clz(a)
@@ -9374,6 +9782,8 @@ fn version_checked_counted_loops(
                         | Op::ExnClearActive
                         | Op::ExnGetTag(_)
                         | Op::ExnGetPayload { .. }
+                        | Op::PgoFuncEnter(_)
+                        | Op::PgoRecordCi { .. }
                 )
             }) {
                 body_clean = false;
@@ -13558,6 +13968,8 @@ fn unroll_small_constant_loops(ir: &mut IrFunc, dom: &CfgDom, max_body_insts: us
                         | Op::ExnClearActive
                         | Op::ExnGetTag(_)
                         | Op::ExnGetPayload { .. }
+                        | Op::PgoFuncEnter(_)
+                        | Op::PgoRecordCi { .. }
                 )
             }) {
                 ok_body = false;

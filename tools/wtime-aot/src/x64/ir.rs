@@ -906,6 +906,22 @@ pub enum Op {
         ty: Ty,
     },
 
+    /// `--pgo-gen` only: increments defined function `func_def_idx`'s entry counter in the `WTPGO1` buffer.
+    PgoFuncEnter(u32),
+    /// `--pgo-gen` only: records the resolved target of indirect-call site `site` in the `WTPGO1` Boyer–Moore table.
+    PgoRecordCi {
+        site: u32,
+        ci_id: u32,
+        idx: Val,
+    },
+    /// `--pgo-use` speculative devirtualization guard: evaluates to `I32` `1` iff `(ci_id, idx)`
+    /// resolves non-trapping to `expected_func` (with matching signature), else `0`.
+    CiCheckTarget {
+        ci_id: u32,
+        idx: Val,
+        expected_func: u32,
+    },
+
     Trap(u8),
 }
 
@@ -966,6 +982,8 @@ impl Op {
             | Op::ExnClearActive
             | Op::ExnGetTag(_)
             | Op::ExnGetPayload { .. }
+            | Op::PgoFuncEnter(_)
+            | Op::PgoRecordCi { .. }
             | Op::Trap(_) => true,
             _ => false,
         }
@@ -986,8 +1004,11 @@ impl Op {
             | Op::TableSize(_)
             | Op::ExnGetActive
             | Op::ExnClearActive
+            | Op::PgoFuncEnter(_)
             | Op::Trap(_) => {}
             Op::Copy(a)
+            | Op::PgoRecordCi { idx: a, .. }
+            | Op::CiCheckTarget { idx: a, .. }
             | Op::I32Eqz(a)
             | Op::I64Eqz(a)
             | Op::I32Clz(a)

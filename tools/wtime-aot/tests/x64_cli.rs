@@ -1581,3 +1581,129 @@ fn standalone_goose_os_search_and_sandbox_security_x64_and_aarch64() {
         "expected goose.reserve re-entrancy to trap!"
     );
 }
+
+#[test]
+fn cli_pgo_gen_and_pgo_use_end_to_end_and_cache_keys() {
+    let bin = env!("CARGO_BIN_EXE_wtime-aot");
+    let root = TempRoot::new("wtime-aot-pgo-cli");
+    let cache = root.path("cache");
+
+    let f0 = vec![0x20, 0, 0x41, 11, 0x6c, 0x41, 3, 0x6a];
+    let f1 = vec![0x20, 0, 0x41, 5, 0x6c, 0x41, 1, 0x6a];
+    let start = vec![
+        0x41, 1, 0x21, 0, // acc = 1
+        0x41, 0, 0x21, 1, // i = 0
+        0x02, 0x40, 0x03, 0x40, // block, loop
+        0x20, 1, 0x41, 0xc8, 0x01, 0x4f, 0x0d, 1, // br_if 1 (i >=u 200)
+        0x20, 0, 0x41, 1, 0x11, 0, 0, 0x21, 0, // acc = call_indirect(acc, 1)
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, // i += 1
+        0x0c, 0, 0x0b, 0x0b,
+    ];
+    let wasm = wasm_module(&[
+        section(1, &[2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 0, 0]),
+        section(3, &[3, 0, 0, 1]),
+        section(4, &[1, 0x70, 0x00, 2]),
+        section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 2]),
+        section(9, &[1, 0x00, 0x41, 0, 0x0b, 2, 0, 1]),
+        section(
+            10,
+            &[3].into_iter()
+                .chain(enc_body(&[], &f0))
+                .chain(enc_body(&[], &f1))
+                .chain(enc_body(&[(2, 0x7f)], &start))
+                .collect::<Vec<_>>(),
+        ),
+    ]);
+    let wasm_path = root.path("pgo_prog.wasm");
+    let prof_path = root.path("prog.wtpgo1");
+    fs::write(&wasm_path, &wasm).unwrap();
+
+    let bad_both = Command::new(bin)
+        .arg(&wasm_path)
+        .args(["-o"])
+        .arg(root.path("bad1"))
+        .args(["--backend", "x64", "--pgo-gen"])
+        .arg(&prof_path)
+        .args(["--pgo-use"])
+        .arg(&prof_path)
+        .output()
+        .unwrap();
+    assert_eq!(bad_both.status.code(), Some(2));
+
+    let bad_rust = Command::new(bin)
+        .arg(&wasm_path)
+        .args(["-o"])
+        .arg(root.path("bad2"))
+        .args(["--backend", "rust", "--pgo-gen"])
+        .arg(&prof_path)
+        .output()
+        .unwrap();
+    assert_eq!(bad_rust.status.code(), Some(2));
+
+    let base_out = Command::new(bin)
+        .arg("build")
+        .arg(&wasm_path)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(
+        base_out.status.success(),
+        "base build failed: {}",
+        String::from_utf8_lossy(&base_out.stderr)
+    );
+    let base_exe = PathBuf::from(String::from_utf8_lossy(&base_out.stdout).trim());
+
+    let gen_out = Command::new(bin)
+        .arg("build")
+        .arg(&wasm_path)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--backend", "x64", "--pgo-gen"])
+        .arg(&prof_path)
+        .output()
+        .unwrap();
+    assert!(
+        gen_out.status.success(),
+        "pgo-gen build failed: {}",
+        String::from_utf8_lossy(&gen_out.stderr)
+    );
+    let gen_exe = PathBuf::from(String::from_utf8_lossy(&gen_out.stdout).trim());
+    assert_ne!(base_exe, gen_exe, "pgo-gen must have distinct cache entry");
+
+    let run_gen = Command::new(&gen_exe).output().unwrap();
+    assert!(
+        run_gen.status.success(),
+        "pgo-gen exec failed: {}",
+        String::from_utf8_lossy(&run_gen.stderr)
+    );
+    let prof_bytes = fs::read(&prof_path).expect("WTPGO1 profile must be written on clean exit");
+    assert_eq!(&prof_bytes[..8], b"WTPGO1\0\0");
+    assert_eq!(u32::from_le_bytes(prof_bytes[8..12].try_into().unwrap()), 3);
+    assert_eq!(
+        u32::from_le_bytes(prof_bytes[12..16].try_into().unwrap()),
+        1
+    );
+
+    let use_out = Command::new(bin)
+        .arg("build")
+        .arg(&wasm_path)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--backend", "x64", "--pgo-use"])
+        .arg(&prof_path)
+        .output()
+        .unwrap();
+    assert!(
+        use_out.status.success(),
+        "pgo-use build failed: {}",
+        String::from_utf8_lossy(&use_out.stderr)
+    );
+    let use_exe = PathBuf::from(String::from_utf8_lossy(&use_out.stdout).trim());
+    assert_ne!(base_exe, use_exe, "pgo-use must have distinct cache entry");
+    assert_ne!(gen_exe, use_exe, "pgo-use must differ from pgo-gen");
+
+    let run_use = Command::new(&use_exe).output().unwrap();
+    assert!(run_use.status.success());
+}

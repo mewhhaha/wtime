@@ -27,13 +27,69 @@ use crate::x64::{
 };
 use wtime_types::ValType;
 
+const SYS_OPENAT: u64 = 56;
+const SYS_CLOSE: u64 = 57;
+const SYS_WRITE: u64 = 64;
 const SYS_MUNMAP: u64 = 215;
 const SYS_MMAP: u64 = 222;
 const SYS_MPROTECT: u64 = 226;
+const AT_FDCWD_U64: u64 = (-100i64) as u64;
+const O_WRONLY_CREAT_TRUNC: u32 = 0x241;
 
 fn emit_syscall(asm: &mut A64Asm, num: u64) {
     asm.mov_imm64(Reg::X8, num);
     asm.svc(0);
+}
+
+/// Flushes the `WTPGO1` profile buffer to `pgo.path_ro_off` on clean exit (`--pgo-gen` only).
+/// Clobbers X0..X15; preserves callee-saved `ctx_reg`.
+pub(crate) fn emit_a64_flush_pgo_profile(
+    a: &mut A64Asm,
+    ctx_reg: Reg,
+    pgo: &crate::x64::PgoGenLayout,
+) {
+    let lbl_done = a.new_label();
+    emit_load_off(
+        a,
+        Ty::I64,
+        Some(Reg::X9),
+        None,
+        ctx_reg,
+        pgo.ctx_ptr_off,
+        Reg::X15,
+    );
+    a.cbz(true, Reg::X9, lbl_done);
+    // fd = openat(AT_FDCWD, path_ro, O_WRONLY|O_CREAT|O_TRUNC, 0o600)
+    a.mov_imm64(Reg::X0, AT_FDCWD_U64);
+    a.adr_reloc(Reg::X1, A64RelocTarget::Rodata(pgo.path_ro_off));
+    a.mov_imm32(Reg::X2, O_WRONLY_CREAT_TRUNC);
+    a.mov_imm32(Reg::X3, 0o600);
+    emit_syscall(a, SYS_OPENAT);
+    a.cmp_imm(true, Reg::X0, 0);
+    a.b_cond(Cond::Lt, lbl_done);
+    // X10 = fd, X9 = ptr, X11 = remaining bytes
+    a.mov_r(true, Reg::X10, Reg::X0);
+    a.mov_imm64(Reg::X11, pgo.payload_bytes as u64);
+    let lbl_wloop = a.new_label();
+    let lbl_close = a.new_label();
+    a.bind(lbl_wloop);
+    a.cbz(true, Reg::X11, lbl_close);
+    a.mov_r(true, Reg::X0, Reg::X10);
+    a.mov_r(true, Reg::X1, Reg::X9);
+    a.mov_r(true, Reg::X2, Reg::X11);
+    emit_syscall(a, SYS_WRITE);
+    a.mov_imm64(Reg::X12, (-4i64) as u64);
+    a.cmp_r(true, Reg::X0, Reg::X12);
+    a.b_cond(Cond::Eq, lbl_wloop);
+    a.cmp_imm(true, Reg::X0, 0);
+    a.b_cond(Cond::Le, lbl_close);
+    a.add_r(true, Reg::X9, Reg::X9, Reg::X0);
+    a.sub_r(true, Reg::X11, Reg::X11, Reg::X0);
+    a.b(lbl_wloop);
+    a.bind(lbl_close);
+    a.mov_r(true, Reg::X0, Reg::X10);
+    emit_syscall(a, SYS_CLOSE);
+    a.bind(lbl_done);
 }
 
 /// Emits shared AArch64 runtime helpers (`HELPER_MEM_GROW`, `HELPER_MEM_COPY`, `HELPER_MEM_FILL`,
@@ -219,6 +275,22 @@ fn emit_a64_cleanup_ctx(a: &mut A64Asm, ctx_reg: Reg, layout: &CtxLayout) {
         }
         emit_syscall(a, SYS_MUNMAP);
         a.bind(skip_dt);
+    }
+    if let Some(ref pgo) = layout.pgo_gen {
+        let skip_pgo = a.new_label();
+        emit_load_off(
+            a,
+            Ty::I64,
+            Some(Reg::X0),
+            None,
+            ctx_reg,
+            pgo.ctx_ptr_off,
+            Reg::X15,
+        );
+        a.cbz(true, Reg::X0, skip_pgo);
+        a.mov_imm64(Reg::X1, pgo.alloc_bytes as u64);
+        emit_syscall(a, SYS_MUNMAP);
+        a.bind(skip_pgo);
     }
     emit_load_off(
         a,
@@ -2243,6 +2315,37 @@ pub fn emit_a64_exports(
                 );
             }
         }
+        // Native PGO counter buffer (`--pgo-gen` only).
+        if let Some(ref pgo) = layout.pgo_gen {
+            a.movz(true, Reg::X0, 0, 0);
+            a.mov_imm64(Reg::X1, pgo.alloc_bytes as u64);
+            a.mov_imm32(Reg::X2, 3);
+            a.mov_imm32(Reg::X3, 0x22);
+            a.mov_imm64(Reg::X4, u64::MAX);
+            a.movz(true, Reg::X5, 0, 0);
+            emit_syscall(&mut a, SYS_MMAP);
+            a.mov_imm64(Reg::X4, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X4);
+            a.b_cond(Cond::Hs, fail_alloc_cleanup);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                CTX_REG,
+                pgo.ctx_ptr_off,
+                SGP3,
+            );
+            a.mov_imm64(Reg::X4, crate::pgo::WTPGO1_MAGIC_U64);
+            a.str_uimm(true, Reg::X4, Reg::X0, 0);
+            a.mov_imm32(Reg::X4, pgo.n_defs);
+            a.str_uimm(false, Reg::X4, Reg::X0, 8);
+            a.mov_imm32(Reg::X4, pgo.n_ci_sites);
+            a.str_uimm(false, Reg::X4, Reg::X0, 12);
+            a.mov_imm64(Reg::X4, pgo.module_hash_lo);
+            a.str_uimm(true, Reg::X4, Reg::X0, 16);
+            a.str_uimm(true, Reg::XZR, Reg::X0, 24);
+        }
 
         // Switch to dedicated guest stack and run `HELPER_INITIALIZE` (globals, data, start fn).
         a.mov_imm32(Reg::X4, 1);
@@ -2345,6 +2448,9 @@ pub fn emit_a64_exports(
         a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -32);
         a.str_uimm(true, Reg::X19, Reg::SP, 16);
         a.mov_r(true, Reg::X19, Reg::X0);
+        if let Some(ref pgo) = layout.pgo_gen {
+            emit_a64_flush_pgo_profile(&mut a, Reg::X19, pgo);
+        }
         emit_a64_cleanup_ctx(&mut a, Reg::X19, layout);
         a.ldr_uimm(true, Reg::X19, Reg::SP, 16);
         a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 32);

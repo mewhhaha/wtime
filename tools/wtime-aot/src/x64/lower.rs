@@ -7016,6 +7016,213 @@ impl<'a> Lower<'a> {
                     self.gp_commit(r, d);
                 }
             }
+            Op::PgoFuncEnter(def_idx) => {
+                if let Some(ref pgo) = self.layout.pgo_gen {
+                    let off = (crate::pgo::WTPGO1_HEADER_BYTES as i32)
+                        .checked_add((def_idx as i32) * 8)
+                        .ok_or("x64: PgoFuncEnter offset overflow")?;
+                    self.asm
+                        .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, pgo.ctx_ptr_off));
+                    self.asm
+                        .mov_rm(true, SCRATCH_GP2, Mem::base_disp(SCRATCH_GP1, off));
+                    self.asm.add_ri(true, SCRATCH_GP2, 1);
+                    self.asm
+                        .mov_mr(true, Mem::base_disp(SCRATCH_GP1, off), SCRATCH_GP2);
+                }
+            }
+            Op::PgoRecordCi { site, ci_id, idx } => {
+                if let Some(ref pgo) = self.layout.pgo_gen {
+                    let ci = self.layout.ci_tables[ci_id as usize];
+                    let is64 = ci.is_call_ref || ci.table_is64;
+                    let ir = self.gp_read(idx, SCRATCH_GP2);
+                    if ir != SCRATCH_GP2 {
+                        self.asm.mov_rr(is64, SCRATCH_GP2, ir);
+                    }
+                    let lbl_done = self.asm.new_label();
+                    // Resolve `(ci_id, SCRATCH_GP2) -> Rax = 1-based tag (func_idx + 1)`, or jump `lbl_done` if invalid/null.
+                    if ci.is_call_ref {
+                        self.asm.mov_rr(true, Gp::Rax, SCRATCH_GP2);
+                        self.asm.test_rr(true, Gp::Rax, Gp::Rax);
+                        self.asm.jcc(Cond::E, lbl_done);
+                    } else if ci.dyn_table_desc_off >= 0 {
+                        if ci.table_is64 {
+                            self.asm.mov_rm(
+                                false,
+                                SCRATCH_GP1,
+                                Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+                            );
+                            self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                        } else {
+                            self.asm.cmp_rm(
+                                false,
+                                SCRATCH_GP2,
+                                Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+                            );
+                        }
+                        self.asm.jcc(Cond::Ae, lbl_done);
+                        self.asm.mov_rm(
+                            true,
+                            SCRATCH_GP1,
+                            Mem::base_disp(Gp::R15, ci.dyn_table_desc_off),
+                        );
+                        self.asm.mov_rm(
+                            true,
+                            Gp::Rax,
+                            Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 8, 0),
+                        );
+                        self.asm.test_rr(true, Gp::Rax, Gp::Rax);
+                        self.asm.jcc(Cond::E, lbl_done);
+                    } else {
+                        if ci.span == 0 || ci.pgo_func_id_ro_off == 0 {
+                            self.asm.jmp(lbl_done);
+                        } else {
+                            if ci.table_is64 {
+                                self.asm.mov_ri32(SCRATCH_GP1, ci.table_len);
+                                self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                            } else {
+                                self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+                            }
+                            self.asm.jcc(Cond::Ae, lbl_done);
+                            if ci.min_slot > 0 {
+                                self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
+                            }
+                            self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
+                            self.asm.jcc(Cond::Ae, lbl_done);
+                            self.asm
+                                .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.pgo_func_id_ro_off));
+                            self.asm.mov_rm(
+                                false,
+                                Gp::Rax,
+                                Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0),
+                            );
+                            self.asm.test_rr(false, Gp::Rax, Gp::Rax);
+                            self.asm.jcc(Cond::E, lbl_done);
+                        }
+                    }
+                    // `Eax = func_idx` (0-based). Update Boyer-Moore 24-byte slot:
+                    //   +0: total_hits (u64), +8: top_hits (u64), +16: top_target (u32)
+                    self.asm.sub_ri(false, Gp::Rax, 1);
+                    let slot_off = (crate::pgo::WTPGO1_HEADER_BYTES as i32)
+                        .checked_add((pgo.n_defs as i32) * 8)
+                        .and_then(|v| {
+                            v.checked_add((site as i32) * (crate::pgo::WTPGO1_CI_SITE_BYTES as i32))
+                        })
+                        .ok_or("x64: PgoRecordCi slot offset overflow")?;
+                    self.asm
+                        .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, pgo.ctx_ptr_off));
+                    self.asm.add_ri(true, SCRATCH_GP1, slot_off);
+                    // total_hits += 1
+                    self.asm
+                        .mov_rm(true, SCRATCH_GP2, Mem::base_disp(SCRATCH_GP1, 0));
+                    self.asm.add_ri(true, SCRATCH_GP2, 1);
+                    self.asm
+                        .mov_mr(true, Mem::base_disp(SCRATCH_GP1, 0), SCRATCH_GP2);
+                    // Load top_hits -> SCRATCH_GP2
+                    self.asm
+                        .mov_rm(true, SCRATCH_GP2, Mem::base_disp(SCRATCH_GP1, 8));
+                    let lbl_miss = self.asm.new_label();
+                    let lbl_zero = self.asm.new_label();
+                    self.asm
+                        .cmp_rm(false, Gp::Rax, Mem::base_disp(SCRATCH_GP1, 16));
+                    self.asm.jcc(Cond::Ne, lbl_miss);
+                    // Hit: top_hits += 1
+                    self.asm.add_ri(true, SCRATCH_GP2, 1);
+                    self.asm
+                        .mov_mr(true, Mem::base_disp(SCRATCH_GP1, 8), SCRATCH_GP2);
+                    self.asm.jmp(lbl_done);
+                    self.asm.bind(lbl_miss);
+                    self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
+                    self.asm.jcc(Cond::E, lbl_zero);
+                    // Decrement: top_hits -= 1
+                    self.asm.sub_ri(true, SCRATCH_GP2, 1);
+                    self.asm
+                        .mov_mr(true, Mem::base_disp(SCRATCH_GP1, 8), SCRATCH_GP2);
+                    self.asm.jmp(lbl_done);
+                    self.asm.bind(lbl_zero);
+                    // Replace candidate: top_target = func_idx, top_hits = 1
+                    self.asm
+                        .mov_mr(false, Mem::base_disp(SCRATCH_GP1, 16), Gp::Rax);
+                    self.asm.mov_mi32(true, Mem::base_disp(SCRATCH_GP1, 8), 1);
+                    self.asm.bind(lbl_done);
+                }
+            }
+            Op::CiCheckTarget {
+                ci_id,
+                idx,
+                expected_func,
+            } => {
+                let r = res.unwrap();
+                let ci = self.layout.ci_tables[ci_id as usize];
+                let is64 = ci.is_call_ref || ci.table_is64;
+                let ir = self.gp_read(idx, SCRATCH_GP2);
+                if ir != SCRATCH_GP2 {
+                    self.asm.mov_rr(is64, SCRATCH_GP2, ir);
+                }
+                let d = self.gp_write_reg(r);
+                self.asm.xor_rr(false, d, d);
+                let lbl_done = self.asm.new_label();
+                if ci.is_call_ref {
+                    self.asm.mov_ri64(SCRATCH_GP1, u64::from(expected_func) + 1);
+                    self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    self.asm.setcc(Cond::E, d);
+                } else if ci.dyn_table_desc_off >= 0 {
+                    if ci.table_is64 {
+                        self.asm.mov_rm(
+                            false,
+                            SCRATCH_GP1,
+                            Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+                        );
+                        self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    } else {
+                        self.asm.cmp_rm(
+                            false,
+                            SCRATCH_GP2,
+                            Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+                        );
+                    }
+                    self.asm.jcc(Cond::Ae, lbl_done);
+                    self.emit_speculation_barrier();
+                    self.asm.mov_rm(
+                        true,
+                        SCRATCH_GP1,
+                        Mem::base_disp(Gp::R15, ci.dyn_table_desc_off),
+                    );
+                    self.asm.mov_rm(
+                        true,
+                        SCRATCH_GP2,
+                        Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 8, 0),
+                    );
+                    self.asm.mov_ri64(SCRATCH_GP1, u64::from(expected_func) + 1);
+                    self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    self.asm.setcc(Cond::E, d);
+                } else if ci.span > 0 {
+                    if ci.table_is64 {
+                        self.asm.mov_ri32(SCRATCH_GP1, ci.table_len);
+                        self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    } else {
+                        self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+                    }
+                    self.asm.jcc(Cond::Ae, lbl_done);
+                    self.emit_speculation_barrier();
+                    if ci.min_slot > 0 {
+                        self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
+                    }
+                    self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
+                    self.asm.jcc(Cond::Ae, lbl_done);
+                    self.emit_speculation_barrier();
+                    self.asm
+                        .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
+                    self.asm
+                        .movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
+                    self.asm.add_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    self.asm
+                        .lea_rip(SCRATCH_GP1, RelocTarget::Func(expected_func));
+                    self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    self.asm.setcc(Cond::E, d);
+                }
+                self.asm.bind(lbl_done);
+                self.gp_commit(r, d);
+            }
             Op::Trap(code) => {
                 let lbl = match code {
                     TRAP_UNREACHABLE => self.trap_unreach_lbl(),

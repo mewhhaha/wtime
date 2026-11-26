@@ -81,6 +81,10 @@ pub struct A64CompileOptions {
     pub inc_cache_dir: Option<PathBuf>,
     /// Generator build fingerprint bound into incremental cache keys.
     pub gen_fingerprint: [u8; 32],
+    /// Optional `--pgo-gen` profile output path (mutually exclusive with `pgo_use`).
+    pub pgo_gen_path: Option<PathBuf>,
+    /// Optional verified `WTPGO1` profile (`--pgo-use`) driving devirt, inlining, and `.text` layout.
+    pub pgo_use: Option<crate::pgo::PgoProfile>,
 }
 
 impl Default for A64CompileOptions {
@@ -93,6 +97,8 @@ impl Default for A64CompileOptions {
             spectre_mitigations: false,
             inc_cache_dir: None,
             gen_fingerprint: [0u8; 32],
+            pgo_gen_path: None,
+            pgo_use: None,
         }
     }
 }
@@ -679,7 +685,20 @@ fn compile_wasm_to_aarch64_detailed(
     let budget = CompileBudget::new(opts.deadline);
     budget.check_deadline().map_err(X64CompileError::Failed)?;
 
-    let inc_enabled = opts.inc_cache_dir.is_some() && opts.optimize;
+    if opts.pgo_gen_path.is_some() && opts.pgo_use.is_some() {
+        return Err(X64CompileError::Failed(
+            "aarch64: --pgo-gen and --pgo-use cannot be used together".into(),
+        ));
+    }
+    let pgo_gen_path_nul = match opts.pgo_gen_path.as_deref() {
+        Some(p) => Some(crate::pgo::validate_pgo_gen_path(p).map_err(X64CompileError::Failed)?),
+        None => None,
+    };
+
+    let inc_enabled = opts.inc_cache_dir.is_some()
+        && opts.optimize
+        && opts.pgo_gen_path.is_none()
+        && opts.pgo_use.is_none();
     let mut vlimits = x64_validate_limits();
     vlimits.compile_threads = if wasm.len() >= 256 * 1024 {
         resolve_a64_jobs(opts.jobs).min(16)
@@ -787,11 +806,29 @@ fn compile_wasm_to_aarch64_detailed(
         rodata[pos + 4..pos + 8].copy_from_slice(&(msg.len() as u32).to_le_bytes());
     }
 
+    let pgo_n_ci_sites = if pgo_gen_path_nul.is_some() || opts.pgo_use.is_some() {
+        crate::pgo::count_wasm_ci_sites(validated.decoded()).map_err(X64CompileError::Failed)?
+    } else {
+        0
+    };
+    let pgo_mod_hash_lo = if pgo_gen_path_nul.is_some() || opts.pgo_use.is_some() {
+        crate::pgo::module_hash_lo(wasm)
+    } else {
+        0
+    };
+    if let Some(ref prof) = opts.pgo_use {
+        let n_defs_u32 = u32::try_from(validated.decoded().code.len()).map_err(|_| {
+            X64CompileError::Failed("aarch64: defined function count exceeds u32".into())
+        })?;
+        prof.verify_matches_module(n_defs_u32, pgo_n_ci_sites, pgo_mod_hash_lo)
+            .map_err(X64CompileError::Failed)?;
+    }
+
     let mut ci_tables = Vec::with_capacity(module.ci_sigs.len());
     let mut ci_patch_info: Vec<(u32, Vec<Option<u32>>)> = Vec::with_capacity(module.ci_sigs.len());
     for sig in &module.ci_sigs {
-        let (roff, slice) = if sig.is_dynamic || sig.is_call_ref || sig.span == 0 {
-            (0, Vec::new())
+        let (roff, pgo_id_off, slice) = if sig.is_dynamic || sig.is_call_ref || sig.span == 0 {
+            (0, 0, Vec::new())
         } else {
             let mut sl = vec![None; sig.span as usize];
             for &(slot, fidx) in &sig.targets {
@@ -799,13 +836,24 @@ fn compile_wasm_to_aarch64_detailed(
             }
             let roff = append_rodata(&mut rodata, 4, &vec![0u8; (sig.span as usize) * 4])
                 .map_err(X64CompileError::Failed)?;
-            (roff, sl)
+            let pgo_id_off = if pgo_gen_path_nul.is_some() {
+                let mut id_bytes = Vec::with_capacity((sig.span as usize) * 4);
+                for opt_f in &sl {
+                    let v = opt_f.map_or(0u32, |f| f + 1);
+                    id_bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                append_rodata(&mut rodata, 4, &id_bytes).map_err(X64CompileError::Failed)?
+            } else {
+                0
+            };
+            (roff, pgo_id_off, sl)
         };
         ci_tables.push(CiTableLayout {
             table_len: sig.table_len,
             min_slot: sig.min_slot,
             span: sig.span,
             rodata_off: roff,
+            pgo_func_id_ro_off: pgo_id_off,
             dyn_table_desc_off: -1,
             canon_sig: sig.canon_sig,
             is_call_ref: sig.is_call_ref,
@@ -920,6 +968,26 @@ fn compile_wasm_to_aarch64_detailed(
         .with_spectre_mitigations(opts.spectre_mitigations);
     layout.func_sig_ro_off = func_sig_ro_off;
     layout.func_addr_ro_off = func_addr_ro_off;
+    if let Some(ref path_nul) = pgo_gen_path_nul {
+        let path_ro_off =
+            append_rodata(&mut rodata, 1, path_nul).map_err(X64CompileError::Failed)?;
+        let n_defs_u32 = u32::try_from(validated.decoded().code.len()).map_err(|_| {
+            X64CompileError::Failed("aarch64: defined function count exceeds u32".into())
+        })?;
+        let (payload_bytes, alloc_bytes) =
+            crate::pgo::compute_pgo_buffer_sizes(n_defs_u32, pgo_n_ci_sites)
+                .map_err(X64CompileError::AdmissionRejected)?;
+        layout = layout
+            .with_pgo_gen(
+                payload_bytes,
+                alloc_bytes,
+                n_defs_u32,
+                pgo_n_ci_sites,
+                pgo_mod_hash_lo,
+                path_ro_off,
+            )
+            .map_err(X64CompileError::AdmissionRejected)?;
+    }
 
     let (
         imp_table_off,
@@ -1297,70 +1365,92 @@ fn compile_wasm_to_aarch64_detailed(
         let mut tracking_ok = false;
         let mut topo_cycle_save: Option<(Vec<usize>, Vec<bool>)> = None;
 
+        if layout.pgo_gen.is_some() {
+            opt::instrument_pgo(&mut irs, pgo_n_ci_sites).map_err(X64CompileError::Failed)?;
+        } else if let Some(ref prof) = opts.pgo_use
+            && opts.optimize
+        {
+            let _ = opt::devirtualize_hot_indirect_calls(&mut irs, &module, prof)
+                .map_err(X64CompileError::Failed)?;
+        }
+
         let (effects, own_effs_save) = if opts.optimize && n_defs > 0 {
-            let mut pre_inst_counts: Vec<usize> = Vec::with_capacity(n_defs);
-            let mut pre_was_inlinable: Vec<bool> = Vec::with_capacity(n_defs);
-            let mut pre_callees: Vec<Vec<(u32, u32)>> = Vec::with_capacity(n_defs);
-            let mut ok_pre = true;
-            for ir in &irs {
-                if let Some((ic, inl, cs)) =
-                    opt::try_collect_pre_inline_summary(ir, n_imports, n_defs)
-                {
-                    pre_inst_counts.push(ic);
-                    pre_was_inlinable.push(inl);
-                    pre_callees.push(cs);
-                } else {
-                    ok_pre = false;
-                    break;
-                }
-            }
-            if ok_pre {
-                let mut counts = vec![0u32; n_defs];
-                let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
-                for cs in &pre_callees {
-                    edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
-                    for &(c, cnt) in cs {
-                        counts[c as usize] = counts[c as usize].saturating_add(cnt);
-                    }
-                }
-                let (in_cycle, topo) = opt::call_graph_sccs_from_edges(&edges);
-                let mut opt_irs: Vec<Option<IrFunc>> = irs.into_iter().map(Some).collect();
-                let mode = if inc_enabled {
-                    InlineMode::ColdCaptureCache
-                } else {
-                    InlineMode::ColdNoCache
-                };
-                let res = opt::inline_small_helpers_subset_parallel_with_pre(
-                    &mut opt_irs,
-                    &in_cycle,
-                    &topo,
-                    &counts,
+            if layout.pgo_gen.is_some() {
+                // Keep exact un-inlined call-entry counts during `--pgo-gen`.
+            } else if opts.pgo_use.is_some() {
+                opt::inline_small_helpers_with_pgo(
+                    &mut irs,
                     &module,
-                    0,
-                    mode,
-                    n_workers,
-                    Some(&pre_callees),
-                    Some(&pre_inst_counts),
-                    Some(&pre_was_inlinable),
+                    opts.pgo_use.as_ref(),
                     Some(&budget),
                 )
                 .map_err(X64CompileError::Failed)?;
-                if let Some(track) = res {
-                    hit_inline_cap = track.hit_module_cap;
-                    tracking_ok = track.tracking_complete;
-                    inl_callees_cap = track.inlined_callees;
-                    inl_added_cap = track.added_insts;
-                    if inc_enabled && tracking_ok {
-                        pre_callees_save = pre_callees;
-                        pre_inlinable_save = pre_was_inlinable;
-                        topo_cycle_save = Some((topo, in_cycle));
+                hit_inline_cap = true;
+            } else {
+                let mut pre_inst_counts: Vec<usize> = Vec::with_capacity(n_defs);
+                let mut pre_was_inlinable: Vec<bool> = Vec::with_capacity(n_defs);
+                let mut pre_callees: Vec<Vec<(u32, u32)>> = Vec::with_capacity(n_defs);
+                let mut ok_pre = true;
+                for ir in &irs {
+                    if let Some((ic, inl, cs)) =
+                        opt::try_collect_pre_inline_summary(ir, n_imports, n_defs)
+                    {
+                        pre_inst_counts.push(ic);
+                        pre_was_inlinable.push(inl);
+                        pre_callees.push(cs);
+                    } else {
+                        ok_pre = false;
+                        break;
                     }
                 }
-                irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
-            } else {
-                inline_small_helpers(&mut irs, &module, Some(&budget))
+                if ok_pre {
+                    let mut counts = vec![0u32; n_defs];
+                    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
+                    for cs in &pre_callees {
+                        edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
+                        for &(c, cnt) in cs {
+                            counts[c as usize] = counts[c as usize].saturating_add(cnt);
+                        }
+                    }
+                    let (in_cycle, topo) = opt::call_graph_sccs_from_edges(&edges);
+                    let mut opt_irs: Vec<Option<IrFunc>> = irs.into_iter().map(Some).collect();
+                    let mode = if inc_enabled {
+                        InlineMode::ColdCaptureCache
+                    } else {
+                        InlineMode::ColdNoCache
+                    };
+                    let res = opt::inline_small_helpers_subset_parallel_with_pre(
+                        &mut opt_irs,
+                        &in_cycle,
+                        &topo,
+                        &counts,
+                        &module,
+                        0,
+                        mode,
+                        n_workers,
+                        Some(&pre_callees),
+                        Some(&pre_inst_counts),
+                        Some(&pre_was_inlinable),
+                        Some(&budget),
+                    )
                     .map_err(X64CompileError::Failed)?;
-                hit_inline_cap = true;
+                    if let Some(track) = res {
+                        hit_inline_cap = track.hit_module_cap;
+                        tracking_ok = track.tracking_complete;
+                        inl_callees_cap = track.inlined_callees;
+                        inl_added_cap = track.added_insts;
+                        if inc_enabled && tracking_ok {
+                            pre_callees_save = pre_callees;
+                            pre_inlinable_save = pre_was_inlinable;
+                            topo_cycle_save = Some((topo, in_cycle));
+                        }
+                    }
+                    irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
+                } else {
+                    inline_small_helpers(&mut irs, &module, Some(&budget))
+                        .map_err(X64CompileError::Failed)?;
+                    hit_inline_cap = true;
+                }
             }
             let mut own_effs = Vec::with_capacity(n_defs);
             for ir in &irs {
@@ -1758,18 +1848,22 @@ fn compile_wasm_to_aarch64_detailed(
     }
 
     // `func_offs[0..n_total]`: import trampolines (`0..n_imports`), then defined functions (`n_imports..`).
-    let mut func_offs: Vec<usize> = Vec::with_capacity(n_total);
-    for a in &import_asms {
+    let mut func_offs: Vec<usize> = vec![0; n_total];
+    for (k, a) in import_asms.iter().enumerate() {
         pad_text(&mut text);
         let off = text.len();
-        func_offs.push(off);
+        func_offs[k] = off;
         text.extend_from_slice(&a.code);
     }
-    for a in &fn_asms {
+    let a64_text_order: Vec<usize> = opts
+        .pgo_use
+        .as_ref()
+        .map_or_else(|| (0..n_defs).collect(), |p| p.text_layout_order());
+    for di in a64_text_order {
         pad_text(&mut text);
         let off = text.len();
-        func_offs.push(off);
-        text.extend_from_slice(&a.code);
+        func_offs[n_imports + di] = off;
+        text.extend_from_slice(&fn_asms[di].code);
     }
     if text.len() > MAX_TOTAL_CODE_BYTES {
         return Err(X64CompileError::AdmissionRejected(

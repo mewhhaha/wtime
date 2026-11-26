@@ -560,6 +560,9 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 Op::VecElemLoop { .. } | Op::VecReduceLoop { .. } => {
                     clobbers.push((pos, 0x000f, 0x0007));
                 }
+                Op::PgoRecordCi { .. } => {
+                    clobbers.push((pos, 1 << 0, 0));
+                }
                 _ => {}
             }
             if let Some(r) = inst.res {

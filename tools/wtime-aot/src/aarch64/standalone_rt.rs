@@ -953,6 +953,38 @@ pub fn emit_a64_standalone_start(
         }
     }
 
+    // Native PGO counter buffer (`--pgo-gen` only).
+    if let Some(ref pgo) = layout.pgo_gen {
+        a.movz(true, Reg::X0, 0, 0);
+        a.mov_imm64(Reg::X1, pgo.alloc_bytes as u64);
+        a.mov_imm32(Reg::X2, 3);
+        a.mov_imm32(Reg::X3, 0x22);
+        a.mov_imm64(Reg::X4, u64::MAX);
+        a.movz(true, Reg::X5, 0, 0);
+        emit_syscall(&mut a, SYS_MMAP);
+        a.mov_imm64(Reg::X4, (-4095i64) as u64);
+        a.cmp_r(true, Reg::X0, Reg::X4);
+        a.b_cond(Cond::Hs, fail_alloc);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X0),
+            None,
+            CTX_REG,
+            pgo.ctx_ptr_off,
+            SGP3,
+        );
+        a.mov_imm64(Reg::X4, crate::pgo::WTPGO1_MAGIC_U64);
+        a.str_uimm(true, Reg::X4, Reg::X0, 0);
+        a.mov_imm32(Reg::X4, pgo.n_defs);
+        a.str_uimm(false, Reg::X4, Reg::X0, 8);
+        a.mov_imm32(Reg::X4, pgo.n_ci_sites);
+        a.str_uimm(false, Reg::X4, Reg::X0, 12);
+        a.mov_imm64(Reg::X4, pgo.module_hash_lo);
+        a.str_uimm(true, Reg::X4, Reg::X0, 16);
+        a.str_uimm(true, Reg::XZR, Reg::X0, 24);
+    }
+
     // Install SIGSEGV guard-page handler (standalone memory32 ONLY!).
     let lbl_sig_handler = a.new_label();
     if layout.use_guard_pages {
@@ -1003,6 +1035,9 @@ pub fn emit_a64_standalone_start(
     a.b_cond(Cond::Ne, trap_exit);
 
     a.bind(normal_exit);
+    if let Some(ref pgo) = layout.pgo_gen {
+        super::runtime::emit_a64_flush_pgo_profile(&mut a, CTX_REG, pgo);
+    }
     emit_load_off(
         &mut a,
         Ty::I64,

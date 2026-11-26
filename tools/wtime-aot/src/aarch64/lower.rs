@@ -5024,6 +5024,195 @@ impl<'a> LowerA64<'a> {
                     self.gp_commit(r, d);
                 }
             }
+            Op::PgoFuncEnter(def_idx) => {
+                if let Some(ref pgo) = self.layout.pgo_gen {
+                    let off = (crate::pgo::WTPGO1_HEADER_BYTES as i32)
+                        .checked_add((def_idx as i32) * 8)
+                        .ok_or("aarch64: PgoFuncEnter offset overflow")?;
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        pgo.ctx_ptr_off,
+                        SGP3,
+                    );
+                    emit_load_off(&mut self.asm, Ty::I64, Some(SGP2), None, SGP1, off, SGP3);
+                    self.asm.add_imm(true, SGP2, SGP2, 1);
+                    emit_store_off(&mut self.asm, Ty::I64, Some(SGP2), None, SGP1, off, SGP3);
+                }
+            }
+            Op::PgoRecordCi { site, ci_id, idx } => {
+                if let Some(ref pgo) = self.layout.pgo_gen {
+                    let ci = self.layout.ci_tables[ci_id as usize];
+                    let is64 = ci.is_call_ref || ci.table_is64;
+                    let ir = self.gp_read(idx, SGP2);
+                    if ir != SGP2 {
+                        self.asm.mov_r(is64, SGP2, ir);
+                    }
+                    let lbl_done = self.asm.new_label();
+                    if ci.is_call_ref {
+                        self.asm.mov_r(true, Reg::X0, SGP2);
+                        self.asm.cbz(true, Reg::X0, lbl_done);
+                    } else if ci.dyn_table_desc_off >= 0 {
+                        emit_load_off(
+                            &mut self.asm,
+                            Ty::I32,
+                            Some(SGP3),
+                            None,
+                            CTX_REG,
+                            ci.dyn_table_desc_off + 8,
+                            SGP1,
+                        );
+                        self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
+                        self.asm.b_cond(Cond::Hs, lbl_done);
+                        emit_load_off(
+                            &mut self.asm,
+                            Ty::I64,
+                            Some(SGP1),
+                            None,
+                            CTX_REG,
+                            ci.dyn_table_desc_off,
+                            SGP3,
+                        );
+                        self.asm.ldr_reg_scaled(true, Reg::X0, SGP1, SGP2, true);
+                        self.asm.cbz(true, Reg::X0, lbl_done);
+                    } else if ci.span == 0 || ci.pgo_func_id_ro_off == 0 {
+                        self.asm.b(lbl_done);
+                    } else {
+                        self.asm.mov_imm32(SGP3, ci.table_len);
+                        self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
+                        self.asm.b_cond(Cond::Hs, lbl_done);
+                        if ci.min_slot > 0 {
+                            self.asm.mov_imm32(SGP3, ci.min_slot);
+                            self.asm.sub_r(false, SGP2, SGP2, SGP3);
+                        }
+                        self.asm.mov_imm32(SGP3, ci.span);
+                        self.asm.cmp_r(false, SGP2, SGP3);
+                        self.asm.b_cond(Cond::Hs, lbl_done);
+                        self.asm
+                            .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.pgo_func_id_ro_off));
+                        self.asm.ldr_reg_scaled(false, Reg::X0, SGP1, SGP2, true);
+                        self.asm.cbz(false, Reg::X0, lbl_done);
+                    }
+                    // W0 = func_idx (0-based).
+                    self.asm.sub_imm(false, Reg::X0, Reg::X0, 1);
+                    let slot_off = (crate::pgo::WTPGO1_HEADER_BYTES as u64)
+                        .checked_add(u64::from(pgo.n_defs) * 8)
+                        .and_then(|v| {
+                            v.checked_add(
+                                u64::from(site) * (crate::pgo::WTPGO1_CI_SITE_BYTES as u64),
+                            )
+                        })
+                        .ok_or("aarch64: PgoRecordCi slot offset overflow")?;
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        pgo.ctx_ptr_off,
+                        SGP3,
+                    );
+                    self.asm.mov_imm64(SGP3, slot_off);
+                    self.asm.add_r(true, SGP1, SGP1, SGP3);
+                    // total_hits += 1
+                    self.asm.ldr_uimm(true, SGP2, SGP1, 0);
+                    self.asm.add_imm(true, SGP2, SGP2, 1);
+                    self.asm.str_uimm(true, SGP2, SGP1, 0);
+                    // top_hits -> SGP2, top_target -> SGP3
+                    self.asm.ldr_uimm(true, SGP2, SGP1, 8);
+                    self.asm.ldr_uimm(false, SGP3, SGP1, 16);
+                    let lbl_miss = self.asm.new_label();
+                    let lbl_zero = self.asm.new_label();
+                    self.asm.cmp_r(false, Reg::X0, SGP3);
+                    self.asm.b_cond(Cond::Ne, lbl_miss);
+                    self.asm.add_imm(true, SGP2, SGP2, 1);
+                    self.asm.str_uimm(true, SGP2, SGP1, 8);
+                    self.asm.b(lbl_done);
+                    self.asm.bind(lbl_miss);
+                    self.asm.cbz(true, SGP2, lbl_zero);
+                    self.asm.sub_imm(true, SGP2, SGP2, 1);
+                    self.asm.str_uimm(true, SGP2, SGP1, 8);
+                    self.asm.b(lbl_done);
+                    self.asm.bind(lbl_zero);
+                    self.asm.str_uimm(false, Reg::X0, SGP1, 16);
+                    self.asm.mov_imm64(SGP2, 1);
+                    self.asm.str_uimm(true, SGP2, SGP1, 8);
+                    self.asm.bind(lbl_done);
+                }
+            }
+            Op::CiCheckTarget {
+                ci_id,
+                idx,
+                expected_func,
+            } => {
+                let r = res.unwrap();
+                let ci = self.layout.ci_tables[ci_id as usize];
+                let is64 = ci.is_call_ref || ci.table_is64;
+                let ir = self.gp_read(idx, SGP2);
+                if ir != SGP2 {
+                    self.asm.mov_r(is64, SGP2, ir);
+                }
+                let d = self.gp_write_reg(r);
+                self.asm.movz(false, d, 0, 0);
+                let lbl_done = self.asm.new_label();
+                if ci.is_call_ref {
+                    self.asm.mov_imm64(SGP1, u64::from(expected_func) + 1);
+                    self.asm.cmp_r(true, SGP2, SGP1);
+                    self.asm.cset(false, d, Cond::Eq);
+                } else if ci.dyn_table_desc_off >= 0 {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I32,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        ci.dyn_table_desc_off + 8,
+                        SGP1,
+                    );
+                    self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
+                    self.asm.b_cond(Cond::Hs, lbl_done);
+                    self.emit_speculation_barrier();
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        ci.dyn_table_desc_off,
+                        SGP3,
+                    );
+                    self.asm.ldr_reg_scaled(true, SGP2, SGP1, SGP2, true);
+                    self.asm.mov_imm64(SGP1, u64::from(expected_func) + 1);
+                    self.asm.cmp_r(true, SGP2, SGP1);
+                    self.asm.cset(false, d, Cond::Eq);
+                } else if ci.span > 0 {
+                    self.asm.mov_imm32(SGP3, ci.table_len);
+                    self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
+                    self.asm.b_cond(Cond::Hs, lbl_done);
+                    self.emit_speculation_barrier();
+                    if ci.min_slot > 0 {
+                        self.asm.mov_imm32(SGP3, ci.min_slot);
+                        self.asm.sub_r(false, SGP2, SGP2, SGP3);
+                    }
+                    self.asm.mov_imm32(SGP3, ci.span);
+                    self.asm.cmp_r(false, SGP2, SGP3);
+                    self.asm.b_cond(Cond::Hs, lbl_done);
+                    self.emit_speculation_barrier();
+                    self.asm
+                        .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
+                    self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+                    self.asm.add_r(true, SGP2, SGP1, SGP3);
+                    self.asm
+                        .adr_reloc(SGP1, A64RelocTarget::Func(expected_func));
+                    self.asm.cmp_r(true, SGP2, SGP1);
+                    self.asm.cset(false, d, Cond::Eq);
+                }
+                self.asm.bind(lbl_done);
+                self.gp_commit(r, d);
+            }
             Op::Trap(code) => {
                 let lbl = match code {
                     TRAP_UNREACHABLE => self.trap_unreach_lbl(),

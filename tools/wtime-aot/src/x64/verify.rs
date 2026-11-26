@@ -1802,6 +1802,47 @@ fn verify_inst_types(
                 ));
             }
         }
+        Op::PgoFuncEnter(_) => expect_no_res(ir, bi, res, "PgoFuncEnter")?,
+        Op::PgoRecordCi { ci_id, idx, .. } => {
+            expect_no_res(ir, bi, res, "PgoRecordCi")?;
+            let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: PgoRecordCi ci_id {ci_id} out of range",
+                    ir.func_index
+                )
+            })?;
+            let idx_ty = if ci.is_call_ref || ci.table_is64 {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, idx, idx_ty, "PgoRecordCi.idx")?;
+        }
+        Op::CiCheckTarget {
+            ci_id,
+            idx,
+            expected_func,
+        } => {
+            expect_res(ir, bi, res, Ty::I32, "CiCheckTarget")?;
+            let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: CiCheckTarget ci_id {ci_id} out of range",
+                    ir.func_index
+                )
+            })?;
+            let idx_ty = if ci.is_call_ref || ci.table_is64 {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, idx, idx_ty, "CiCheckTarget.idx")?;
+            if (expected_func as usize) >= module.func_canon_sig.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: CiCheckTarget func {expected_func} out of range",
+                    ir.func_index
+                ));
+            }
+        }
         Op::Trap(_) => expect_no_res(ir, bi, res, "Trap")?,
     }
     Ok(())
@@ -2659,6 +2700,7 @@ pub fn verify_alloc_with_config(
                     MASK_RAX_RDX | MASK_RCX | (1 << 6),
                     (1 << 0) | (1 << 1) | (1 << 2),
                 ),
+                Op::PgoRecordCi { .. } => (1 << 0, 0),
                 _ => (0, 0),
             };
             let hit_gp = gp_clob & (tracker.gp_mask | tracker.remat_gp_mask);

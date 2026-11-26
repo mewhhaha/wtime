@@ -49,7 +49,7 @@ static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 pub(crate) const SPECTRE_RUST_ERROR: &str = "--spectre-mitigations requires hardware speculation barriers, which safe Rust cannot emit; use --backend x64, --backend aarch64, or --backend c";
 
@@ -94,6 +94,8 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
     let mut target = crate::codegen::Target::GooseBin;
     let mut backend = Backend::Rust;
     let mut spectre_mitigations = false;
+    let mut pgo_gen: Option<PathBuf> = None;
+    let mut pgo_use: Option<PathBuf> = None;
     let mut c_opt = crate::cgen::COpt::Auto;
     let mut c_opt_explicit = false;
     let mut train = None;
@@ -144,6 +146,8 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
                 };
             }
             "--spectre-mitigations" => spectre_mitigations = true,
+            "--pgo-gen" => pgo_gen = Some(PathBuf::from(value()?)),
+            "--pgo-use" => pgo_use = Some(PathBuf::from(value()?)),
             "--c-opt" => {
                 c_opt = crate::cgen::COpt::parse(&value()?)?;
                 c_opt_explicit = true;
@@ -161,6 +165,27 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
     if spectre_mitigations && backend == Backend::Rust {
         return Err(BuildError::Usage(SPECTRE_RUST_ERROR.into()));
     }
+    if pgo_gen.is_some() && pgo_use.is_some() {
+        return Err(BuildError::Usage(
+            "--pgo-gen and --pgo-use cannot be used together".into(),
+        ));
+    }
+    if (pgo_gen.is_some() || pgo_use.is_some())
+        && !matches!(backend, Backend::X64 | Backend::Aarch64)
+    {
+        return Err(BuildError::Usage(
+            "--pgo-gen/--pgo-use are only supported with --backend x64 or --backend aarch64".into(),
+        ));
+    }
+    if let Some(ref pg) = pgo_gen
+        && let Err(e) = crate::pgo::validate_pgo_gen_path(pg)
+    {
+        return Err(BuildError::Usage(e));
+    }
+    let loaded_pgo_use = match pgo_use {
+        Some(ref pu) => Some(crate::pgo::PgoProfile::load_file(pu).map_err(BuildError::Failed)?),
+        None => None,
+    };
     let (Some(module), Some(cache)) = (module, cache) else {
         return Err(USAGE.into());
     };
@@ -194,6 +219,8 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
             &rt,
             &options,
             spectre_mitigations,
+            pgo_gen.as_deref(),
+            loaded_pgo_use.as_ref(),
         )?,
         Some(train) => build_trained(
             &module,
@@ -240,11 +267,14 @@ pub fn build(
     rt: &Path,
     options: &Options,
 ) -> Result<PathBuf, String> {
-    build_classified(module, cache, module_path, rt, options, false).map_err(|e| match e {
-        BuildError::AdmissionRejected(s) | BuildError::Usage(s) | BuildError::Failed(s) => s,
-    })
+    build_classified(module, cache, module_path, rt, options, false, None, None).map_err(
+        |e| match e {
+            BuildError::AdmissionRejected(s) | BuildError::Usage(s) | BuildError::Failed(s) => s,
+        },
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_classified(
     module: &Path,
     cache: &Path,
@@ -252,6 +282,8 @@ fn build_classified(
     rt: &Path,
     options: &Options,
     spectre_mitigations: bool,
+    pgo_gen: Option<&Path>,
+    pgo_use: Option<&crate::pgo::PgoProfile>,
 ) -> Result<PathBuf, BuildError> {
     let deadline = std::time::Instant::now() + options.time_limit;
     if options.backend == Backend::C {
@@ -264,10 +296,26 @@ fn build_classified(
         )?);
     }
     if options.backend == Backend::X64 {
-        return build_x64(module, cache, options, spectre_mitigations, deadline);
+        return build_x64(
+            module,
+            cache,
+            options,
+            spectre_mitigations,
+            pgo_gen,
+            pgo_use,
+            deadline,
+        );
     }
     if options.backend == Backend::Aarch64 {
-        return build_aarch64(module, cache, options, spectre_mitigations, deadline);
+        return build_aarch64(
+            module,
+            cache,
+            options,
+            spectre_mitigations,
+            pgo_gen,
+            pgo_use,
+            deadline,
+        );
     }
     let prepared = prepare(module, cache, module_path, rt, options, deadline)?;
     Ok(cached(
@@ -1461,6 +1509,8 @@ fn build_aarch64(
     cache: &Path,
     options: &Options,
     spectre_mitigations: bool,
+    pgo_gen: Option<&Path>,
+    pgo_use: Option<&crate::pgo::PgoProfile>,
     deadline: std::time::Instant,
 ) -> Result<PathBuf, BuildError> {
     use std::io::Write as _;
@@ -1493,6 +1543,12 @@ fn build_aarch64(
     field(&mut key, "target", artifact_name.as_bytes());
     field(&mut key, "wasm digest", &wasm_sha);
     field(&mut key, "generator build sha256", &gen_sha);
+    if let Some(pg) = pgo_gen {
+        field(&mut key, "pgo gen path", pg.to_string_lossy().as_bytes());
+    }
+    if let Some(pu) = pgo_use {
+        field(&mut key, "pgo use digest", &pu.digest);
+    }
     let key_hex = key.hex();
 
     let (publish_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
@@ -1519,6 +1575,8 @@ fn build_aarch64(
         spectre_mitigations,
         inc_cache_dir: Some(cache.join("a64-inc")),
         gen_fingerprint: gen_sha,
+        pgo_gen_path: pgo_gen.map(Path::to_path_buf),
+        pgo_use: pgo_use.cloned(),
     };
     let elf_bytes =
         crate::aarch64::compile_wasm_to_aarch64(&wasm, &compile_opts).map_err(|e| match e {
@@ -1571,6 +1629,8 @@ fn build_x64(
     cache: &Path,
     options: &Options,
     spectre_mitigations: bool,
+    pgo_gen: Option<&Path>,
+    pgo_use: Option<&crate::pgo::PgoProfile>,
     deadline: std::time::Instant,
 ) -> Result<PathBuf, BuildError> {
     use std::io::Write as _;
@@ -1624,6 +1684,12 @@ fn build_x64(
     field(&mut key, "wasm digest", &wasm_sha);
     field(&mut key, "generator build sha256", &gen_sha);
     field(&mut key, "isa profile", isa_profile.as_bytes());
+    if let Some(pg) = pgo_gen {
+        field(&mut key, "pgo gen path", pg.to_string_lossy().as_bytes());
+    }
+    if let Some(pu) = pgo_use {
+        field(&mut key, "pgo use digest", &pu.digest);
+    }
     if verify && !cfg!(debug_assertions) {
         field(&mut key, "verify", b"1");
     }
@@ -1676,6 +1742,8 @@ fn build_x64(
         verify,
         inc_cache_dir: Some(cache.clone()),
         cache_key_salt: Some(gen_sha),
+        pgo_gen_path: pgo_gen.map(Path::to_path_buf),
+        pgo_use: pgo_use.cloned(),
         ..Default::default()
     };
     let (so_bytes, pending_inc_save) = crate::x64::compile_wasm_to_x64_so_with_pending_save(
