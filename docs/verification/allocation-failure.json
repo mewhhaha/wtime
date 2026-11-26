@@ -1,12 +1,12 @@
 {
   "passed": true,
   "source_stable": true,
-  "source_sha256": "ecfc18350b63799db1e44941c8025dc96a61554b2207db83d881fb8a9eec8460",
+  "source_sha256": "46199308908dc2ab6d82367023ef34542c7ea2d3d19473a6233728c9925c45db",
   "architecture": "x86_64",
   "command": [
     "target/evidence/debug/wtime-allocation-check"
   ],
-  "worker_sha256": "894cfcd321de4ed437d33d77791e0c0c02bef13fdf0adfc7bc4b348b732527be",
+  "worker_sha256": "e823bfca97d534e51c1f7f940767391f52ea58b21123995d699fccda98484d4e",
   "address_space_bytes": 134217728,
   "requested_allocation_bytes": 536870912,
   "executed": 1,
