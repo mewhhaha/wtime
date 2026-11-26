@@ -2340,6 +2340,159 @@ fn aarch64_spectre_mitigations_emit_barrier_pairs_and_preserve_results() {
     }
 }
 
+#[test]
+fn aarch64_spectre_bulk_helpers_and_drop_scrub() {
+    let wasm = crate::x64::tests_unit::spectre_bulk_and_scrub_wasm();
+    let mut barrier = 0xd503_379fu32.to_le_bytes().to_vec();
+    barrier.extend_from_slice(&0xd503_3fdfu32.to_le_bytes());
+    let has_barrier = |bytes: &[u8]| bytes.windows(8).step_by(4).any(|w| w == barrier);
+
+    let validated = wtime_validate::validate(
+        &wasm,
+        &crate::x64::module::x64_validate_features(),
+        &crate::x64::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = crate::x64::module::admit_x64_module(validated.decoded()).unwrap();
+
+    for spectre_mitigations in [false, true] {
+        let layout = crate::x64::CtxLayout::compute(&module, Vec::new())
+            .unwrap()
+            .with_spectre_mitigations(spectre_mitigations);
+        let tables = crate::x64::runtime::RuntimeTables::default();
+        let helpers = super::runtime::emit_a64_helpers(&module, &layout, &tables).unwrap();
+        let helper_map: std::collections::BTreeMap<u32, &[u8]> = helpers
+            .iter()
+            .map(|(id, asm)| (*id, asm.code.as_slice()))
+            .collect();
+        for id in [
+            crate::x64::HELPER_MEM_COPY,
+            crate::x64::HELPER_MEM_FILL,
+            crate::x64::HELPER_EXTRA_MEM_COPY,
+            crate::x64::HELPER_EXTRA_MEM_FILL,
+            crate::x64::HELPER_MEM_INIT,
+            crate::x64::HELPER_TABLE_INIT,
+            crate::x64::HELPER_TABLE_COPY,
+            crate::x64::HELPER_TABLE_GROW,
+            crate::x64::HELPER_TABLE_FILL,
+        ] {
+            assert_eq!(
+                has_barrier(helper_map[&id]),
+                spectre_mitigations,
+                "aarch64 helper {id} barrier mismatch for spectre={spectre_mitigations}"
+            );
+        }
+        let exports = super::runtime::emit_a64_exports(&module, &layout, &tables).unwrap();
+        let drop_asm = exports
+            .iter()
+            .find(|(name, _)| *name == "blot_aot_drop")
+            .unwrap();
+        assert_eq!(has_barrier(&drop_asm.1.code), spectre_mitigations);
+
+        let img = compile_wasm_to_aarch64_for_test(
+            &wasm,
+            &A64CompileOptions {
+                spectre_mitigations,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        verify_disasm_aarch64(
+            if spectre_mitigations {
+                "spectre_bulk_on"
+            } else {
+                "spectre_bulk_off"
+            },
+            &img.elf,
+        );
+        let calls = [0, 1, 2, 3, 4, 5, 6].map(|mode| ("run", Value::I32(mode)));
+        assert_aarch64_image_matches_oracle("spectre bulk", &wasm, &calls, 96, &img);
+
+        // Directly verify that `blot_aot_drop` scrubs linear memory 0, extra memory 1,
+        // active dynamic table entries, and `Ctx` iff `spectre_mitigations == true`.
+        let mut vm = A64Vm::new(&img);
+        let exp: std::collections::BTreeMap<String, u64> =
+            img.export_vaddrs.iter().cloned().collect();
+        let trap_slot = vm.alloc_seg(16);
+        let res_slot = vm.alloc_seg(16);
+        let name_slot = vm.alloc_seg(16);
+        vm.write_bytes(name_slot, b"run").unwrap();
+
+        vm.x[0] = 0;
+        vm.x[1] = 0;
+        vm.x[2] = 0;
+        vm.x[3] = trap_slot;
+        vm.run_until_ret(exp["blot_aot_new"], 200_000).unwrap();
+        let ctx = vm.x[0];
+        assert_ne!(ctx, 0);
+
+        vm.x[0] = ctx;
+        vm.x[1] = name_slot;
+        vm.x[2] = 3;
+        vm.x[3] = 0;
+        vm.x[4] = res_slot;
+        vm.x[5] = trap_slot;
+        vm.run_until_ret(exp["blot_aot_call_export"], 500_000)
+            .unwrap();
+        assert_eq!(vm.x[0], 0);
+        assert_eq!(vm.read_u64(res_slot).unwrap(), 337);
+
+        let mem0_base = vm.read_u64(ctx + crate::x64::OFF_MEM_BASE as u64).unwrap();
+        let mem0_len = vm.read_u64(ctx + crate::x64::OFF_MEM_LEN as u64).unwrap() as usize;
+        let em_off = layout.extra_mem_offs[0] as u64;
+        let mem1_base = vm.read_u64(ctx + em_off).unwrap();
+        let mem1_len = vm.read_u64(ctx + em_off + 8).unwrap() as usize;
+        let (tbl_off, _, _) = *layout.dyn_tables.values().next().unwrap();
+        let tbl_base = vm.read_u64(ctx + tbl_off as u64).unwrap();
+        let tbl_len = (vm.read_u64(ctx + tbl_off as u64 + 8).unwrap() as u32) as usize * 8;
+        let ctx_len = vm
+            .read_u64(ctx + crate::x64::OFF_HANDLE_ALLOC_BYTES as u64)
+            .unwrap() as usize;
+
+        // Every region contains non-zero data before drop.
+        assert!(
+            vm.read_bytes(mem0_base, mem0_len)
+                .unwrap()
+                .iter()
+                .any(|&b| b != 0)
+        );
+        assert!(
+            vm.read_bytes(mem1_base, mem1_len)
+                .unwrap()
+                .iter()
+                .any(|&b| b != 0)
+        );
+        assert!(
+            vm.read_bytes(tbl_base, tbl_len)
+                .unwrap()
+                .iter()
+                .any(|&b| b != 0)
+        );
+        assert!(vm.read_bytes(ctx, ctx_len).unwrap().iter().any(|&b| b != 0));
+
+        vm.x[0] = ctx;
+        vm.run_until_ret(exp["blot_aot_drop"], 200_000).unwrap();
+
+        let all_zero = |bytes: &[u8]| bytes.iter().all(|&b| b == 0);
+        assert_eq!(
+            all_zero(vm.read_bytes(mem0_base, mem0_len).unwrap()),
+            spectre_mitigations
+        );
+        assert_eq!(
+            all_zero(vm.read_bytes(mem1_base, mem1_len).unwrap()),
+            spectre_mitigations
+        );
+        assert_eq!(
+            all_zero(vm.read_bytes(tbl_base, tbl_len).unwrap()),
+            spectre_mitigations
+        );
+        assert_eq!(
+            all_zero(vm.read_bytes(ctx, ctx_len).unwrap()),
+            spectre_mitigations
+        );
+    }
+}
+
 /// Runs `(name, arg)` through both `wtime-runtime` and the compiled AArch64 ELF64 binary
 /// (via `blot_aot_new` + `blot_aot_call_export` inside `A64Vm`) and asserts bit-exact parity!
 fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_check_len: usize) {

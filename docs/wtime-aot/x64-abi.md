@@ -236,17 +236,24 @@ See [`docs/architecture/security-model.md`](../architecture/security-model.md) f
 - **Opt-in `--spectre-mitigations`** (off by default; bound into all build and incremental cache
   keys):
   - `--backend x64`: disables unchecked guard-page bounds elision (`use_guard_pages = false`) and
-    emits `lfence` on the in-bounds path after linear memory (`memory32`, `memory64`, extra
-    memories), table (`table.get`/`set`), indirect call (`call_indirect`/`call_ref`), and
-    `br_table` bounds checks.
-  - `--backend aarch64`: disables guard-page bounds elision and emits `dsb nsh; isb` after memory,
-    table, indirect call, and `br_table` bounds checks.
+    Stage 2 loop BCE/vectorization, emits `lfence` on the in-bounds path after linear memory
+    (`memory32`, `memory64`, extra memories), table (`table.get`/`set`), indirect call
+    (`call_indirect`/`call_ref`), `br_table`, and all shared bulk memory/table helper bounds checks
+    (`memory.copy`/`fill`/`init`, extra-memory `copy`/`fill`, `table.init`/`copy`/`grow`/`fill`),
+    and zeroes committed linear memory, extra memories, active dynamic tables, used exception-slab
+    bytes, and `Ctx` before `munmap` in `blot_aot_drop` and failing `blot_aot_new` cleanup.
+  - `--backend aarch64`: disables guard-page bounds elision and Stage 2 loop BCE/vectorization,
+    emits `dsb nsh; isb` after memory, table, indirect call, `br_table`, and all shared bulk
+    memory/table helper bounds checks, and scrubs committed linear memory, extra memories, active
+    dynamic tables, used exception-slab bytes, and `Ctx` before `munmap` in `blot_aot_drop` and
+    failing `blot_aot_new` cleanup.
   - `--backend c`: defines `WT_SPECTRE_MITIGATIONS`, inserts `WT_SPEC_BARRIER()` on memory, table,
     `call_indirect`, and `br_table` checks, and volatile-zeroes committed memory and `Ctx` in
-    `blot_aot_drop`.
+    `blot_aot_drop` and failing `blot_aot_new` cleanup.
   - `--backend rust`: rejects `--spectre-mitigations` fail-closed (safe Rust cannot emit hardware
     speculation barriers).
 - **Standalone clock controls**: standalone `x64`, `aarch64`, and Goose (`wtime-aot-rt`) runners
-  accept `--no-clock` (returns WASI `EACCES` / `0`; standalone `x64` and `aarch64` ELFs also omit
-  `clock_gettime` syscalls completely when `--timing-json` is absent) and `--clock-coarsen-ns N`
-  (truncates guest-visible timestamps to multiples of `N` nanoseconds).
+  accept `--no-clock` (returns WASI `EACCES` / `0`; standalone `x64`/`aarch64` ELFs omit
+  `clock_gettime` syscalls completely when `--timing-json` is absent, and Goose skips internal
+  `Instant::now()` / `SystemTime::now()` calls when `--timing-json` and `--time-limit` are absent)
+  and `--clock-coarsen-ns N` (truncates guest-visible timestamps to multiples of `N` nanoseconds).

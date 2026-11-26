@@ -28,7 +28,7 @@ pub struct State {
     pub exit: Option<i64>,
     /// Set by a failure of the host's own, reported by its text alone.
     pub failure: Option<String>,
-    clock_origin: Instant,
+    clock_origin: Option<Instant>,
     policy: Policy,
     /// Bytes written to standard output, standard error and files so far.
     written: u64,
@@ -192,7 +192,7 @@ impl State {
             arguments,
             exit: None,
             failure: None,
-            clock_origin: Instant::now(),
+            clock_origin: None,
             policy: Policy::default(),
             written: 0,
             reserving: false,
@@ -1092,10 +1092,11 @@ fn fd_read(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
 fn monotonic_ns(guest: &mut dyn Guest) -> u64 {
     // Monotonic from an arbitrary origin, as CLOCK_MONOTONIC is.
     let state = guest.state();
-    state
-        .policy
-        .clock
-        .timestamp(|| (state.clock_origin.elapsed().as_nanos() + 1_000_000_000) as u64)
+    let policy = state.policy.clock;
+    policy.timestamp(|| {
+        let origin = *state.clock_origin.get_or_insert_with(Instant::now);
+        (origin.elapsed().as_nanos() + 1_000_000_000) as u64
+    })
 }
 
 fn wall_ns(guest: &mut dyn Guest) -> u64 {
@@ -1219,6 +1220,7 @@ pub fn main<G: Guest + 'static>(
             program
         }
     };
+    let record_timing = timing_json.is_some();
     // The program runs on a thread of its own, which also reads stdin so
     // `--time-limit` bounds stalled stdin as well as guest execution;
     // past the time limit the process ends without waiting for it.
@@ -1247,7 +1249,7 @@ pub fn main<G: Guest + 'static>(
                     return;
                 }
             };
-            let _ = send.send(run(input, program, instantiate, policy));
+            let _ = send.send(run(input, program, instantiate, policy, record_timing));
         });
     if worker.is_err() {
         eprintln!("wtime-aot Goose host: the program's thread failed");
@@ -1306,17 +1308,23 @@ fn run<G: Guest>(
     program: Vec<Vec<u8>>,
     instantiate: Instantiate<G>,
     policy: Policy,
+    record_timing: bool,
 ) -> Outcome {
-    let started = Instant::now();
+    let started = record_timing.then(Instant::now);
     let mut instantiated = started;
     let mut guest = None;
     let mut state = State::new(input, program).with_policy(policy);
+    if state.policy.clock != ClockPolicy::Deny {
+        state.clock_origin = Some(started.unwrap_or_else(Instant::now));
+    }
     let result = (|| -> R<()> {
         let g = guest.insert(instantiate(&mut state)?);
-        instantiated = Instant::now();
+        if record_timing {
+            instantiated = Some(Instant::now());
+        }
         g.start()
     })();
-    let ended = Instant::now();
+    let ended = record_timing.then(Instant::now);
     if let Some(g) = guest.as_mut() {
         state = std::mem::replace(g.state(), State::new(Vec::new(), Vec::new()));
     }
@@ -1326,12 +1334,16 @@ fn run<G: Guest>(
         (Err(_), None, Some(failure)) => (1, failure),
         (Err(error), None, None) => (1, error.message().to_string()),
     };
+    let (instantiate_ns, start_ns) = match (started, instantiated, ended) {
+        (Some(s), Some(i), Some(e)) => ((i - s).as_nanos(), (e - i).as_nanos()),
+        _ => (0, 0),
+    };
     let outcome = Outcome {
         stdout: std::mem::take(&mut state.out),
         stderr: String::from_utf8_lossy(&state.err).into_owned() + &error,
         exit_code,
-        instantiate_ns: (instantiated - started).as_nanos(),
-        start_ns: (ended - instantiated).as_nanos(),
+        instantiate_ns,
+        start_ns,
     };
     // The process exits next: tearing down the memory would only spend time.
     std::mem::forget(guest);
@@ -1420,6 +1432,46 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn deny_clock_without_timing_skips_clock_origin_and_run_timings() {
+        let mut guest = DummyGuest {
+            mem: Memory::new(1, Some(1), false).unwrap(),
+            state: State::new(vec![], vec![]).with_policy(Policy {
+                clock: ClockPolicy::Deny,
+                ..Policy::default()
+            }),
+        };
+        assert!(guest.state.clock_origin.is_none());
+        let mono = handler("env", "gs_os_clock_ns").unwrap()(&mut guest, &[])
+            .unwrap()
+            .i64()
+            .unwrap();
+        assert_eq!(mono, 0);
+        assert!(guest.state.clock_origin.is_none());
+
+        let policy = Policy {
+            clock: ClockPolicy::Deny,
+            ..Policy::default()
+        };
+        let outcome = super::run(
+            vec![],
+            vec![b"prog".to_vec()],
+            |state| {
+                assert!(state.clock_origin.is_none());
+                let taken = std::mem::replace(state, State::new(vec![], vec![]));
+                Ok(DummyGuest {
+                    mem: Memory::new(1, Some(1), false).unwrap(),
+                    state: taken,
+                })
+            },
+            policy,
+            false,
+        );
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.instantiate_ns, 0);
+        assert_eq!(outcome.start_ns, 0);
     }
 
     #[test]

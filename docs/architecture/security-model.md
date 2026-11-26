@@ -30,7 +30,7 @@ Default behavior is unchanged (full nanosecond monotonic and wall clocks for loc
 - **`--no-clock`**:
   - `wasi_snapshot_preview1::clock_time_get` returns WASI `EACCES` (`2`) without writing the output pointer.
   - `env::bench_clock`, `env::gs_os_clock_ns`, and `env::gs_os_time_ns` return `0` without issuing `clock_gettime`.
-  - When `--timing-json` is also omitted, standalone `x64`/`aarch64` ELFs emit **zero `clock_gettime` syscalls**, allowing `seccomp-bpf` to deny `clock_gettime` completely.
+  - When `--timing-json` is also omitted, standalone `x64`/`aarch64` ELFs emit **zero `clock_gettime` syscalls**, allowing `seccomp-bpf` to deny `clock_gettime` completely; the Goose (`wtime-aot-rt`) runner likewise skips internal `Instant::now()` / `SystemTime::now()` calls when `--timing-json` and `--time-limit` are omitted.
 - **`--clock-coarsen-ns N`** (positive integer `N >= 1`, e.g. `1000000` for 1 ms):
   - Truncates all guest-visible timestamps down to multiples of `N` nanoseconds (`t - (t % N)`).
 - In Rust embedders using `wtime-aot-rt`, set `goose::Policy::clock` to `ClockPolicy::Deny` or `ClockPolicy::CoarsenNs(n)`.
@@ -38,10 +38,25 @@ Default behavior is unchanged (full nanosecond monotonic and wall clocks for loc
 ### Opt-In Spectre v1 Hardening (`wtime-aot --spectre-mitigations`)
 Default is off (zero performance cost for normal local builds). Passing `--spectre-mitigations` to `wtime-aot` or `wtime-aot build`:
 - Binds the flag into all build and incremental cache keys so hardened and unhardened artifacts never collide.
-- **`--backend x64`**: Disables unchecked guard-page bounds elision (`use_guard_pages = false`) and emits `lfence` (`0x0f 0xae 0xe8`) on the in-bounds path after linear memory (`memory32`, `memory64`, extra memories), table (`table.get`/`set`), indirect call (`call_indirect`/`call_ref`), and `br_table` bounds checks.
-- **`--backend aarch64`**: Disables unchecked guard-page bounds elision and emits `dsb nsh; isb` (`0xd503379f; 0xd5033fdf`) after linear memory, table, indirect call, and `br_table` bounds checks.
-- **`--backend c`**: Defines `WT_SPECTRE_MITIGATIONS`, inserts `WT_SPEC_BARRIER()` (`lfence` on x86-64, `dsb nsh; isb` on AArch64) after memory, table, `call_indirect`, and `br_table` checks, and volatile-scrubs `mem`/`ctx` before freeing in `blot_aot_drop`.
+- **`--backend x64`**: Disables unchecked guard-page bounds elision (`use_guard_pages = false`) and Stage 2 loop BCE/vectorization, emits `lfence` (`0x0f 0xae 0xe8`) on the in-bounds path after linear memory (`memory32`, `memory64`, extra memories), table (`table.get`/`set`), indirect call (`call_indirect`/`call_ref`), `br_table`, and all shared bulk memory/table runtime helper bounds checks (`memory.copy`/`fill`/`init`, extra-memory `copy`/`fill`, `table.init`/`copy`/`grow`/`fill`), and zeroes committed linear memory, extra memories, active dynamic tables, used exception-slab bytes, and `Ctx` before `munmap` in `blot_aot_drop` and failing `blot_aot_new` cleanup.
+- **`--backend aarch64`**: Disables unchecked guard-page bounds elision and Stage 2 loop BCE/vectorization, emits `dsb nsh; isb` (`0xd503379f; 0xd5033fdf`) after linear memory, table, indirect call, `br_table`, and all shared bulk memory/table runtime helper checks, and scrubs committed linear memory, extra memories, active dynamic tables, used exception-slab bytes, and `Ctx` before `munmap` in `blot_aot_drop` and failing `blot_aot_new` cleanup.
+- **`--backend c`**: Defines `WT_SPECTRE_MITIGATIONS`, inserts `WT_SPEC_BARRIER()` (`lfence` on x86-64, `dsb nsh; isb` on AArch64) after memory, table, `call_indirect`, and `br_table` checks, and volatile-scrubs committed `mem` and `ctx` before freeing in `blot_aot_drop` and failing `blot_aot_new` cleanup.
 - **`--backend rust`**: Fails closed (safe `#![forbid(unsafe_code)]` Rust cannot emit hardware speculation barriers; use `--backend x64`, `aarch64`, or `c` when `--spectre-mitigations` is required).
+
+#### Measured `--spectre-mitigations` Overhead (`x86_64`)
+Measured on AMD Ryzen 7 7800X3D (Linux `x86_64`, pinned CPU 0, median of 7 alternating rounds, `--blot-cdylib --target-cpu native`, bit-exact checksum parity verified between default and hardened builds):
+
+| Kernel | `x64` Default (ms) | `x64` Spectre (ms) | `x64` Ratio | `c -O2` Default (ms) | `c -O2` Spectre (ms) | `c` Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `graph_bfs` | `0.0000` | `0.0112` | `703.06x` | `0.0097` | `0.0118` | `1.21x` |
+| `parser_hash` | `0.0066` | `0.0604` | `9.17x` | `0.0058` | `0.0594` | `10.17x` |
+| `image_filter` | `0.0003` | `0.1586` | `576.81x` | `0.0093` | `0.1585` | `16.96x` |
+| `ecs_kernel` | `0.0077` | `0.0792` | `10.32x` | `0.0185` | `0.1222` | `6.59x` |
+| `matmul_f64` | `0.0746` | `6.4198` | `86.00x` | `0.1988` | `6.1909` | `31.14x` |
+| `heapsort_i32` | `0.0721` | `1.0891` | `15.11x` | `0.1191` | `0.8813` | `7.40x` |
+| `dispatch_table` | `0.1782` | `2.0241` | `11.36x` | `0.2442` | `2.0394` | `8.35x` |
+
+**Takeaway:** Pipeline-draining `lfence` on every linear-memory access puts both `x64` and `c` Spectre builds at nearly identical absolute speeds (`~7x–15x` on mixed/dispatch kernels; `~31x–86x` on tight FP memory loops like `matmul_f64`; `graph_bfs` and `image_filter` show higher `x64` ratios because default `x64` applies Stage 2 inlining and AVX2 blur/sum vectorization that Spectre mode disables). For multi-tenant worker platforms, isolating tenants in separate OS processes or microVMs lets workers run fast unmitigated builds without sharing a host address space; reserve `--spectre-mitigations` for defense-in-depth when untrusted handles share an address space with sensitive host or peer state.
 
 ---
 

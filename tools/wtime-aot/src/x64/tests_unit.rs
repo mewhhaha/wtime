@@ -232,6 +232,241 @@ fn x64_spectre_mitigations_emit_fences_and_separate_incremental_cache_keys() {
     assert_eq!(cache_entries, 2);
 }
 
+pub(crate) fn spectre_bulk_and_scrub_wasm() -> Vec<u8> {
+    let mut run_body = Vec::new();
+    let push_i32 = |out: &mut Vec<u8>, v: i32| {
+        out.push(0x41);
+        leb_i32(out, v);
+    };
+    let push_i64 = |out: &mut Vec<u8>, v: i64| {
+        out.push(0x42);
+        leb_i64(out, v);
+    };
+    // mode == 0: exercise bulk mem/table helpers, extra memory, and mutable global, return 337.
+    run_body.extend_from_slice(&[0x20, 0, 0x45, 0x04, 0x40]); // if (mode == 0)
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 0x5a);
+    push_i32(&mut run_body, 16);
+    run_body.extend_from_slice(&[0xfc, 11, 0]); // memory.fill 0
+    push_i32(&mut run_body, 8);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 16);
+    run_body.extend_from_slice(&[0xfc, 10, 0, 0]); // memory.copy 0 <- 0 (overlap bwd)
+    push_i32(&mut run_body, 32);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 16);
+    run_body.extend_from_slice(&[0xfc, 10, 0, 0]); // memory.copy 0 <- 0 (fwd)
+    push_i32(&mut run_body, 64);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 4);
+    run_body.extend_from_slice(&[0xfc, 8, 0, 0]); // memory.init seg=0 mem=0
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 0x7c);
+    push_i32(&mut run_body, 16);
+    run_body.extend_from_slice(&[0xfc, 11, 1]); // memory.fill 1
+    push_i32(&mut run_body, 80);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 8);
+    run_body.extend_from_slice(&[0xfc, 10, 0, 1]); // memory.copy 0 <- 1
+    run_body.extend_from_slice(&[0xd2, 0, 0x41, 2, 0xfc, 15, 0, 0x1a]); // table.grow 0 +2
+    run_body.extend_from_slice(&[0x41, 0, 0x41, 0, 0x41, 2, 0xfc, 12, 0, 0]); // table.init 0 0
+    run_body.extend_from_slice(&[0x41, 1, 0x41, 0, 0x41, 2, 0xfc, 14, 0, 0]); // table.copy 0 0
+    run_body.extend_from_slice(&[0x41, 4, 0xd2, 1, 0x41, 2, 0xfc, 17, 0]); // table.fill 0
+    push_i64(&mut run_body, 0x1122_3344_5566_7788u64 as i64);
+    run_body.extend_from_slice(&[0x24, 0]); // global.set 0
+    push_i32(&mut run_body, 8);
+    run_body.extend_from_slice(&[0x2d, 0, 0]); // i32.load8_u mem0[8] == 0x5a (90)
+    push_i32(&mut run_body, 64);
+    run_body.extend_from_slice(&[0x2d, 0, 0, 0x6a]); // + mem0[64] == 'A' (65)
+    push_i32(&mut run_body, 80);
+    run_body.extend_from_slice(&[0x2d, 0, 0, 0x6a]); // + mem0[80] == 0x7c (124)
+    run_body.extend_from_slice(&[0x41, 2, 0x11, 0, 0, 0x6a]); // + call_indirect(2) == 29
+    run_body.extend_from_slice(&[0x41, 5, 0x11, 0, 0, 0x6a]); // + call_indirect(5) == 29
+    run_body.extend_from_slice(&[0x0f, 0x0b]); // return; end
+
+    // mode == 1: valid len == 0 at end of memory 0 -> 99.
+    run_body.extend_from_slice(&[0x20, 0, 0x41, 1, 0x46, 0x04, 0x40]);
+    push_i32(&mut run_body, 65536);
+    push_i32(&mut run_body, 65536);
+    push_i32(&mut run_body, 0);
+    run_body.extend_from_slice(&[0xfc, 10, 0, 0]);
+    push_i32(&mut run_body, 65536);
+    push_i32(&mut run_body, 1);
+    push_i32(&mut run_body, 0);
+    run_body.extend_from_slice(&[0xfc, 11, 0]);
+    push_i32(&mut run_body, 99);
+    run_body.extend_from_slice(&[0x0f, 0x0b]);
+
+    // mode == 2: OOB memory.copy -> TRAP_OOB
+    run_body.extend_from_slice(&[0x20, 0, 0x41, 2, 0x46, 0x04, 0x40]);
+    push_i32(&mut run_body, 65530);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 10);
+    run_body.extend_from_slice(&[0xfc, 10, 0, 0, 0x0b]);
+
+    // mode == 3: OOB memory.fill -> TRAP_OOB
+    run_body.extend_from_slice(&[0x20, 0, 0x41, 3, 0x46, 0x04, 0x40]);
+    push_i32(&mut run_body, 65530);
+    push_i32(&mut run_body, 1);
+    push_i32(&mut run_body, 10);
+    run_body.extend_from_slice(&[0xfc, 11, 0, 0x0b]);
+
+    // mode == 4: OOB table.copy -> TRAP_TABLE_OOB
+    run_body.extend_from_slice(&[0x20, 0, 0x41, 4, 0x46, 0x04, 0x40]);
+    push_i32(&mut run_body, 5);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 4);
+    run_body.extend_from_slice(&[0xfc, 14, 0, 0, 0x0b]);
+
+    // mode == 5: OOB memory.init -> TRAP_OOB
+    run_body.extend_from_slice(&[0x20, 0, 0x41, 5, 0x46, 0x04, 0x40]);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 2);
+    push_i32(&mut run_body, 4);
+    run_body.extend_from_slice(&[0xfc, 8, 0, 0, 0x0b]);
+
+    // mode == 6: OOB table.init -> TRAP_TABLE_OOB
+    run_body.extend_from_slice(&[0x20, 0, 0x41, 6, 0x46, 0x04, 0x40]);
+    push_i32(&mut run_body, 0);
+    push_i32(&mut run_body, 1);
+    push_i32(&mut run_body, 4);
+    run_body.extend_from_slice(&[0xfc, 12, 0, 0, 0x0b]);
+
+    run_body.extend_from_slice(&[0x41, 0]);
+
+    wasm_module(&[
+        type_sec(&[(&[], &[0x7f]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 1]),
+        section(4, &[1, 0x70, 1, 4, 8]),
+        section(5, &[2, 1, 1, 2, 1, 1, 2]),
+        section(6, &[1, 0x7e, 1, 0x42, 0, 0x0b]),
+        export_sec(&[("run", 0, 2), ("memory", 2, 0)]),
+        section(9, &[1, 1, 0x00, 2, 0, 1]),
+        section(12, &[1]),
+        code_sec(&[
+            enc_body(&[], &[0x41, 13]),
+            enc_body(&[], &[0x41, 29]),
+            enc_body(&[], &run_body),
+        ]),
+        section(11, &[1, 1, 4, b'A', b'B', b'C', b'D']),
+    ])
+}
+
+#[test]
+fn x64_spectre_bulk_helpers_and_drop_scrub() {
+    let wasm = spectre_bulk_and_scrub_wasm();
+    let root = crate::build::create_fresh_test_root("wtime-aot-x64-spectre-bulk");
+    let has_lfence = |bytes: &[u8]| bytes.windows(3).any(|w| w == [0x0f, 0xae, 0xe8]);
+    let has_rep_stosb = |bytes: &[u8]| bytes.windows(2).any(|w| w == [0xf3, 0xaa]);
+
+    // Check individual bulk helper codegen directly for lfence presence/absence.
+    for spectre in [false, true] {
+        let mc = super::runtime::emit_helper_mem_copy(false, false, spectre).unwrap();
+        let mf = super::runtime::emit_helper_mem_fill(false, false, spectre).unwrap();
+        assert_eq!(has_lfence(&mc.code), spectre);
+        assert_eq!(has_lfence(&mf.code), spectre);
+    }
+
+    // Check full module helpers + blot_aot_drop scrub codegen + native Linux x86_64 execution.
+    let validated =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(validated.decoded()).unwrap();
+    for spectre in [false, true] {
+        let layout = CtxLayout::compute(&module, Vec::new())
+            .unwrap()
+            .with_spectre_mitigations(spectre);
+        let ro = super::RodataConsts::default();
+        let tables = super::runtime::RuntimeTables::default();
+        let helpers = super::runtime::emit_all_helpers(
+            &module,
+            &layout,
+            &ro,
+            &tables,
+            super::runtime::RuntimeTestHooks::default(),
+        )
+        .unwrap();
+        for id in [
+            super::HELPER_MEM_COPY,
+            super::HELPER_MEM_FILL,
+            super::HELPER_EXTRA_MEM_COPY,
+            super::HELPER_EXTRA_MEM_FILL,
+            super::HELPER_MEM_INIT,
+            super::HELPER_TABLE_INIT,
+            super::HELPER_TABLE_COPY,
+            super::HELPER_TABLE_GROW,
+            super::HELPER_TABLE_FILL,
+        ] {
+            assert_eq!(
+                has_lfence(&helpers[id as usize].code),
+                spectre,
+                "helper {id} lfence mismatch for spectre={spectre}"
+            );
+        }
+        let exports = super::runtime::emit_all_exports(
+            &module,
+            &layout,
+            &ro,
+            &tables,
+            TargetIsa::default(),
+            super::runtime::RuntimeTestHooks::default(),
+        )
+        .unwrap();
+        // EXPORT_NAMES[5] == "blot_aot_drop", EXPORT_NAMES[4] == "blot_aot_new"
+        let drop_code = &exports[5].code;
+        assert_eq!(has_lfence(drop_code), spectre);
+        assert_eq!(has_rep_stosb(drop_code), spectre);
+        let new_code = &exports[4].code;
+        assert_eq!(has_lfence(new_code), spectre);
+        assert_eq!(has_rep_stosb(new_code), spectre);
+
+        let image = compile_wasm_to_x64_so(
+            &wasm,
+            &X64CompileOptions {
+                spectre_mitigations: spectre,
+                verify: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+            use std::io::Write as _;
+            use std::process::{Command, Stdio};
+
+            let path = root.0.join(format!("spectre-bulk-{spectre}.so"));
+            std::fs::write(&path, image).unwrap();
+            let mut child = Command::new(driver)
+                .arg(path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    b"call run 0\ncall run 1\ncall run 2\ncall run 3\ncall run 4\ncall run 5\ncall run 6\n",
+                )
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                std::str::from_utf8(&out.stdout).unwrap(),
+                "NEW_OK\n\
+                 CALL 0 0000000000000151 0 0\n\
+                 CALL 0 0000000000000063 0 0\n\
+                 CALL 1 deadbeefcafebabe 2 0\n\
+                 CALL 1 deadbeefcafebabe 2 0\n\
+                 CALL 1 deadbeefcafebabe 3 0\n\
+                 CALL 1 deadbeefcafebabe 2 0\n\
+                 CALL 1 deadbeefcafebabe 3 0\n"
+            );
+        }
+    }
+}
+
 // ---- 1. Byte-level `asm.rs` unit tests (§4.3.1) ----
 
 #[test]

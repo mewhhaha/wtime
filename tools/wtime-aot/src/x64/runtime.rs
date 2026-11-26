@@ -152,6 +152,7 @@ impl Default for RuntimeTestHooks {
 }
 
 /// Shared `.rodata` descriptor table offsets used by runtime helpers and C exports.
+#[derive(Default)]
 pub struct RuntimeTables {
     pub trap_table_off: u32,
     pub imp_table_off: u32,
@@ -560,19 +561,10 @@ pub fn emit_helper_mem_grow(memory64: bool) -> Result<Asm, String> {
 }
 
 /// Wasm `memory.copy(Rdi = dst, Rsi = src, Rdx = len) -> R11d = 0 | TRAP_OOB`.
-pub fn emit_helper_mem_copy(fixed_mem: bool, memory64: bool) -> Result<Asm, String> {
+pub fn emit_helper_mem_copy(fixed_mem: bool, memory64: bool, spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(256);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
-    let lbl_le15 = a.new_label();
-    let lbl_le7 = a.new_label();
-    let lbl_le3 = a.new_label();
-    let lbl_one = a.new_label();
-    let lbl_large = a.new_label();
-    let lbl_fwd = a.new_label();
-    let lbl_bwd16 = a.new_label();
-    let lbl_bwd1_check = a.new_label();
-    let lbl_bwd1 = a.new_label();
 
     if !memory64 {
         // Defensive 32-bit zero extension.
@@ -615,129 +607,169 @@ pub fn emit_helper_mem_copy(fixed_mem: bool, memory64: bool) -> Result<Asm, Stri
     a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
     a.jcc(Cond::E, lbl_ok);
 
-    // Fast overlap-safe small copies (`len <= 32`): load both head and tail BEFORE storing either!
-    a.cmp_ri(true, Gp::Rdx, 32);
-    a.jcc(Cond::A, lbl_large);
-    a.add_rr(true, Gp::Rdi, Gp::R14);
-    a.add_rr(true, Gp::Rsi, Gp::R14);
-    a.cmp_ri(true, Gp::Rdx, 16);
-    a.jcc(Cond::B, lbl_le15);
-    // 16..=32 bytes: overlap-safe 2x XMM load then 2x store.
-    a.movdqu_xm(Xmm::Xmm14, Mem::base(Gp::Rsi));
-    a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -16));
-    a.movdqu_mx(Mem::base(Gp::Rdi), Xmm::Xmm14);
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm15);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+    if spectre {
+        // Serialize bounds and len == 0 checks before any memory access, and avoid
+        // negative-offset head/tail size-dispatch tricks that could speculate past edges.
+        let lbl_fwd_rep = a.new_label();
+        let lbl_bwd1 = a.new_label();
+        a.lfence();
+        a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
+        a.jcc(Cond::B, lbl_fwd_rep);
+        a.cmp_rr(true, Gp::Rdi, Gp::Rcx);
+        a.jcc(Cond::Ae, lbl_fwd_rep);
+        // Overlapping backward copy (fenced against loop-exit underflow speculation).
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.add_rr(true, Gp::Rsi, Gp::R14);
+        a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+        a.bind(lbl_bwd1);
+        a.lfence();
+        a.sub_ri(true, Gp::Rcx, 1);
+        a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+        a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+        a.test_rr(true, Gp::Rcx, Gp::Rcx);
+        a.jcc(Cond::Ne, lbl_bwd1);
+        a.jmp(lbl_ok);
 
-    a.bind(lbl_le15);
-    a.cmp_ri(true, Gp::Rdx, 8);
-    a.jcc(Cond::B, lbl_le7);
-    // 8..=15 bytes: overlap-safe 2x 64-bit load then 2x store.
-    a.mov_rm(true, Gp::Rax, Mem::base(Gp::Rsi));
-    a.mov_rm(true, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -8));
-    a.mov_mr(true, Mem::base(Gp::Rdi), Gp::Rax);
-    a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -8), Gp::Rcx);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_fwd_rep);
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.add_rr(true, Gp::Rsi, Gp::R14);
+        a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+        a.rep_movsb();
+    } else {
+        let lbl_le15 = a.new_label();
+        let lbl_le7 = a.new_label();
+        let lbl_le3 = a.new_label();
+        let lbl_one = a.new_label();
+        let lbl_large = a.new_label();
+        let lbl_fwd = a.new_label();
+        let lbl_bwd16 = a.new_label();
+        let lbl_bwd1_check = a.new_label();
+        let lbl_bwd1 = a.new_label();
 
-    a.bind(lbl_le7);
-    a.cmp_ri(true, Gp::Rdx, 4);
-    a.jcc(Cond::B, lbl_le3);
-    // 4..=7 bytes: overlap-safe 2x 32-bit load then 2x store.
-    a.mov_rm(false, Gp::Rax, Mem::base(Gp::Rsi));
-    a.mov_rm(false, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -4));
-    a.mov_mr(false, Mem::base(Gp::Rdi), Gp::Rax);
-    a.mov_mr(false, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -4), Gp::Rcx);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        // Fast overlap-safe small copies (`len <= 32`): load both head and tail BEFORE storing either!
+        a.cmp_ri(true, Gp::Rdx, 32);
+        a.jcc(Cond::A, lbl_large);
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.add_rr(true, Gp::Rsi, Gp::R14);
+        a.cmp_ri(true, Gp::Rdx, 16);
+        a.jcc(Cond::B, lbl_le15);
+        // 16..=32 bytes: overlap-safe 2x XMM load then 2x store.
+        a.movdqu_xm(Xmm::Xmm14, Mem::base(Gp::Rsi));
+        a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -16));
+        a.movdqu_mx(Mem::base(Gp::Rdi), Xmm::Xmm14);
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm15);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_le3);
-    a.cmp_ri(true, Gp::Rdx, 1);
-    a.jcc(Cond::E, lbl_one);
-    // 2..=3 bytes: overlap-safe 16-bit head + 8-bit tail.
-    a.movzx_rm16(false, Gp::Rax, Mem::base(Gp::Rsi));
-    a.movzx_rm8(false, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -1));
-    a.mov_mr16(Mem::base(Gp::Rdi), Gp::Rax);
-    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -1), Gp::Rcx);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_le15);
+        a.cmp_ri(true, Gp::Rdx, 8);
+        a.jcc(Cond::B, lbl_le7);
+        // 8..=15 bytes: overlap-safe 2x 64-bit load then 2x store.
+        a.mov_rm(true, Gp::Rax, Mem::base(Gp::Rsi));
+        a.mov_rm(true, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -8));
+        a.mov_mr(true, Mem::base(Gp::Rdi), Gp::Rax);
+        a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -8), Gp::Rcx);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_one);
-    a.movzx_rm8(false, Gp::Rax, Mem::base(Gp::Rsi));
-    a.mov_mr8(Mem::base(Gp::Rdi), Gp::Rax);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_le7);
+        a.cmp_ri(true, Gp::Rdx, 4);
+        a.jcc(Cond::B, lbl_le3);
+        // 4..=7 bytes: overlap-safe 2x 32-bit load then 2x store.
+        a.mov_rm(false, Gp::Rax, Mem::base(Gp::Rsi));
+        a.mov_rm(false, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -4));
+        a.mov_mr(false, Mem::base(Gp::Rdi), Gp::Rax);
+        a.mov_mr(false, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -4), Gp::Rcx);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    // Large copy (`len > 32`): forward if `dst < src || dst >= src + len` (`rcx == src + len`).
-    a.bind(lbl_large);
-    a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
-    a.jcc(Cond::B, lbl_fwd);
-    a.cmp_rr(true, Gp::Rdi, Gp::Rcx);
-    a.jcc(Cond::Ae, lbl_fwd);
+        a.bind(lbl_le3);
+        a.cmp_ri(true, Gp::Rdx, 1);
+        a.jcc(Cond::E, lbl_one);
+        // 2..=3 bytes: overlap-safe 16-bit head + 8-bit tail.
+        a.movzx_rm16(false, Gp::Rax, Mem::base(Gp::Rsi));
+        a.movzx_rm8(false, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -1));
+        a.mov_mr16(Mem::base(Gp::Rdi), Gp::Rax);
+        a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -1), Gp::Rcx);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    // Large overlapping backward copy: 16-byte XMM14 chunks then byte tail.
-    a.add_rr(true, Gp::Rdi, Gp::R14);
-    a.add_rr(true, Gp::Rsi, Gp::R14);
-    a.mov_rr(true, Gp::Rcx, Gp::Rdx);
-    a.bind(lbl_bwd16);
-    a.sub_ri(true, Gp::Rcx, 16);
-    a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Xmm::Xmm14);
-    a.cmp_ri(true, Gp::Rcx, 16);
-    a.jcc(Cond::Ae, lbl_bwd16);
-    a.bind(lbl_bwd1_check);
-    a.test_rr(true, Gp::Rcx, Gp::Rcx);
-    a.jcc(Cond::E, lbl_ok);
-    a.bind(lbl_bwd1);
-    a.sub_ri(true, Gp::Rcx, 1);
-    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
-    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
-    a.test_rr(true, Gp::Rcx, Gp::Rcx);
-    a.jcc(Cond::Ne, lbl_bwd1);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_one);
+        a.movzx_rm8(false, Gp::Rax, Mem::base(Gp::Rsi));
+        a.mov_mr8(Mem::base(Gp::Rdi), Gp::Rax);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_fwd);
-    a.add_rr(true, Gp::Rdi, Gp::R14);
-    a.add_rr(true, Gp::Rsi, Gp::R14);
-    // For medium forward copies (`33..=1024` B), a 32-byte XMM14/XMM15 loop avoids `rep movsb`'s
-    // microcode startup latency; larger copies or tight forward overlaps (`0 < src - dst < 32`)
-    // use `rep movsb`.
-    let lbl_fwd_rep = a.new_label();
-    let lbl_fwd32 = a.new_label();
-    let lbl_fwd_tail = a.new_label();
-    a.cmp_ri(true, Gp::Rdx, 1024);
-    a.jcc(Cond::A, lbl_fwd_rep);
-    // `lbl_fwd_tail` loads `[src + len - 32 .. src + len]` after `lbl_fwd32` may have written up
-    // to `dst + len - 2`. That is overlap-safe iff the ranges are disjoint (`dst >= src + len`, so
-    // `(src - dst) as u64 >= 2^64 - 4 GiB >= 32`) or `src - dst >= 32`.
-    a.mov_rr(true, Gp::Rax, Gp::Rsi);
-    a.sub_rr(true, Gp::Rax, Gp::Rdi);
-    a.cmp_ri(true, Gp::Rax, 32);
-    a.jcc(Cond::B, lbl_fwd_rep);
-    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
-    a.lea(true, Gp::R8, Mem::base_disp(Gp::Rdx, -32)); // len > 32, so r8 >= 1
-    a.bind(lbl_fwd32);
-    a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
-    a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 16));
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Xmm::Xmm14);
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 16), Xmm::Xmm15);
-    a.add_ri(true, Gp::Rcx, 32);
-    a.cmp_rr(true, Gp::Rcx, Gp::R8);
-    a.jcc(Cond::B, lbl_fwd32);
-    a.bind(lbl_fwd_tail);
-    // Final overlapping 32-byte tail `[len - 32 .. len]` finishes any remainder `1..=32` in 4 insns.
-    a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -32));
-    a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -16));
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -32), Xmm::Xmm14);
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm15);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        // Large copy (`len > 32`): forward if `dst < src || dst >= src + len` (`rcx == src + len`).
+        a.bind(lbl_large);
+        a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
+        a.jcc(Cond::B, lbl_fwd);
+        a.cmp_rr(true, Gp::Rdi, Gp::Rcx);
+        a.jcc(Cond::Ae, lbl_fwd);
 
-    a.bind(lbl_fwd_rep);
-    a.mov_rr(true, Gp::Rcx, Gp::Rdx);
-    a.rep_movsb();
+        // Large overlapping backward copy: 16-byte XMM14 chunks then byte tail.
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.add_rr(true, Gp::Rsi, Gp::R14);
+        a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+        a.bind(lbl_bwd16);
+        a.sub_ri(true, Gp::Rcx, 16);
+        a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Xmm::Xmm14);
+        a.cmp_ri(true, Gp::Rcx, 16);
+        a.jcc(Cond::Ae, lbl_bwd16);
+        a.bind(lbl_bwd1_check);
+        a.test_rr(true, Gp::Rcx, Gp::Rcx);
+        a.jcc(Cond::E, lbl_ok);
+        a.bind(lbl_bwd1);
+        a.sub_ri(true, Gp::Rcx, 1);
+        a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+        a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+        a.test_rr(true, Gp::Rcx, Gp::Rcx);
+        a.jcc(Cond::Ne, lbl_bwd1);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
+
+        a.bind(lbl_fwd);
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.add_rr(true, Gp::Rsi, Gp::R14);
+        // For medium forward copies (`33..=1024` B), a 32-byte XMM14/XMM15 loop avoids `rep movsb`'s
+        // microcode startup latency; larger copies or tight forward overlaps (`0 < src - dst < 32`)
+        // use `rep movsb`.
+        let lbl_fwd_rep = a.new_label();
+        let lbl_fwd32 = a.new_label();
+        let lbl_fwd_tail = a.new_label();
+        a.cmp_ri(true, Gp::Rdx, 1024);
+        a.jcc(Cond::A, lbl_fwd_rep);
+        // `lbl_fwd_tail` loads `[src + len - 32 .. src + len]` after `lbl_fwd32` may have written up
+        // to `dst + len - 2`. That is overlap-safe iff the ranges are disjoint (`dst >= src + len`, so
+        // `(src - dst) as u64 >= 2^64 - 4 GiB >= 32`) or `src - dst >= 32`.
+        a.mov_rr(true, Gp::Rax, Gp::Rsi);
+        a.sub_rr(true, Gp::Rax, Gp::Rdi);
+        a.cmp_ri(true, Gp::Rax, 32);
+        a.jcc(Cond::B, lbl_fwd_rep);
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.lea(true, Gp::R8, Mem::base_disp(Gp::Rdx, -32)); // len > 32, so r8 >= 1
+        a.bind(lbl_fwd32);
+        a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+        a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 16));
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Xmm::Xmm14);
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 16), Xmm::Xmm15);
+        a.add_ri(true, Gp::Rcx, 32);
+        a.cmp_rr(true, Gp::Rcx, Gp::R8);
+        a.jcc(Cond::B, lbl_fwd32);
+        a.bind(lbl_fwd_tail);
+        // Final overlapping 32-byte tail `[len - 32 .. len]` finishes any remainder `1..=32` in 4 insns.
+        a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -32));
+        a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -16));
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -32), Xmm::Xmm14);
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm15);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
+
+        a.bind(lbl_fwd_rep);
+        a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+        a.rep_movsb();
+    }
 
     a.bind(lbl_ok);
     a.xor_rr(false, Gp::R11, Gp::R11);
@@ -752,15 +784,10 @@ pub fn emit_helper_mem_copy(fixed_mem: bool, memory64: bool) -> Result<Asm, Stri
 }
 
 /// Wasm `memory.fill(Rdi = dst, Rsi = val: u32, Rdx = len) -> R11d = 0 | TRAP_OOB`.
-pub fn emit_helper_mem_fill(fixed_mem: bool, memory64: bool) -> Result<Asm, String> {
+pub fn emit_helper_mem_fill(fixed_mem: bool, memory64: bool, spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(192);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
-    let lbl_large = a.new_label();
-    let lbl_le15 = a.new_label();
-    let lbl_le7 = a.new_label();
-    let lbl_le3 = a.new_label();
-    let lbl_one = a.new_label();
 
     if !memory64 {
         a.mov_rr(false, Gp::Rdi, Gp::Rdi);
@@ -791,57 +818,71 @@ pub fn emit_helper_mem_fill(fixed_mem: bool, memory64: bool) -> Result<Asm, Stri
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
 
-    a.add_rr(true, Gp::Rdi, Gp::R14);
-    a.cmp_ri(true, Gp::Rdx, 32);
-    a.jcc(Cond::A, lbl_large);
+    if spectre {
+        a.lfence();
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.mov_rr(false, Gp::Rax, Gp::Rsi);
+        a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+        a.rep_stosb();
+    } else {
+        let lbl_large = a.new_label();
+        let lbl_le15 = a.new_label();
+        let lbl_le7 = a.new_label();
+        let lbl_le3 = a.new_label();
+        let lbl_one = a.new_label();
 
-    // Fast small fill (`len <= 32`): broadcast byte into 64-bit Rax.
-    a.movzx_rr8(Gp::Rax, Gp::Rsi);
-    a.mov_ri64(Gp::Rcx, 0x0101_0101_0101_0101);
-    a.imul_rr(true, Gp::Rax, Gp::Rcx);
+        a.add_rr(true, Gp::Rdi, Gp::R14);
+        a.cmp_ri(true, Gp::Rdx, 32);
+        a.jcc(Cond::A, lbl_large);
 
-    a.cmp_ri(true, Gp::Rdx, 16);
-    a.jcc(Cond::B, lbl_le15);
-    a.movq_xr(Xmm::Xmm14, Gp::Rax);
-    a.punpcklqdq(Xmm::Xmm14, Xmm::Xmm14);
-    a.movdqu_mx(Mem::base(Gp::Rdi), Xmm::Xmm14);
-    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm14);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        // Fast small fill (`len <= 32`): broadcast byte into 64-bit Rax.
+        a.movzx_rr8(Gp::Rax, Gp::Rsi);
+        a.mov_ri64(Gp::Rcx, 0x0101_0101_0101_0101);
+        a.imul_rr(true, Gp::Rax, Gp::Rcx);
 
-    a.bind(lbl_le15);
-    a.cmp_ri(true, Gp::Rdx, 8);
-    a.jcc(Cond::B, lbl_le7);
-    a.mov_mr(true, Mem::base(Gp::Rdi), Gp::Rax);
-    a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -8), Gp::Rax);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.cmp_ri(true, Gp::Rdx, 16);
+        a.jcc(Cond::B, lbl_le15);
+        a.movq_xr(Xmm::Xmm14, Gp::Rax);
+        a.punpcklqdq(Xmm::Xmm14, Xmm::Xmm14);
+        a.movdqu_mx(Mem::base(Gp::Rdi), Xmm::Xmm14);
+        a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm14);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_le7);
-    a.cmp_ri(true, Gp::Rdx, 4);
-    a.jcc(Cond::B, lbl_le3);
-    a.mov_mr(false, Mem::base(Gp::Rdi), Gp::Rax);
-    a.mov_mr(false, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -4), Gp::Rax);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_le15);
+        a.cmp_ri(true, Gp::Rdx, 8);
+        a.jcc(Cond::B, lbl_le7);
+        a.mov_mr(true, Mem::base(Gp::Rdi), Gp::Rax);
+        a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -8), Gp::Rax);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_le3);
-    a.cmp_ri(true, Gp::Rdx, 1);
-    a.jcc(Cond::E, lbl_one);
-    a.mov_mr16(Mem::base(Gp::Rdi), Gp::Rax);
-    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -1), Gp::Rax);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_le7);
+        a.cmp_ri(true, Gp::Rdx, 4);
+        a.jcc(Cond::B, lbl_le3);
+        a.mov_mr(false, Mem::base(Gp::Rdi), Gp::Rax);
+        a.mov_mr(false, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -4), Gp::Rax);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_one);
-    a.mov_mr8(Mem::base(Gp::Rdi), Gp::Rax);
-    a.xor_rr(false, Gp::R11, Gp::R11);
-    a.ret();
+        a.bind(lbl_le3);
+        a.cmp_ri(true, Gp::Rdx, 1);
+        a.jcc(Cond::E, lbl_one);
+        a.mov_mr16(Mem::base(Gp::Rdi), Gp::Rax);
+        a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -1), Gp::Rax);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
 
-    a.bind(lbl_large);
-    a.mov_rr(false, Gp::Rax, Gp::Rsi);
-    a.mov_rr(true, Gp::Rcx, Gp::Rdx);
-    a.rep_stosb();
+        a.bind(lbl_one);
+        a.mov_mr8(Mem::base(Gp::Rdi), Gp::Rax);
+        a.xor_rr(false, Gp::R11, Gp::R11);
+        a.ret();
+
+        a.bind(lbl_large);
+        a.mov_rr(false, Gp::Rax, Gp::Rsi);
+        a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+        a.rep_stosb();
+    }
 
     a.bind(lbl_ok);
     a.xor_rr(false, Gp::R11, Gp::R11);
@@ -1944,68 +1985,7 @@ fn emit_export_new(
     a.mov_mr8(Mem::base_disp(Gp::Rsp, 40), Gp::R11);
 
     a.bind(lbl_cleanup_ctx);
-    let lbl_no_stack = a.new_label();
-    let lbl_no_mem = a.new_label();
-    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_BASE));
-    a.test_rr(true, Gp::Rdi, Gp::Rdi);
-    a.jcc(Cond::E, lbl_no_stack);
-    a.mov_ri64(Gp::Rsi, GUEST_STACK_TOTAL_BYTES as u64);
-    a.mov_ri32(Gp::Rax, SYS_MUNMAP);
-    a.syscall();
-    a.bind(lbl_no_stack);
-
-    a.mov_rm(
-        true,
-        Gp::Rsi,
-        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
-    );
-    a.test_rr(true, Gp::Rsi, Gp::Rsi);
-    a.jcc(Cond::E, lbl_no_mem);
-    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
-    a.mov_ri32(Gp::Rax, SYS_MUNMAP);
-    a.syscall();
-    a.bind(lbl_no_mem);
-
-    for &desc_off in &layout.extra_mem_offs {
-        let lbl_skip = a.new_label();
-        a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::R15, desc_off + 24));
-        a.test_rr(true, Gp::Rsi, Gp::Rsi);
-        a.jcc(Cond::E, lbl_skip);
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, desc_off));
-        a.mov_ri32(Gp::Rax, SYS_MUNMAP);
-        a.syscall();
-        a.bind(lbl_skip);
-    }
-    if let Some(exn_off) = layout.exn_state_off {
-        let lbl_skip = a.new_label();
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, exn_off + 8));
-        a.test_rr(true, Gp::Rdi, Gp::Rdi);
-        a.jcc(Cond::E, lbl_skip);
-        a.mov_ri64(Gp::Rsi, EXN_SLAB_BYTES as u64);
-        a.mov_ri32(Gp::Rax, SYS_MUNMAP);
-        a.syscall();
-        a.bind(lbl_skip);
-    }
-    for &(desc_off, _, _) in layout.dyn_tables.values() {
-        let lbl_skip = a.new_label();
-        a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::R15, desc_off + 16));
-        a.test_rr(true, Gp::Rsi, Gp::Rsi);
-        a.jcc(Cond::E, lbl_skip);
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, desc_off));
-        a.mov_ri32(Gp::Rax, SYS_MUNMAP);
-        a.syscall();
-        a.bind(lbl_skip);
-    }
-
-    // Load handle_alloc_bytes BEFORE final munmap(ctx) so Ctx is never read after unmapping!
-    a.mov_rr(true, Gp::Rdi, Gp::R15);
-    a.mov_rm(
-        true,
-        Gp::Rsi,
-        Mem::base_disp(Gp::R15, OFF_HANDLE_ALLOC_BYTES),
-    );
-    a.mov_ri32(Gp::Rax, SYS_MUNMAP);
-    a.syscall();
+    emit_x64_cleanup_ctx(&mut a, Gp::R15, layout);
 
     a.bind(lbl_fail_no_ctx);
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 32));
@@ -2028,23 +2008,26 @@ fn emit_export_new(
     Ok(a)
 }
 
-fn emit_export_drop(layout: &CtxLayout) -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(128);
+/// Zeroes `[Rdi .. Rdi + Rcx)` when `Rcx != 0`, then emits `lfence`.
+/// Clobbers ONLY `Rdi`, `Rcx`, `Rax` (preserves `Rsi` and callee-saved registers).
+fn emit_x64_scrub_rdi_rcx(a: &mut Asm) {
     let lbl_done = a.new_label();
+    a.test_rr(true, Gp::Rcx, Gp::Rcx);
+    a.jcc(Cond::E, lbl_done);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.rep_stosb();
+    a.lfence();
+    a.bind(lbl_done);
+}
+
+/// Unmaps all handle-owned allocations (and scrubs committed linear memory, active dynamic tables,
+/// used exception slab, and `Ctx` before `munmap` when `layout.spectre_mitigations` is enabled).
+fn emit_x64_cleanup_ctx(a: &mut Asm, ctx_reg: Gp, layout: &CtxLayout) {
+    let spectre = layout.spectre_mitigations;
     let lbl_no_stack = a.new_label();
     let lbl_no_mem = a.new_label();
 
-    a.test_rr(true, Gp::Rdi, Gp::Rdi);
-    a.jcc(Cond::E, lbl_done);
-    // Defense-in-depth: refuse to unmap while a call is active on this handle!
-    a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_IN_CALL));
-    a.test_rr(false, Gp::Rax, Gp::Rax);
-    a.jcc(Cond::Ne, lbl_done);
-
-    a.push(Gp::Rbx);
-    a.mov_rr(true, Gp::Rbx, Gp::Rdi);
-
-    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, OFF_GUEST_STACK_BASE));
+    a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, OFF_GUEST_STACK_BASE));
     a.test_rr(true, Gp::Rdi, Gp::Rdi);
     a.jcc(Cond::E, lbl_no_stack);
     a.mov_ri64(Gp::Rsi, GUEST_STACK_TOTAL_BYTES as u64);
@@ -2055,55 +2038,99 @@ fn emit_export_drop(layout: &CtxLayout) -> Result<Asm, String> {
     a.mov_rm(
         true,
         Gp::Rsi,
-        Mem::base_disp(Gp::Rbx, OFF_MEM_RESERVE_BYTES),
+        Mem::base_disp(ctx_reg, OFF_MEM_RESERVE_BYTES),
     );
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_no_mem);
-    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, OFF_MEM_BASE));
+    if spectre {
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, OFF_MEM_BASE));
+        a.mov_rm(true, Gp::Rcx, Mem::base_disp(ctx_reg, OFF_MEM_LEN));
+        emit_x64_scrub_rdi_rcx(a);
+    }
+    a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, OFF_MEM_BASE));
     a.mov_ri32(Gp::Rax, SYS_MUNMAP);
     a.syscall();
     a.bind(lbl_no_mem);
 
     for &desc_off in &layout.extra_mem_offs {
         let lbl_skip = a.new_label();
-        a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rbx, desc_off + 24));
+        a.mov_rm(true, Gp::Rsi, Mem::base_disp(ctx_reg, desc_off + 24));
         a.test_rr(true, Gp::Rsi, Gp::Rsi);
         a.jcc(Cond::E, lbl_skip);
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, desc_off));
+        if spectre {
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, desc_off));
+            a.mov_rm(true, Gp::Rcx, Mem::base_disp(ctx_reg, desc_off + 8));
+            emit_x64_scrub_rdi_rcx(a);
+        }
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, desc_off));
         a.mov_ri32(Gp::Rax, SYS_MUNMAP);
         a.syscall();
         a.bind(lbl_skip);
     }
     if let Some(exn_off) = layout.exn_state_off {
         let lbl_skip = a.new_label();
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, exn_off + 8));
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, exn_off + 8));
         a.test_rr(true, Gp::Rdi, Gp::Rdi);
         a.jcc(Cond::E, lbl_skip);
         a.mov_ri64(Gp::Rsi, EXN_SLAB_BYTES as u64);
+        if spectre {
+            a.mov_rm(true, Gp::Rcx, Mem::base_disp(ctx_reg, exn_off + 16));
+            a.cmp_rr(true, Gp::Rcx, Gp::Rsi);
+            a.cmovcc(Cond::A, true, Gp::Rcx, Gp::Rsi);
+            emit_x64_scrub_rdi_rcx(a);
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, exn_off + 8));
+        }
         a.mov_ri32(Gp::Rax, SYS_MUNMAP);
         a.syscall();
         a.bind(lbl_skip);
     }
     for &(desc_off, _, _) in layout.dyn_tables.values() {
         let lbl_skip = a.new_label();
-        a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rbx, desc_off + 16));
+        a.mov_rm(true, Gp::Rsi, Mem::base_disp(ctx_reg, desc_off + 16));
         a.test_rr(true, Gp::Rsi, Gp::Rsi);
         a.jcc(Cond::E, lbl_skip);
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, desc_off));
+        if spectre {
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, desc_off));
+            a.mov_rm(false, Gp::Rcx, Mem::base_disp(ctx_reg, desc_off + 8));
+            a.shl_imm(true, Gp::Rcx, 3);
+            emit_x64_scrub_rdi_rcx(a);
+        }
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, desc_off));
         a.mov_ri32(Gp::Rax, SYS_MUNMAP);
         a.syscall();
         a.bind(lbl_skip);
     }
 
-    a.mov_rr(true, Gp::Rdi, Gp::Rbx);
+    // Load `OFF_HANDLE_ALLOC_BYTES` BEFORE scrubbing/unmapping `ctx_reg`!
     a.mov_rm(
         true,
         Gp::Rsi,
-        Mem::base_disp(Gp::Rbx, OFF_HANDLE_ALLOC_BYTES),
+        Mem::base_disp(ctx_reg, OFF_HANDLE_ALLOC_BYTES),
     );
+    if spectre {
+        a.mov_rr(true, Gp::Rdi, ctx_reg);
+        a.mov_rr(true, Gp::Rcx, Gp::Rsi);
+        emit_x64_scrub_rdi_rcx(a);
+    }
+    a.mov_rr(true, Gp::Rdi, ctx_reg);
     a.mov_ri32(Gp::Rax, SYS_MUNMAP);
     a.syscall();
+}
 
+fn emit_export_drop(layout: &CtxLayout) -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(192);
+    let lbl_done = a.new_label();
+
+    a.test_rr(true, Gp::Rdi, Gp::Rdi);
+    a.jcc(Cond::E, lbl_done);
+    // Defense-in-depth: refuse to unmap while a call is active on this handle!
+    a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_IN_CALL));
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::Ne, lbl_done);
+
+    a.push(Gp::Rbx);
+    a.mov_rr(true, Gp::Rbx, Gp::Rdi);
+    emit_x64_cleanup_ctx(&mut a, Gp::Rbx, layout);
     a.pop(Gp::Rbx);
     a.bind(lbl_done);
     a.ret();
@@ -3029,12 +3056,13 @@ pub fn emit_all_helpers(
     }
     let fixed_mem = module.fixed32.is_some();
     let memory64 = module.memory64;
+    let spectre = layout.spectre_mitigations;
     debug_assert_eq!(helpers.len(), HELPER_MEM_GROW as usize);
     helpers.push(emit_helper_mem_grow(memory64)?);
     debug_assert_eq!(helpers.len(), HELPER_MEM_COPY as usize);
-    helpers.push(emit_helper_mem_copy(fixed_mem, memory64)?);
+    helpers.push(emit_helper_mem_copy(fixed_mem, memory64, spectre)?);
     debug_assert_eq!(helpers.len(), HELPER_MEM_FILL as usize);
-    helpers.push(emit_helper_mem_fill(fixed_mem, memory64)?);
+    helpers.push(emit_helper_mem_fill(fixed_mem, memory64, spectre)?);
     debug_assert_eq!(helpers.len(), HELPER_HOST_CALL as usize);
     helpers.push(emit_helper_host_call(module, layout, ro)?);
     debug_assert_eq!(helpers.len(), HELPER_GROW_CORE as usize);
@@ -3063,9 +3091,9 @@ pub fn emit_all_helpers(
     if !module.extra_memories.is_empty() {
         helpers.push(emit_helper_extra_mem_grow()?);
         debug_assert_eq!(helpers.len(), HELPER_EXTRA_MEM_COPY as usize);
-        helpers.push(emit_helper_extra_mem_copy()?);
+        helpers.push(emit_helper_extra_mem_copy(spectre)?);
         debug_assert_eq!(helpers.len(), HELPER_EXTRA_MEM_FILL as usize);
-        helpers.push(emit_helper_extra_mem_fill()?);
+        helpers.push(emit_helper_extra_mem_fill(spectre)?);
     } else {
         for _ in 0..3 {
             let mut stub = Asm::with_capacity(4);
@@ -3115,6 +3143,7 @@ pub fn emit_all_helpers(
         helpers.push(emit_helper_mem_init(
             tables.passive_data_table_off,
             drop_off,
+            spectre,
         )?);
     } else {
         let mut stub = Asm::with_capacity(4);
@@ -3123,7 +3152,11 @@ pub fn emit_all_helpers(
     }
     debug_assert_eq!(helpers.len(), HELPER_TABLE_INIT as usize);
     if let Some(drop_off) = layout.elem_dropped_off {
-        helpers.push(emit_helper_table_init(tables.elem_seg_table_off, drop_off)?);
+        helpers.push(emit_helper_table_init(
+            tables.elem_seg_table_off,
+            drop_off,
+            spectre,
+        )?);
     } else {
         let mut stub = Asm::with_capacity(4);
         stub.ret();
@@ -3131,11 +3164,11 @@ pub fn emit_all_helpers(
     }
     debug_assert_eq!(helpers.len(), HELPER_TABLE_COPY as usize);
     if !layout.dyn_tables.is_empty() {
-        helpers.push(emit_helper_table_copy()?);
+        helpers.push(emit_helper_table_copy(spectre)?);
         debug_assert_eq!(helpers.len(), HELPER_TABLE_GROW as usize);
-        helpers.push(emit_helper_table_grow()?);
+        helpers.push(emit_helper_table_grow(spectre)?);
         debug_assert_eq!(helpers.len(), HELPER_TABLE_FILL as usize);
-        helpers.push(emit_helper_table_fill()?);
+        helpers.push(emit_helper_table_fill(spectre)?);
     } else {
         for _ in 0..3 {
             let mut stub = Asm::with_capacity(4);
@@ -3190,7 +3223,7 @@ fn emit_helper_extra_mem_grow() -> Result<Asm, String> {
 }
 
 /// Multi-memory `memory.copy(Rdi = dst, Rsi = src, Rdx = len, Rcx = dst_desc_off, R8 = src_desc_off) -> R11d = 0 | TRAP_OOB`.
-fn emit_helper_extra_mem_copy() -> Result<Asm, String> {
+fn emit_helper_extra_mem_copy(spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(160);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
@@ -3209,6 +3242,9 @@ fn emit_helper_extra_mem_copy() -> Result<Asm, String> {
     a.jcc(Cond::A, lbl_oob);
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
+    if spectre {
+        a.lfence();
+    }
     a.add_rm(true, Gp::Rdi, Mem::indexed(Gp::R15, Gp::Rcx, 1, 0));
     a.add_rm(true, Gp::Rsi, Mem::indexed(Gp::R15, Gp::R8, 1, 0));
     a.mov_rr(true, Gp::Rcx, Gp::Rdx);
@@ -3217,6 +3253,9 @@ fn emit_helper_extra_mem_copy() -> Result<Asm, String> {
     a.rep_movsb();
     a.jmp(lbl_ok);
     a.bind(lbl_bwd);
+    if spectre {
+        a.lfence();
+    }
     a.sub_ri(true, Gp::Rcx, 1);
     a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
     a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
@@ -3233,7 +3272,7 @@ fn emit_helper_extra_mem_copy() -> Result<Asm, String> {
 }
 
 /// Multi-memory `memory.fill(Rdi = dst, Rsi = val, Rdx = len, Rcx = desc_off) -> R11d = 0 | TRAP_OOB`.
-fn emit_helper_extra_mem_fill() -> Result<Asm, String> {
+fn emit_helper_extra_mem_fill(spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(96);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
@@ -3244,6 +3283,9 @@ fn emit_helper_extra_mem_fill() -> Result<Asm, String> {
     a.jcc(Cond::A, lbl_oob);
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
+    if spectre {
+        a.lfence();
+    }
     a.add_rm(true, Gp::Rdi, Mem::indexed(Gp::R15, Gp::Rcx, 1, 0));
     a.mov_rr(false, Gp::Rax, Gp::Rsi);
     a.mov_rr(true, Gp::Rcx, Gp::Rdx);
@@ -3259,7 +3301,11 @@ fn emit_helper_extra_mem_fill() -> Result<Asm, String> {
 }
 
 /// Bulk `memory.init(Rdi = dst, Rsi = src, Rdx = len, Rcx = data_idx, R8 = mem_desc_off) -> R11d`.
-fn emit_helper_mem_init(passive_table_off: u32, drop_off: i32) -> Result<Asm, String> {
+fn emit_helper_mem_init(
+    passive_table_off: u32,
+    drop_off: i32,
+    spectre: bool,
+) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(128);
     let lbl_not_dropped = a.new_label();
     let lbl_oob = a.new_label();
@@ -3289,6 +3335,9 @@ fn emit_helper_mem_init(passive_table_off: u32, drop_off: i32) -> Result<Asm, St
 
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
+    if spectre {
+        a.lfence();
+    }
 
     a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
     a.add_rr(true, Gp::R9, Gp::R10);
@@ -3308,7 +3357,11 @@ fn emit_helper_mem_init(passive_table_off: u32, drop_off: i32) -> Result<Asm, St
 }
 
 /// Bulk `table.init(Rdi = dst, Rsi = src, Rdx = len, Rcx = elem_idx, R8 = tbl_desc_off) -> R11d`.
-fn emit_helper_table_init(elem_table_off: u32, drop_off: i32) -> Result<Asm, String> {
+fn emit_helper_table_init(
+    elem_table_off: u32,
+    drop_off: i32,
+    spectre: bool,
+) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(144);
     let lbl_not_dropped = a.new_label();
     let lbl_loop = a.new_label();
@@ -3340,6 +3393,9 @@ fn emit_helper_table_init(elem_table_off: u32, drop_off: i32) -> Result<Asm, Str
 
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
+    if spectre {
+        a.lfence();
+    }
 
     a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
     a.add_rr(true, Gp::R9, Gp::R10); // seg_u32_base
@@ -3348,6 +3404,9 @@ fn emit_helper_table_init(elem_table_off: u32, drop_off: i32) -> Result<Asm, Str
     a.lea(true, Gp::Rax, Mem::indexed(Gp::Rax, Gp::Rdi, 8, 0));
     a.xor_rr(false, Gp::Rcx, Gp::Rcx);
     a.bind(lbl_loop);
+    if spectre {
+        a.lfence();
+    }
     a.mov_rm(false, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 4, 0));
     a.mov_mr(true, Mem::indexed(Gp::Rax, Gp::Rcx, 8, 0), Gp::R10);
     a.add_ri(true, Gp::Rcx, 1);
@@ -3365,7 +3424,7 @@ fn emit_helper_table_init(elem_table_off: u32, drop_off: i32) -> Result<Asm, Str
 }
 
 /// Bulk `table.copy(Rdi = dst, Rsi = src, Rdx = len, Rcx = dst_desc_off, R8 = src_desc_off) -> R11d`.
-fn emit_helper_table_copy() -> Result<Asm, String> {
+fn emit_helper_table_copy(spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(144);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
@@ -3388,6 +3447,9 @@ fn emit_helper_table_copy() -> Result<Asm, String> {
 
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
+    if spectre {
+        a.lfence();
+    }
 
     a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::Rcx, 1, 0));
     a.lea(true, Gp::Rdi, Mem::indexed(Gp::R9, Gp::Rdi, 8, 0));
@@ -3398,6 +3460,9 @@ fn emit_helper_table_copy() -> Result<Asm, String> {
     a.jcc(Cond::A, lbl_bwd);
     a.xor_rr(false, Gp::Rcx, Gp::Rcx);
     a.bind(lbl_fwd);
+    if spectre {
+        a.lfence();
+    }
     a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 8, 0));
     a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rcx, 8, 0), Gp::Rax);
     a.add_ri(true, Gp::Rcx, 1);
@@ -3406,6 +3471,9 @@ fn emit_helper_table_copy() -> Result<Asm, String> {
     a.jmp(lbl_ok);
 
     a.bind(lbl_bwd);
+    if spectre {
+        a.lfence();
+    }
     a.sub_ri(true, Gp::Rdx, 1);
     a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rdx, 8, 0));
     a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 8, 0), Gp::Rax);
@@ -3423,7 +3491,7 @@ fn emit_helper_table_copy() -> Result<Asm, String> {
 }
 
 /// Bulk `table.grow(Rdi = init_val, Rsi = delta, Rdx = tbl_desc_off) -> Rax (old_len | 0xffff_ffff)`.
-fn emit_helper_table_grow() -> Result<Asm, String> {
+fn emit_helper_table_grow(spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(96);
     let lbl_fail = a.new_label();
     let lbl_done = a.new_label();
@@ -3439,10 +3507,16 @@ fn emit_helper_table_grow() -> Result<Asm, String> {
 
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_done);
+    if spectre {
+        a.lfence();
+    }
 
     a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::Rdx, 1, 0)); // tbl_ptr
     a.mov_rr(true, Gp::Rcx, Gp::Rax);
     a.bind(lbl_loop);
+    if spectre {
+        a.lfence();
+    }
     a.mov_mr(true, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0), Gp::Rdi);
     a.add_ri(true, Gp::Rcx, 1);
     a.cmp_rr(true, Gp::Rcx, Gp::R8);
@@ -3459,7 +3533,7 @@ fn emit_helper_table_grow() -> Result<Asm, String> {
 }
 
 /// Bulk `table.fill(Rdi = dst, Rsi = val, Rdx = len, Rcx = tbl_desc_off) -> R11d`.
-fn emit_helper_table_fill() -> Result<Asm, String> {
+fn emit_helper_table_fill(spectre: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(96);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
@@ -3474,11 +3548,17 @@ fn emit_helper_table_fill() -> Result<Asm, String> {
 
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_ok);
+    if spectre {
+        a.lfence();
+    }
 
     a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::Rcx, 1, 0));
     a.lea(true, Gp::R9, Mem::indexed(Gp::R9, Gp::Rdi, 8, 0));
     a.xor_rr(false, Gp::R8, Gp::R8);
     a.bind(lbl_loop);
+    if spectre {
+        a.lfence();
+    }
     a.mov_mr(true, Mem::indexed(Gp::R9, Gp::R8, 8, 0), Gp::Rsi);
     a.add_ri(true, Gp::R8, 1);
     a.cmp_rr(true, Gp::R8, Gp::Rdx);

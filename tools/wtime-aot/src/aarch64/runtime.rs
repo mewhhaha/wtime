@@ -37,6 +37,221 @@ fn emit_syscall(asm: &mut A64Asm, num: u64) {
 }
 
 /// Emits shared AArch64 runtime helpers (`HELPER_MEM_GROW`, `HELPER_MEM_COPY`, `HELPER_MEM_FILL`,
+fn emit_a64_spec_barrier(a: &mut A64Asm, spectre: bool) {
+    if spectre {
+        a.dsb_nsh();
+        a.isb();
+    }
+}
+
+/// Zeroes `[X2 .. X2 + X3)` (any byte length), then emits `dsb nsh; isb`.
+/// Clobbers ONLY `X2` and `X3` (preserves `X0`, `X1`, and all callee-saved registers).
+fn emit_a64_scrub(a: &mut A64Asm) {
+    let done = a.new_label();
+    let loop64 = a.new_label();
+    let tail8_check = a.new_label();
+    let loop8 = a.new_label();
+    let tail1_check = a.new_label();
+    let loop1 = a.new_label();
+
+    a.cbz(true, Reg::X3, done);
+    a.cmp_imm(true, Reg::X3, 64);
+    a.b_cond(Cond::Lo, tail8_check);
+    a.bind(loop64);
+    a.stp_x(Reg::XZR, Reg::XZR, Reg::X2, 0);
+    a.stp_x(Reg::XZR, Reg::XZR, Reg::X2, 16);
+    a.stp_x(Reg::XZR, Reg::XZR, Reg::X2, 32);
+    a.stp_x(Reg::XZR, Reg::XZR, Reg::X2, 48);
+    a.add_imm(true, Reg::X2, Reg::X2, 64);
+    a.sub_imm(true, Reg::X3, Reg::X3, 64);
+    a.cmp_imm(true, Reg::X3, 64);
+    a.b_cond(Cond::Hs, loop64);
+
+    a.bind(tail8_check);
+    a.cmp_imm(true, Reg::X3, 8);
+    a.b_cond(Cond::Lo, tail1_check);
+    a.bind(loop8);
+    a.str_uimm(true, Reg::XZR, Reg::X2, 0);
+    a.add_imm(true, Reg::X2, Reg::X2, 8);
+    a.sub_imm(true, Reg::X3, Reg::X3, 8);
+    a.cmp_imm(true, Reg::X3, 8);
+    a.b_cond(Cond::Hs, loop8);
+
+    a.bind(tail1_check);
+    a.cbz(true, Reg::X3, done);
+    a.bind(loop1);
+    a.strb_uimm(Reg::XZR, Reg::X2, 0);
+    a.add_imm(true, Reg::X2, Reg::X2, 1);
+    a.sub_imm(true, Reg::X3, Reg::X3, 1);
+    a.cbnz(true, Reg::X3, loop1);
+
+    a.bind(done);
+    a.dsb_nsh();
+    a.isb();
+}
+
+/// Unmaps all handle-owned allocations (and scrubs committed linear memory, active dynamic tables,
+/// used exception slab, and `Ctx` before `munmap` when `layout.spectre_mitigations` is enabled).
+fn emit_a64_cleanup_ctx(a: &mut A64Asm, ctx_reg: Reg, layout: &CtxLayout) {
+    let spectre = layout.spectre_mitigations;
+    let skip_m = a.new_label();
+    let skip_s = a.new_label();
+    emit_load_off(
+        a,
+        Ty::I64,
+        Some(Reg::X0),
+        None,
+        ctx_reg,
+        OFF_MEM_BASE,
+        Reg::X15,
+    );
+    emit_load_off(
+        a,
+        Ty::I64,
+        Some(Reg::X1),
+        None,
+        ctx_reg,
+        OFF_MEM_RESERVE_BYTES,
+        Reg::X15,
+    );
+    a.cbz(true, Reg::X0, skip_m);
+    if spectre {
+        a.mov_r(true, Reg::X2, Reg::X0);
+        emit_load_off(
+            a,
+            Ty::I64,
+            Some(Reg::X3),
+            None,
+            ctx_reg,
+            OFF_MEM_LEN,
+            Reg::X15,
+        );
+        emit_a64_scrub(a);
+    }
+    emit_syscall(a, SYS_MUNMAP);
+    a.bind(skip_m);
+    for &desc_off in &layout.extra_mem_offs {
+        let skip_em = a.new_label();
+        emit_load_off(a, Ty::I64, Some(Reg::X0), None, ctx_reg, desc_off, Reg::X15);
+        emit_load_off(
+            a,
+            Ty::I64,
+            Some(Reg::X1),
+            None,
+            ctx_reg,
+            desc_off + 24,
+            Reg::X15,
+        );
+        a.cbz(true, Reg::X1, skip_em);
+        if spectre {
+            a.mov_r(true, Reg::X2, Reg::X0);
+            emit_load_off(
+                a,
+                Ty::I64,
+                Some(Reg::X3),
+                None,
+                ctx_reg,
+                desc_off + 8,
+                Reg::X15,
+            );
+            emit_a64_scrub(a);
+        }
+        emit_syscall(a, SYS_MUNMAP);
+        a.bind(skip_em);
+    }
+    if let Some(exn_off) = layout.exn_state_off {
+        let skip_exn = a.new_label();
+        emit_load_off(
+            a,
+            Ty::I64,
+            Some(Reg::X0),
+            None,
+            ctx_reg,
+            exn_off + 8,
+            Reg::X15,
+        );
+        a.cbz(true, Reg::X0, skip_exn);
+        a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
+        if spectre {
+            a.mov_r(true, Reg::X2, Reg::X0);
+            emit_load_off(
+                a,
+                Ty::I64,
+                Some(Reg::X3),
+                None,
+                ctx_reg,
+                exn_off + 16,
+                Reg::X15,
+            );
+            a.cmp_r(true, Reg::X3, Reg::X1);
+            a.csel(true, Reg::X3, Reg::X1, Reg::X3, Cond::Hi);
+            emit_a64_scrub(a);
+        }
+        emit_syscall(a, SYS_MUNMAP);
+        a.bind(skip_exn);
+    }
+    for &(desc_off, _, _) in layout.dyn_tables.values() {
+        let skip_dt = a.new_label();
+        emit_load_off(a, Ty::I64, Some(Reg::X0), None, ctx_reg, desc_off, Reg::X15);
+        emit_load_off(
+            a,
+            Ty::I64,
+            Some(Reg::X1),
+            None,
+            ctx_reg,
+            desc_off + 16,
+            Reg::X15,
+        );
+        a.cbz(true, Reg::X1, skip_dt);
+        if spectre {
+            a.mov_r(true, Reg::X2, Reg::X0);
+            emit_load_off(
+                a,
+                Ty::I32,
+                Some(Reg::X3),
+                None,
+                ctx_reg,
+                desc_off + 8,
+                Reg::X15,
+            );
+            a.lsl_imm(true, Reg::X3, Reg::X3, 3);
+            emit_a64_scrub(a);
+        }
+        emit_syscall(a, SYS_MUNMAP);
+        a.bind(skip_dt);
+    }
+    emit_load_off(
+        a,
+        Ty::I64,
+        Some(Reg::X0),
+        None,
+        ctx_reg,
+        OFF_GUEST_STACK_BASE,
+        Reg::X15,
+    );
+    a.cbz(true, Reg::X0, skip_s);
+    a.mov_imm64(Reg::X1, GUEST_STACK_TOTAL_BYTES as u64);
+    emit_syscall(a, SYS_MUNMAP);
+    a.bind(skip_s);
+    // Load `OFF_HANDLE_ALLOC_BYTES` BEFORE scrubbing/unmapping `ctx_reg`!
+    a.mov_r(true, Reg::X0, ctx_reg);
+    emit_load_off(
+        a,
+        Ty::I64,
+        Some(Reg::X1),
+        None,
+        ctx_reg,
+        OFF_HANDLE_ALLOC_BYTES,
+        Reg::X15,
+    );
+    if spectre {
+        a.mov_r(true, Reg::X2, Reg::X0);
+        a.mov_r(true, Reg::X3, Reg::X1);
+        emit_a64_scrub(a);
+    }
+    emit_syscall(a, SYS_MUNMAP);
+}
+
 /// `HELPER_INITIALIZE`).
 pub fn emit_a64_helpers(
     module: &X64Module,
@@ -44,6 +259,7 @@ pub fn emit_a64_helpers(
     tables: &RuntimeTables,
 ) -> Result<Vec<(u32, A64Asm)>, String> {
     let mut out = Vec::new();
+    let spectre = layout.spectre_mitigations;
 
     // 1. HELPER_MEM_GROW: X0 = delta_pages -> returns old_pages or u64::MAX (-1) in X0, updates X26 & [X28+OFF_MEM_LEN].
     {
@@ -121,6 +337,7 @@ pub fn emit_a64_helpers(
         a.cmp_r(true, Reg::X3, MEM_LEN_REG);
         a.b_cond(Cond::Hi, oob);
         a.cbz(true, Reg::X2, done);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
         a.add_r(true, Reg::X1, MEM_BASE_REG, Reg::X1);
         a.cmp_r(true, Reg::X0, Reg::X1);
@@ -128,6 +345,7 @@ pub fn emit_a64_helpers(
         // Forward
         a.movz(true, Reg::X3, 0, 0);
         a.bind(fwd_loop);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.ldrb_reg(Reg::X4, Reg::X1, Reg::X3, false);
         a.strb_reg(Reg::X4, Reg::X0, Reg::X3, false);
         a.add_imm(true, Reg::X3, Reg::X3, 1);
@@ -137,6 +355,7 @@ pub fn emit_a64_helpers(
         // Backward
         a.bind(bwd);
         a.bind(bwd_loop);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.sub_imm(true, Reg::X2, Reg::X2, 1);
         a.ldrb_reg(Reg::X4, Reg::X1, Reg::X2, false);
         a.strb_reg(Reg::X4, Reg::X0, Reg::X2, false);
@@ -162,9 +381,11 @@ pub fn emit_a64_helpers(
         a.cmp_r(true, Reg::X3, MEM_LEN_REG);
         a.b_cond(Cond::Hi, oob);
         a.cbz(true, Reg::X2, done);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
         a.movz(true, Reg::X3, 0, 0);
         a.bind(lp);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.strb_reg(Reg::X1, Reg::X0, Reg::X3, false);
         a.add_imm(true, Reg::X3, Reg::X3, 1);
         a.cmp_r(true, Reg::X3, Reg::X2);
@@ -466,6 +687,7 @@ pub fn emit_a64_helpers(
             a.cmp_r(true, Reg::X5, Reg::X12);
             a.b_cond(Cond::Hi, oob);
             a.cbz(true, Reg::X2, done);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldr_uimm(true, Reg::X11, Reg::X9, 0); // dst_base
             a.ldr_uimm(true, Reg::X12, Reg::X10, 0); // src_base
             a.add_r(true, Reg::X0, Reg::X11, Reg::X0);
@@ -474,6 +696,7 @@ pub fn emit_a64_helpers(
             a.b_cond(Cond::Hi, bwd);
             a.movz(true, Reg::X3, 0, 0);
             a.bind(fwd_loop);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldrb_reg(Reg::X4, Reg::X1, Reg::X3, false);
             a.strb_reg(Reg::X4, Reg::X0, Reg::X3, false);
             a.add_imm(true, Reg::X3, Reg::X3, 1);
@@ -482,6 +705,7 @@ pub fn emit_a64_helpers(
             a.b(done);
             a.bind(bwd);
             a.bind(bwd_loop);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.sub_imm(true, Reg::X2, Reg::X2, 1);
             a.ldrb_reg(Reg::X4, Reg::X1, Reg::X2, false);
             a.strb_reg(Reg::X4, Reg::X0, Reg::X2, false);
@@ -508,10 +732,12 @@ pub fn emit_a64_helpers(
             a.cmp_r(true, Reg::X5, Reg::X10);
             a.b_cond(Cond::Hi, oob);
             a.cbz(true, Reg::X2, done);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldr_uimm(true, Reg::X10, Reg::X9, 0);
             a.add_r(true, Reg::X0, Reg::X10, Reg::X0);
             a.movz(true, Reg::X3, 0, 0);
             a.bind(lp);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.strb_reg(Reg::X1, Reg::X0, Reg::X3, false);
             a.add_imm(true, Reg::X3, Reg::X3, 1);
             a.cmp_r(true, Reg::X3, Reg::X2);
@@ -559,6 +785,7 @@ pub fn emit_a64_helpers(
         a.cmp_r(true, Reg::X5, Reg::X11);
         a.b_cond(Cond::Hi, oob);
         a.cbz(true, Reg::X2, done);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.ldrsw_uimm(Reg::X5, Reg::X10, 0);
         a.add_r(true, Reg::X9, Reg::X9, Reg::X5);
         a.add_r(true, Reg::X1, Reg::X9, Reg::X1); // src_ptr
@@ -566,6 +793,7 @@ pub fn emit_a64_helpers(
         a.add_r(true, Reg::X0, Reg::X11, Reg::X0); // dst_ptr
         a.movz(true, Reg::X5, 0, 0);
         a.bind(lp);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.ldrb_reg(Reg::X6, Reg::X1, Reg::X5, false);
         a.strb_reg(Reg::X6, Reg::X0, Reg::X5, false);
         a.add_imm(true, Reg::X5, Reg::X5, 1);
@@ -608,6 +836,7 @@ pub fn emit_a64_helpers(
         a.cmp_r(true, Reg::X5, Reg::X11);
         a.b_cond(Cond::Hi, oob);
         a.cbz(true, Reg::X2, done);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.ldrsw_uimm(Reg::X5, Reg::X10, 0);
         a.add_r(true, Reg::X9, Reg::X9, Reg::X5);
         a.lsl_imm(true, Reg::X5, Reg::X1, 2);
@@ -617,6 +846,7 @@ pub fn emit_a64_helpers(
         a.add_r(true, Reg::X0, Reg::X11, Reg::X5); // dst u64 ptr
         a.movz(true, Reg::X5, 0, 0);
         a.bind(lp);
+        emit_a64_spec_barrier(&mut a, spectre);
         a.ldr_reg_scaled(false, Reg::X6, Reg::X1, Reg::X5, true);
         a.str_reg_scaled(true, Reg::X6, Reg::X0, Reg::X5, true);
         a.add_imm(true, Reg::X5, Reg::X5, 1);
@@ -655,6 +885,7 @@ pub fn emit_a64_helpers(
             a.cmp_r(true, Reg::X5, Reg::X12);
             a.b_cond(Cond::Hi, oob);
             a.cbz(true, Reg::X2, done);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldr_uimm(true, Reg::X11, Reg::X9, 0);
             a.lsl_imm(true, Reg::X5, Reg::X0, 3);
             a.add_r(true, Reg::X0, Reg::X11, Reg::X5);
@@ -665,6 +896,7 @@ pub fn emit_a64_helpers(
             a.b_cond(Cond::Hi, bwd);
             a.movz(true, Reg::X5, 0, 0);
             a.bind(fwd_lp);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldr_reg_scaled(true, Reg::X6, Reg::X1, Reg::X5, true);
             a.str_reg_scaled(true, Reg::X6, Reg::X0, Reg::X5, true);
             a.add_imm(true, Reg::X5, Reg::X5, 1);
@@ -673,6 +905,7 @@ pub fn emit_a64_helpers(
             a.b(done);
             a.bind(bwd);
             a.bind(bwd_lp);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.sub_imm(true, Reg::X2, Reg::X2, 1);
             a.ldr_reg_scaled(true, Reg::X6, Reg::X1, Reg::X2, true);
             a.str_reg_scaled(true, Reg::X6, Reg::X0, Reg::X2, true);
@@ -700,9 +933,11 @@ pub fn emit_a64_helpers(
             a.cmp_r(true, Reg::X12, Reg::X11);
             a.b_cond(Cond::Hi, fail);
             a.cbz(true, Reg::X1, done);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldr_uimm(true, Reg::X11, Reg::X9, 0); // ptr
             a.mov_r(true, Reg::X5, Reg::X10);
             a.bind(lp);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.str_reg_scaled(true, Reg::X0, Reg::X11, Reg::X5, true);
             a.add_imm(true, Reg::X5, Reg::X5, 1);
             a.cmp_r(true, Reg::X5, Reg::X12);
@@ -730,11 +965,13 @@ pub fn emit_a64_helpers(
             a.cmp_r(true, Reg::X5, Reg::X10);
             a.b_cond(Cond::Hi, oob);
             a.cbz(true, Reg::X2, done);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.ldr_uimm(true, Reg::X10, Reg::X9, 0);
             a.lsl_imm(true, Reg::X5, Reg::X0, 3);
             a.add_r(true, Reg::X0, Reg::X10, Reg::X5);
             a.movz(true, Reg::X5, 0, 0);
             a.bind(lp);
+            emit_a64_spec_barrier(&mut a, spectre);
             a.str_reg_scaled(true, Reg::X1, Reg::X0, Reg::X5, true);
             a.add_imm(true, Reg::X5, Reg::X5, 1);
             a.cmp_r(true, Reg::X5, Reg::X2);
@@ -2078,118 +2315,7 @@ pub fn emit_a64_exports(
         a.bind(not_exn_init);
         a.mov_r(false, Reg::X25, SGP1);
 
-        let skip_cl_m = a.new_label();
-        let skip_cl_s = a.new_label();
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X0),
-            None,
-            CTX_REG,
-            OFF_MEM_BASE,
-            Reg::X15,
-        );
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X1),
-            None,
-            CTX_REG,
-            OFF_MEM_RESERVE_BYTES,
-            Reg::X15,
-        );
-        a.cbz(true, Reg::X0, skip_cl_m);
-        emit_syscall(&mut a, SYS_MUNMAP);
-        a.bind(skip_cl_m);
-        for &desc_off in &layout.extra_mem_offs {
-            let skip_em = a.new_label();
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X0),
-                None,
-                CTX_REG,
-                desc_off,
-                Reg::X15,
-            );
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X1),
-                None,
-                CTX_REG,
-                desc_off + 24,
-                Reg::X15,
-            );
-            a.cbz(true, Reg::X1, skip_em);
-            emit_syscall(&mut a, SYS_MUNMAP);
-            a.bind(skip_em);
-        }
-        if let Some(exn_off) = layout.exn_state_off {
-            let skip_exn = a.new_label();
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X0),
-                None,
-                CTX_REG,
-                exn_off + 8,
-                Reg::X15,
-            );
-            a.cbz(true, Reg::X0, skip_exn);
-            a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
-            emit_syscall(&mut a, SYS_MUNMAP);
-            a.bind(skip_exn);
-        }
-        for &(desc_off, _, _) in layout.dyn_tables.values() {
-            let skip_dt = a.new_label();
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X0),
-                None,
-                CTX_REG,
-                desc_off,
-                Reg::X15,
-            );
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X1),
-                None,
-                CTX_REG,
-                desc_off + 16,
-                Reg::X15,
-            );
-            a.cbz(true, Reg::X1, skip_dt);
-            emit_syscall(&mut a, SYS_MUNMAP);
-            a.bind(skip_dt);
-        }
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X0),
-            None,
-            CTX_REG,
-            OFF_GUEST_STACK_BASE,
-            Reg::X15,
-        );
-        a.cbz(true, Reg::X0, skip_cl_s);
-        a.mov_imm64(Reg::X1, GUEST_STACK_TOTAL_BYTES as u64);
-        emit_syscall(&mut a, SYS_MUNMAP);
-        a.bind(skip_cl_s);
-        // Load `OFF_HANDLE_ALLOC_BYTES` BEFORE unmapping `CTX_REG`!
-        a.mov_r(true, Reg::X0, CTX_REG);
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X1),
-            None,
-            CTX_REG,
-            OFF_HANDLE_ALLOC_BYTES,
-            Reg::X15,
-        );
-        emit_syscall(&mut a, SYS_MUNMAP);
+        emit_a64_cleanup_ctx(&mut a, CTX_REG, layout);
 
         a.bind(fail_no_ctx);
         let skip_tr = a.new_label();
@@ -2213,123 +2339,13 @@ pub fn emit_a64_exports(
     {
         let mut a = A64Asm::new();
         let ret_now = a.new_label();
-        let skip_m = a.new_label();
-        let skip_s = a.new_label();
         a.cbz(true, Reg::X0, ret_now);
         a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
         a.cbnz(false, Reg::X9, ret_now);
         a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -32);
         a.str_uimm(true, Reg::X19, Reg::SP, 16);
         a.mov_r(true, Reg::X19, Reg::X0);
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X0),
-            None,
-            Reg::X19,
-            OFF_MEM_BASE,
-            Reg::X15,
-        );
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X1),
-            None,
-            Reg::X19,
-            OFF_MEM_RESERVE_BYTES,
-            Reg::X15,
-        );
-        a.cbz(true, Reg::X0, skip_m);
-        emit_syscall(&mut a, SYS_MUNMAP);
-        a.bind(skip_m);
-        for &desc_off in &layout.extra_mem_offs {
-            let skip_em = a.new_label();
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X0),
-                None,
-                Reg::X19,
-                desc_off,
-                Reg::X15,
-            );
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X1),
-                None,
-                Reg::X19,
-                desc_off + 24,
-                Reg::X15,
-            );
-            a.cbz(true, Reg::X1, skip_em);
-            emit_syscall(&mut a, SYS_MUNMAP);
-            a.bind(skip_em);
-        }
-        if let Some(exn_off) = layout.exn_state_off {
-            let skip_exn = a.new_label();
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X0),
-                None,
-                Reg::X19,
-                exn_off + 8,
-                Reg::X15,
-            );
-            a.cbz(true, Reg::X0, skip_exn);
-            a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
-            emit_syscall(&mut a, SYS_MUNMAP);
-            a.bind(skip_exn);
-        }
-        for &(desc_off, _, _) in layout.dyn_tables.values() {
-            let skip_dt = a.new_label();
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X0),
-                None,
-                Reg::X19,
-                desc_off,
-                Reg::X15,
-            );
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X1),
-                None,
-                Reg::X19,
-                desc_off + 16,
-                Reg::X15,
-            );
-            a.cbz(true, Reg::X1, skip_dt);
-            emit_syscall(&mut a, SYS_MUNMAP);
-            a.bind(skip_dt);
-        }
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X0),
-            None,
-            Reg::X19,
-            OFF_GUEST_STACK_BASE,
-            Reg::X15,
-        );
-        a.cbz(true, Reg::X0, skip_s);
-        a.mov_imm64(Reg::X1, GUEST_STACK_TOTAL_BYTES as u64);
-        emit_syscall(&mut a, SYS_MUNMAP);
-        a.bind(skip_s);
-        a.mov_r(true, Reg::X0, Reg::X19);
-        emit_load_off(
-            &mut a,
-            Ty::I64,
-            Some(Reg::X1),
-            None,
-            Reg::X19,
-            OFF_HANDLE_ALLOC_BYTES,
-            Reg::X15,
-        );
-        emit_syscall(&mut a, SYS_MUNMAP);
+        emit_a64_cleanup_ctx(&mut a, Reg::X19, layout);
         a.ldr_uimm(true, Reg::X19, Reg::SP, 16);
         a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 32);
         a.bind(ret_now);

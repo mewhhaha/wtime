@@ -5352,7 +5352,14 @@ fn emit_rt_exports_c(
          \x20 uint8_t tr = wt_init_fn(&h->ctx, h->mem);\n\
          \x20 wt_set_fp_mode(saved_fp_mode);\n\
          \x20 h->ctx.in_call = 0;\n\
-         \x20 if (tr) { if (trap_out) *trap_out = tr; free(h->mem); free(h); return NULL; }\n\
+         \x20 if (tr) {\n\
+         \x20   if (trap_out) *trap_out = tr;\n\
+         #ifdef WT_SPECTRE_MITIGATIONS\n\
+         \x20   if (h->mem) wt_secure_zero(h->mem, h->ctx.mem.len);\n\
+         \x20   wt_secure_zero(&h->ctx, sizeof(h->ctx));\n\
+         #endif\n\
+         \x20   free(h->mem); free(h); return NULL;\n\
+         \x20 }\n\
          \x20 return h;\n\
          }\n\n\
          WT_EXPORT void blot_aot_drop(BlotHandle *h) {\n\
