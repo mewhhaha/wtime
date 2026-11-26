@@ -498,7 +498,8 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::ExnGetActive
         | Op::ExnClearActive
         | Op::Trap(_) => {}
-        Op::I32Eqz(a)
+        Op::Copy(a)
+        | Op::I32Eqz(a)
         | Op::I64Eqz(a)
         | Op::I32Clz(a)
         | Op::I32Ctz(a)
@@ -2592,6 +2593,7 @@ fn clone_callee_into_caller(
                 Op::ConstF32(c) => Op::ConstF32(c),
                 Op::ConstF64(c) => Op::ConstF64(c),
                 Op::ConstV128(idx) => Op::ConstV128(base_v128 + idx),
+                Op::Copy(a) => Op::Copy(map_v(a)),
                 Op::I32Eqz(a) => Op::I32Eqz(map_v(a)),
                 Op::I64Eqz(a) => Op::I64Eqz(map_v(a)),
                 Op::I32Clz(a) => Op::I32Clz(map_v(a)),
@@ -8891,7 +8893,8 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::ExnGetActive
         | Op::ExnClearActive
         | Op::Trap(_) => {}
-        Op::I32Eqz(a)
+        Op::Copy(a)
+        | Op::I32Eqz(a)
         | Op::I64Eqz(a)
         | Op::I32Clz(a)
         | Op::I32Ctz(a)
@@ -11569,6 +11572,7 @@ pub fn optimize_func_stage2_with_options(
         if thread_empty_branch_trampolines(ir) {
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
         }
+        let _ = split_live_ranges_for_regalloc(ir, &dom, budget)?;
         let _ = post_rot_changed;
         Ok(())
     })();
@@ -11577,6 +11581,498 @@ pub fn optimize_func_stage2_with_options(
     scratch.cfg_scratch = cfg_sc;
     scratch.prune_scratch = prune_sc;
     res
+}
+
+/// Late pre-regalloc SSA live-range splitting around call-free natural loops.
+///
+/// When a non-constant value `v` defined outside a call-free natural loop `L` also crosses a
+/// call/helper clobber outside `L` (either before `L`'s unique preheader `ph` or after `L`),
+/// linear-scan regalloc would otherwise forbid `v` from using caller-saved registers inside `L`
+/// and force spills inside the inner loop when callee-saved registers are full. Inserting
+/// `v_loop = Op::Copy(v)` at the end of `ph` and rewriting `L`'s uses to `v_loop` lets `v_loop`
+/// live in a fast caller-saved register throughout `L` while coalescing to 0 bytes whenever `v`
+/// already fits in a callee-saved register.
+fn split_live_ranges_for_regalloc(
+    ir: &mut IrFunc,
+    dom: &CfgDom,
+    budget: Option<&CompileBudget>,
+) -> Res<bool> {
+    let n_blocks = ir.blocks.len();
+    if n_blocks <= 2 || !ir.blocks.iter().any(|b| b.is_loop_header) {
+        return Ok(false);
+    }
+    if let Some(bg) = budget {
+        bg.check_deadline()?;
+    }
+
+    let op_clobbers_caller = |op: &Op| -> bool {
+        matches!(
+            op,
+            Op::Call { .. }
+                | Op::CallIndirect { .. }
+                | Op::MemGrow(_)
+                | Op::MemGrowIdx { .. }
+                | Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemFill { .. }
+                | Op::MemFillIdx { .. }
+                | Op::MemInit { .. }
+                | Op::TableInit { .. }
+                | Op::TableCopy { .. }
+                | Op::TableGrow { .. }
+                | Op::TableFill { .. }
+        )
+    };
+    let term_clobbers_caller = |term: &Term| -> bool {
+        matches!(
+            term,
+            Term::CallCatch { .. }
+                | Term::CallIndirectCatch { .. }
+                | Term::ReturnCall { .. }
+                | Term::ReturnCallIndirect { .. }
+        )
+    };
+
+    // 1. Identify blocks with call/helper clobbers (fast exit if function is call-free).
+    let mut blk_has_call = vec![false; n_blocks];
+    let mut last_call_slot = vec![0usize; n_blocks];
+    let mut call_blocks: Vec<u32> = Vec::new();
+    for &b in &dom.rpo {
+        let bi = b as usize;
+        let bb = &ir.blocks[bi];
+        let mut last = 0usize;
+        for (ii, inst) in bb.insts.iter().enumerate() {
+            if op_clobbers_caller(&inst.op) {
+                last = ii + 1;
+            }
+        }
+        if term_clobbers_caller(&bb.term) {
+            last = usize::MAX;
+        }
+        if last != 0 {
+            blk_has_call[bi] = true;
+            last_call_slot[bi] = last;
+            call_blocks.push(b);
+        }
+    }
+    if call_blocks.is_empty() {
+        return Ok(false);
+    }
+
+    // 2. Record defining block, slot, and const-ness for each SSA value.
+    let n_init_vals = ir.val_tys.len();
+    let mut def_blk = vec![u32::MAX; n_init_vals];
+    let mut def_slot = vec![0usize; n_init_vals];
+    let mut is_const = vec![false; n_init_vals];
+    let mut total_uses = vec![0u32; n_init_vals];
+    for &b in &dom.rpo {
+        let bb = &ir.blocks[b as usize];
+        for &p in &bb.params {
+            let vi = p.0 as usize;
+            def_blk[vi] = b;
+            def_slot[vi] = 0;
+        }
+        for (ii, inst) in bb.insts.iter().enumerate() {
+            inst.op.for_each_use(&ir.val_pool, |v| {
+                let vi = v.0 as usize;
+                total_uses[vi] = total_uses[vi].saturating_add(1);
+            });
+            if let Some(r) = inst.res {
+                let vi = r.0 as usize;
+                def_blk[vi] = b;
+                def_slot[vi] = ii + 1;
+                is_const[vi] = matches!(
+                    inst.op,
+                    Op::ConstI32(_)
+                        | Op::ConstI64(_)
+                        | Op::ConstF32(_)
+                        | Op::ConstF64(_)
+                        | Op::ConstV128(_)
+                );
+            }
+            match inst.op {
+                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                    for &rv in ir.pool_slice(rets) {
+                        let vi = rv.0 as usize;
+                        def_blk[vi] = b;
+                        def_slot[vi] = ii + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+            let vi = v.0 as usize;
+            total_uses[vi] = total_uses[vi].saturating_add(1);
+        });
+    }
+
+    // 3. Visit loop headers in RPO (outermost call-free loops first).
+    let mut in_body = vec![false; n_blocks];
+    let mut body_blocks: Vec<u32> = Vec::new();
+    let mut reaches_ph = vec![false; n_blocks];
+    let mut body_use_cnt = vec![0u32; n_init_vals];
+    let mut body_used_vals: Vec<Val> = Vec::new();
+    let mut changed = false;
+    let mut total_splits = 0usize;
+    const MAX_SPLITS_PER_LOOP: usize = 16;
+    const MAX_SPLITS_PER_FN: usize = 128;
+
+    let headers: Vec<u32> = dom
+        .rpo
+        .iter()
+        .copied()
+        .filter(|&b| ir.blocks[b as usize].is_loop_header)
+        .collect();
+
+    for h in headers {
+        if total_splits >= MAX_SPLITS_PER_FN
+            || ir.val_tys.len().saturating_add(MAX_SPLITS_PER_LOOP) > MAX_IR_VALS_PER_FN
+        {
+            break;
+        }
+        if let Some(bg) = budget {
+            bg.check_deadline()?;
+        }
+
+        // Collect backedges and natural loop body.
+        let mut latches: Vec<u32> = Vec::new();
+        for &p in dom.preds(h) {
+            if dom.dominates(h, p) {
+                latches.push(p);
+            }
+        }
+        if latches.is_empty() {
+            continue;
+        }
+        body_blocks.clear();
+        in_body[h as usize] = true;
+        body_blocks.push(h);
+        let mut wl = Vec::new();
+        for l in latches {
+            if !in_body[l as usize] {
+                in_body[l as usize] = true;
+                body_blocks.push(l);
+                wl.push(l);
+            }
+        }
+        while let Some(u) = wl.pop() {
+            for &p in dom.preds(u) {
+                if !in_body[p as usize] {
+                    in_body[p as usize] = true;
+                    body_blocks.push(p);
+                    wl.push(p);
+                }
+            }
+        }
+
+        // Require the entire natural loop body to be free of call/helper clobbers.
+        let mut loop_has_call = false;
+        for &b in &body_blocks {
+            if blk_has_call[b as usize] {
+                loop_has_call = true;
+                break;
+            }
+        }
+        if loop_has_call {
+            for &b in &body_blocks {
+                in_body[b as usize] = false;
+            }
+            continue;
+        }
+
+        // Require a unique non-loop preheader `ph` dominating `h` and safe for appending copies.
+        let mut ph_opt: Option<u32> = None;
+        let mut unique_ph = true;
+        for &p in dom.preds(h) {
+            if !in_body[p as usize] {
+                if ph_opt.is_none() {
+                    ph_opt = Some(p);
+                } else {
+                    unique_ph = false;
+                    break;
+                }
+            }
+        }
+        let Some(ph) = ph_opt else {
+            for &b in &body_blocks {
+                in_body[b as usize] = false;
+            }
+            continue;
+        };
+        if !unique_ph
+            || ph == h
+            || in_body[ph as usize]
+            || !dom.dominates(ph, h)
+            || matches!(
+                ir.blocks[ph as usize].term,
+                Term::CallCatch { .. } | Term::CallIndirectCatch { .. }
+            )
+        {
+            for &b in &body_blocks {
+                in_body[b as usize] = false;
+            }
+            continue;
+        }
+
+        // Count uses inside `body_blocks`.
+        body_used_vals.clear();
+        for &b in &body_blocks {
+            let bb = &ir.blocks[b as usize];
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    let vi = v.0 as usize;
+                    if vi < body_use_cnt.len() {
+                        if body_use_cnt[vi] == 0 {
+                            body_used_vals.push(v);
+                        }
+                        body_use_cnt[vi] = body_use_cnt[vi].saturating_add(1);
+                    }
+                });
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                let vi = v.0 as usize;
+                if vi < body_use_cnt.len() {
+                    if body_use_cnt[vi] == 0 {
+                        body_used_vals.push(v);
+                    }
+                    body_use_cnt[vi] = body_use_cnt[vi].saturating_add(1);
+                }
+            });
+        }
+
+        // Mark all blocks that can reach `ph` (used to detect calls between `def_blk[v]` and `ph`).
+        let mut reach_list: Vec<u32> = Vec::new();
+        reaches_ph[ph as usize] = true;
+        reach_list.push(ph);
+        let mut rwl = vec![ph];
+        while let Some(u) = rwl.pop() {
+            for &p in dom.preds(u) {
+                if !reaches_ph[p as usize] {
+                    reaches_ph[p as usize] = true;
+                    reach_list.push(p);
+                    rwl.push(p);
+                }
+            }
+        }
+        let call_before_ph_blocks: Vec<u32> = call_blocks
+            .iter()
+            .copied()
+            .filter(|&c| reaches_ph[c as usize])
+            .collect();
+        let outside_call_blocks: Vec<u32> = call_blocks
+            .iter()
+            .copied()
+            .filter(|&c| !in_body[c as usize])
+            .collect();
+
+        // Filter candidates defined outside `body` that cross a call outside `body`.
+        let mut candidates: Vec<(u32, Val)> = Vec::new();
+        for &v in &body_used_vals {
+            let vi = v.0 as usize;
+            if is_const[vi] {
+                continue;
+            }
+            let db = def_blk[vi];
+            if db == u32::MAX || in_body[db as usize] || !dom.dominates(db, ph) {
+                continue;
+            }
+            let crosses_call_before_ph = (blk_has_call[db as usize]
+                && last_call_slot[db as usize] > def_slot[vi])
+                || call_before_ph_blocks
+                    .iter()
+                    .any(|&c| c != db && dom.dominates(db, c));
+            let used_outside = total_uses[vi] > body_use_cnt[vi];
+            let crosses_call_outside = used_outside
+                && outside_call_blocks
+                    .iter()
+                    .any(|&c| c != db && dom.dominates(db, c));
+            if crosses_call_before_ph || crosses_call_outside {
+                candidates.push((body_use_cnt[vi], v));
+            }
+        }
+        // Reset per-loop scratch flags early.
+        for &b in &reach_list {
+            reaches_ph[b as usize] = false;
+        }
+        for &v in &body_used_vals {
+            body_use_cnt[v.0 as usize] = 0;
+        }
+
+        if candidates.is_empty() {
+            for &b in &body_blocks {
+                in_body[b as usize] = false;
+            }
+            continue;
+        }
+
+        // Split the hottest values first (descending in-loop use count, deterministic tiebreak).
+        candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
+        let cap = MAX_SPLITS_PER_LOOP.min(MAX_SPLITS_PER_FN - total_splits);
+        candidates.truncate(cap);
+
+        let mut split_map: HashMap<Val, Val> = HashMap::default();
+        for &(_, v) in &candidates {
+            if ir.val_tys.len() >= MAX_IR_VALS_PER_FN {
+                break;
+            }
+            let ty = ir.val_tys[v.0 as usize];
+            let nv = Val(ir.val_tys.len() as u32);
+            ir.val_tys.push(ty);
+            ir.blocks[ph as usize].insts.push(Inst {
+                res: Some(nv),
+                op: Op::Copy(v),
+            });
+            let slot = ir.blocks[ph as usize].insts.len();
+            def_blk.push(ph);
+            def_slot.push(slot);
+            is_const.push(false);
+            total_uses.push(0);
+            body_use_cnt.push(0);
+            split_map.insert(v, nv);
+            total_splits += 1;
+            changed = true;
+        }
+
+        if !split_map.is_empty() {
+            // Rewrite uses inside `body_blocks`, cloning any modified `ValRange` slice so shared
+            // pool slices outside the loop can never be mutated.
+            let remap_val = |v: &mut Val, map: &HashMap<Val, Val>| {
+                if let Some(&nv) = map.get(v) {
+                    *v = nv;
+                }
+            };
+            let clone_remapped_range =
+                |pool: &mut Vec<Val>, r: ValRange, map: &HashMap<Val, Val>| -> ValRange {
+                    let s = r.start as usize;
+                    let e = s + r.len as usize;
+                    if !pool[s..e].iter().any(|v| map.contains_key(v)) {
+                        return r;
+                    }
+                    if pool.len().saturating_add(r.len as usize) > MAX_VAL_POOL_PER_FN {
+                        return r;
+                    }
+                    let new_start = pool.len() as u32;
+                    pool.reserve(r.len as usize);
+                    for idx in s..e {
+                        let v = pool[idx];
+                        pool.push(map.get(&v).copied().unwrap_or(v));
+                    }
+                    ValRange {
+                        start: new_start,
+                        len: r.len,
+                    }
+                };
+            for &b in &body_blocks {
+                let bb = &mut ir.blocks[b as usize];
+                for inst in &mut bb.insts {
+                    remap_op_uses_map(&mut inst.op, &split_map);
+                    match &mut inst.op {
+                        Op::Call { args, .. }
+                        | Op::CallIndirect { args, .. }
+                        | Op::ExnAlloc { args, .. } => {
+                            *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
+                        }
+                        _ => {}
+                    }
+                }
+                match &mut bb.term {
+                    Term::Jump { args, .. } => {
+                        *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
+                    }
+                    Term::BranchIf {
+                        cond,
+                        then_args,
+                        else_args,
+                        ..
+                    } => {
+                        remap_val(cond, &split_map);
+                        *then_args = clone_remapped_range(&mut ir.val_pool, *then_args, &split_map);
+                        *else_args = clone_remapped_range(&mut ir.val_pool, *else_args, &split_map);
+                    }
+                    Term::CmpBranch {
+                        kind,
+                        a,
+                        b,
+                        then_args,
+                        else_args,
+                        ..
+                    } => {
+                        remap_val(a, &split_map);
+                        if !matches!(kind, CmpBranchKind::I32Imm(..) | CmpBranchKind::I64Imm(..)) {
+                            remap_val(b, &split_map);
+                        } else {
+                            *b = *a;
+                        }
+                        *then_args = clone_remapped_range(&mut ir.val_pool, *then_args, &split_map);
+                        *else_args = clone_remapped_range(&mut ir.val_pool, *else_args, &split_map);
+                    }
+                    Term::BrTable { idx, table_idx } => {
+                        remap_val(idx, &split_map);
+                        let bt = &mut ir.br_tables[*table_idx as usize];
+                        let mut range_map: Vec<(ValRange, ValRange)> = Vec::new();
+                        for &mut (_, ref mut uargs) in &mut bt.unique_edges {
+                            let old = *uargs;
+                            let new = clone_remapped_range(&mut ir.val_pool, old, &split_map);
+                            if new != old {
+                                *uargs = new;
+                                range_map.push((old, new));
+                            }
+                        }
+                        if !range_map.is_empty() {
+                            for &mut (_, ref mut targs) in &mut bt.targets {
+                                if let Some(&(_, nr)) =
+                                    range_map.iter().find(|&&(o, _)| o == *targs)
+                                {
+                                    *targs = nr;
+                                }
+                            }
+                            if let Some(&(_, nr)) =
+                                range_map.iter().find(|&&(o, _)| o == bt.default.1)
+                            {
+                                bt.default.1 = nr;
+                            }
+                        }
+                    }
+                    Term::Return { vals } => {
+                        *vals = clone_remapped_range(&mut ir.val_pool, *vals, &split_map);
+                    }
+                    Term::ReturnCall { args, .. } => {
+                        *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
+                    }
+                    Term::ReturnCallIndirect { idx, args, .. } => {
+                        remap_val(idx, &split_map);
+                        *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
+                    }
+                    Term::CallCatch {
+                        args, catch_args, ..
+                    } => {
+                        *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
+                        *catch_args =
+                            clone_remapped_range(&mut ir.val_pool, *catch_args, &split_map);
+                    }
+                    Term::CallIndirectCatch {
+                        idx,
+                        args,
+                        catch_args,
+                        ..
+                    } => {
+                        remap_val(idx, &split_map);
+                        *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
+                        *catch_args =
+                            clone_remapped_range(&mut ir.val_pool, *catch_args, &split_map);
+                    }
+                    Term::ThrowActive | Term::Unreachable => {}
+                }
+            }
+        }
+
+        for &b in &body_blocks {
+            in_body[b as usize] = false;
+        }
+    }
+
+    Ok(changed)
 }
 
 /// Late CFG cleanup: threads single-predecessor empty jump trampolines off `BranchIf`/`CmpBranch`

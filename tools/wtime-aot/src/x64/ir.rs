@@ -382,6 +382,9 @@ pub enum Op {
     ConstF32(u32),
     ConstF64(u64),
     ConstV128(u32), // index into IrFunc::v128_consts
+    /// Explicit SSA copy inserted by late live-range splitting before register allocation
+    /// (coalesces to 0 bytes when `dst` and `src` receive the same physical location).
+    Copy(Val),
 
     I32Eqz(Val),
     I64Eqz(Val),
@@ -851,7 +854,8 @@ impl Op {
             | Op::ExnGetActive
             | Op::ExnClearActive
             | Op::Trap(_) => {}
-            Op::I32Eqz(a)
+            Op::Copy(a)
+            | Op::I32Eqz(a)
             | Op::I64Eqz(a)
             | Op::I32Clz(a)
             | Op::I32Ctz(a)

@@ -24,7 +24,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use super::asm::{Reg, VReg};
-use crate::x64::ir::{FloatBinOp, IntBinOp, IrFunc, Op, SimdLaneKind, Term, Ty, ValRange};
+use crate::x64::ir::{FloatBinOp, IntBinOp, IrFunc, Op, SimdLaneKind, Term, Ty, Val, ValRange};
 use crate::x64::module::{
     CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS,
 };
@@ -126,6 +126,12 @@ pub enum A64Loc {
     Fp(VReg),
     Spill(i32),
     Remat(A64RematConst),
+    RematAddr {
+        base_val: Val,
+        base_reg: Reg,
+        disp: i32,
+        is64: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +209,7 @@ struct Interval {
     clob_fp: u32,
     score: u64,
     remat: Option<A64RematConst>,
+    remat_addr: Option<(u32, i32, bool)>,
     remat_hoisted: bool,
 }
 
@@ -215,6 +222,8 @@ struct ActiveEntry {
     ty: Ty,
     score: u64,
     remat: Option<A64RematConst>,
+    remat_addr: Option<(u32, i32, bool)>,
+    pinned_by_remat: bool,
 }
 
 const GP_CALLER_COUNT: usize = 16;
@@ -482,6 +491,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut cross_block = vec![false; n_vals];
     let mut last_use = vec![0u32; n_vals];
     let mut val_remat: Vec<Option<A64RematConst>> = vec![None; n_vals];
+    let mut val_remat_addr: Vec<Option<(u32, i32, bool)>> = vec![None; n_vals];
     let mut clobbers: Vec<(u32, u32, u32)> = Vec::new();
     let mut max_out_args = 0i32;
     let mut max_ret_buf = 0i32;
@@ -556,6 +566,16 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 match inst.op {
                     Op::ConstI32(c) => val_remat[r.0 as usize] = Some(A64RematConst::I32(c)),
                     Op::ConstI64(c) => val_remat[r.0 as usize] = Some(A64RematConst::I64(c)),
+                    Op::I32BinImm(IntBinOp::Add, base, disp)
+                        if disp != 0 && disp.unsigned_abs() < 4096 =>
+                    {
+                        val_remat_addr[r.0 as usize] = Some((base.0, disp, false));
+                    }
+                    Op::I64BinImm(IntBinOp::Add, base, disp)
+                        if disp != 0 && disp.unsigned_abs() < 4096 =>
+                    {
+                        val_remat_addr[r.0 as usize] = Some((base.0, disp, true));
+                    }
                     _ => {}
                 }
             }
@@ -987,6 +1007,10 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             if let Some(r) = inst.res {
                 val_weight[r.0 as usize] = val_weight[r.0 as usize].saturating_add(w);
                 match inst.op {
+                    Op::Copy(a) => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                        add_peer(&mut hint_peers, a.0, r.0);
+                    }
                     Op::I32Bin(bop, a, b) | Op::I64Bin(bop, a, b) => {
                         add_peer(&mut hint_peers, r.0, a.0);
                         if matches!(
@@ -1163,6 +1187,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             clob_fp: cfp,
             score,
             remat,
+            remat_addr: val_remat_addr[vi],
             remat_hoisted,
         };
         if ty.is_fp() {
@@ -1311,14 +1336,50 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 ty: iv.ty,
                 score: iv.score,
                 remat: iv.remat,
+                remat_addr: iv.remat_addr,
+                pinned_by_remat: false,
             });
         } else if let Some(rc) = iv.remat {
             locs[iv.val as usize] = A64Loc::Remat(rc);
             assigned[iv.val as usize] = true;
         } else {
+            let try_remat_addr = |cand_start: u32,
+                                  cand_end: u32,
+                                  cand_clob_gp: u32,
+                                  ra: Option<(u32, i32, bool)>,
+                                  locs: &[A64Loc],
+                                  assigned: &[bool],
+                                  active: &mut [ActiveEntry]|
+             -> Option<A64Loc> {
+                let (base_u, disp, is64) = ra?;
+                let bi = base_u as usize;
+                if !assigned[bi] {
+                    return None;
+                }
+                let A64Loc::Gp(bg) = locs[bi] else {
+                    return None;
+                };
+                if (cand_clob_gp & (1u32 << bg.0)) != 0 {
+                    return None;
+                }
+                if iv_start[bi] > cand_start || cand_end > iv_end[bi].max(iv_start[bi] + 1) {
+                    return None;
+                }
+                let entry = active.iter_mut().find(|a| a.val == base_u)?;
+                entry.pinned_by_remat = true;
+                Some(A64Loc::RematAddr {
+                    base_val: Val(base_u),
+                    base_reg: bg,
+                    disp,
+                    is64,
+                })
+            };
             // Evict a rematerializable constant or strictly lower-score active entry if beneficial.
             let mut best_ai: Option<(usize, bool, u64, u32)> = None;
             for (ai, a) in active_gp.iter().enumerate() {
+                if a.pinned_by_remat {
+                    continue;
+                }
                 let r = GP_ALLOC[a.reg_idx];
                 if (iv.clob_gp & (1u32 << r.0)) != 0 {
                     continue;
@@ -1337,11 +1398,35 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     best_ai = Some((ai, is_remat, a.score, a.end));
                 }
             }
-            if let Some((ai, _, _, _)) = best_ai {
+            let avoid_real_spill = best_ai.is_none_or(|(_, is_remat, _, _)| !is_remat);
+            if avoid_real_spill
+                && let Some(ra_loc) = try_remat_addr(
+                    iv.start,
+                    iv.end,
+                    iv.clob_gp,
+                    iv.remat_addr,
+                    &locs,
+                    &assigned,
+                    &mut active_gp,
+                )
+            {
+                locs[iv.val as usize] = ra_loc;
+                assigned[iv.val as usize] = true;
+            } else if let Some((ai, _, _, _)) = best_ai {
                 let ev = active_gp.swap_remove(ai);
                 let r = GP_ALLOC[ev.reg_idx];
                 if let Some(rc) = ev.remat {
                     locs[ev.val as usize] = A64Loc::Remat(rc);
+                } else if let Some(ra_loc) = try_remat_addr(
+                    ev.start,
+                    ev.end,
+                    val_clob_gp[ev.val as usize],
+                    ev.remat_addr,
+                    &locs,
+                    &assigned,
+                    &mut active_gp,
+                ) {
+                    locs[ev.val as usize] = ra_loc;
                 } else {
                     let sp = alloc_spill(
                         ev.ty,
@@ -1363,6 +1448,8 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     ty: iv.ty,
                     score: iv.score,
                     remat: None,
+                    remat_addr: iv.remat_addr,
+                    pinned_by_remat: false,
                 });
             } else {
                 let sp = alloc_spill(
@@ -1471,6 +1558,8 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 ty: iv.ty,
                 score: iv.score,
                 remat: None,
+                remat_addr: None,
+                pinned_by_remat: false,
             });
         } else {
             let mut best_ai: Option<(usize, u64, u32)> = None;
@@ -1512,6 +1601,8 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     ty: iv.ty,
                     score: iv.score,
                     remat: None,
+                    remat_addr: None,
+                    pinned_by_remat: false,
                 });
             } else {
                 let sp = alloc_spill(

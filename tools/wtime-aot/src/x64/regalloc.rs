@@ -22,7 +22,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use super::asm::{Gp, Xmm};
-use super::ir::{IntBinOp, IrFunc, Op, Term, Ty};
+use super::ir::{IntBinOp, IrFunc, Op, Term, Ty, Val};
 use super::module::{CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS};
 
 /// Pure scalar constant value that can be rematerialized cheaply at use sites with zero stack slot.
@@ -53,6 +53,14 @@ pub enum Loc {
     Spill(i32),
     /// Rematerialized constant (zero stack slot, zero def code, zero register/clobber interference).
     Remat(RematConst),
+    /// Rematerialized address offset `base_reg + disp` (zero stack slot, zero def code, computed
+    /// at use sites via a single 1-cycle `lea` while `base_val` stays pinned in `base_reg`).
+    RematAddr {
+        base_val: Val,
+        base_reg: Gp,
+        disp: i32,
+        is64: bool,
+    },
 }
 
 /// Optional module-wide extra callee-saved GP registers and ISA clobber flags.
@@ -416,6 +424,7 @@ struct Interval {
     clob_xmm: u16,
     score: u64,
     remat: Option<RematConst>,
+    remat_addr: Option<(u32, i32, bool)>,
     /// True when this non-zero constant is loop-invariant (defined at lower loop depth than a use)
     /// and may occupy a free callee-saved GP register to avoid in-loop constant rematerialization.
     remat_hoisted: bool,
@@ -431,6 +440,8 @@ struct ActiveEntry {
     val: u32,
     score: u64,
     remat: Option<RematConst>,
+    remat_addr: Option<(u32, i32, bool)>,
+    pinned_by_remat: bool,
 }
 
 #[inline]
@@ -525,6 +536,8 @@ pub struct RegallocScratch {
     last_use: Vec<u32>,
     cross_block: Vec<bool>,
     val_remat: Vec<Option<RematConst>>,
+    val_remat_addr: Vec<Option<(u32, i32, bool)>>,
+    val_iv_span: Vec<(u32, u32, u16)>,
     clobbers: Vec<Clobber>,
     clob_seg: Vec<(u16, u16)>,
     live_use: Vec<u64>,
@@ -927,12 +940,14 @@ pub fn allocate_with_config_and_scratch(
     reset_fill(&mut scratch.last_use, n_vals, 0u32);
     reset_fill(&mut scratch.cross_block, n_vals, false);
     reset_fill(&mut scratch.val_remat, n_vals, None);
+    reset_fill(&mut scratch.val_remat_addr, n_vals, None);
     scratch.clobbers.clear();
     let def_pos = &mut scratch.def_pos;
     let def_block = &mut scratch.def_block;
     let last_use = &mut scratch.last_use;
     let cross_block = &mut scratch.cross_block;
     let val_remat = &mut scratch.val_remat;
+    let val_remat_addr = &mut scratch.val_remat_addr;
     let clobbers = &mut scratch.clobbers;
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
@@ -1113,6 +1128,15 @@ pub fn allocate_with_config_and_scratch(
                     Op::ConstI64(c) => Some(RematConst::I64(c)),
                     Op::ConstF32(b) => Some(RematConst::F32(b)),
                     Op::ConstF64(b) => Some(RematConst::F64(b)),
+                    _ => None,
+                };
+                val_remat_addr[vi] = match inst.op {
+                    Op::I32BinImm(IntBinOp::Add, base, disp) if disp != 0 => {
+                        Some((base.0, disp, false))
+                    }
+                    Op::I64BinImm(IntBinOp::Add, base, disp) if disp != 0 => {
+                        Some((base.0, disp, true))
+                    }
                     _ => None,
                 };
             }
@@ -1887,6 +1911,10 @@ pub fn allocate_with_config_and_scratch(
                     val_non_trap[r.0 as usize] = true;
                 }
                 match inst.op {
+                    Op::Copy(a) => {
+                        add_peer(hint_peers, r.0, a.0);
+                        add_peer(hint_peers, a.0, r.0);
+                    }
                     Op::I32Bin(bop, a, b) | Op::I64Bin(bop, a, b) => {
                         add_peer(hint_peers, r.0, a.0);
                         if matches!(
@@ -2122,10 +2150,12 @@ pub fn allocate_with_config_and_scratch(
     }
     reset_fill(&mut scratch.val_clob_gp, n_vals, 0u16);
     reset_fill(&mut scratch.val_clob_xmm, n_vals, 0u16);
+    reset_fill(&mut scratch.val_iv_span, n_vals, (0u32, 0u32, 0u16));
     scratch.gp_intervals.clear();
     scratch.fp_intervals.clear();
     let val_clob_gp = &mut scratch.val_clob_gp;
     let val_clob_xmm = &mut scratch.val_clob_xmm;
+    let val_iv_span = &mut scratch.val_iv_span;
     let gp_intervals = &mut scratch.gp_intervals;
     let fp_intervals = &mut scratch.fp_intervals;
     let def_pos = &scratch.def_pos;
@@ -2134,6 +2164,7 @@ pub fn allocate_with_config_and_scratch(
     let cb_id = &scratch.cb_id;
     let cb_hull = &scratch.cb_hull;
     let val_remat = &scratch.val_remat;
+    let val_remat_addr = &scratch.val_remat_addr;
     let val_weight = &scratch.val_weight;
     let max_use_loop_depth = &scratch.max_use_loop_depth;
     let val_non_trap = &scratch.val_non_trap;
@@ -2218,6 +2249,7 @@ pub fn allocate_with_config_and_scratch(
             };
         val_clob_gp[vi] = clob_gp;
         val_clob_xmm[vi] = clob_xmm;
+        val_iv_span[vi] = (start, end, seg_len);
         let ty = ir.val_tys[vi];
         let mut remat_hoisted = false;
         if let Some(rc) = val_remat[vi] {
@@ -2261,6 +2293,7 @@ pub fn allocate_with_config_and_scratch(
             clob_xmm,
             score,
             remat: val_remat[vi],
+            remat_addr: val_remat_addr[vi],
             remat_hoisted,
         };
         if iv.ty.is_fp() {
@@ -2485,11 +2518,47 @@ pub fn allocate_with_config_and_scratch(
                 val: iv.val,
                 score: iv.score,
                 remat: iv.remat,
+                remat_addr: iv.remat_addr,
+                pinned_by_remat: false,
             });
         } else if let Some(rc) = iv.remat {
             locs[iv.val as usize] = Loc::Remat(rc);
             assigned[iv.val as usize] = true;
         } else {
+            // Helper: try rematerializing `base + disp` via 1-cycle `lea` instead of spilling,
+            // pinning `base` in `active_gp` so no later interval can evict it.
+            let try_remat_addr = |cand_start: u32,
+                                  cand_end: u32,
+                                  cand_clob_gp: u16,
+                                  ra: Option<(u32, i32, bool)>,
+                                  locs: &[Loc],
+                                  assigned: &[bool],
+                                  active: &mut [ActiveEntry]|
+             -> Option<Loc> {
+                let (base_u, disp, is64) = ra?;
+                let bi = base_u as usize;
+                if !assigned[bi] {
+                    return None;
+                }
+                let Loc::Gp(bg) = locs[bi] else {
+                    return None;
+                };
+                if (cand_clob_gp & (1 << bg.id())) != 0 {
+                    return None;
+                }
+                let (bs, be, bseg) = val_iv_span[bi];
+                if bseg != 0 || bs > cand_start || cand_end > be {
+                    return None;
+                }
+                let entry = active.iter_mut().find(|a| a.val == base_u)?;
+                entry.pinned_by_remat = true;
+                Some(Loc::RematAddr {
+                    base_val: Val(base_u),
+                    base_reg: bg,
+                    disp,
+                    is64,
+                })
+            };
             // Find the lowest-cost evictable register (evicting ALL active entries on `ri` overlapping `iv`).
             let mut best_ri: Option<(usize, u64, usize, u32)> = None;
             for (ri, &g) in gp_alloc.iter().enumerate() {
@@ -2500,6 +2569,10 @@ pub fn allocate_with_config_and_scratch(
                 let mut ok = true;
                 for a in active_gp.iter() {
                     if a.reg_idx as usize == ri && active_overlaps_iv(a, iv, &segs_pool) {
+                        if a.pinned_by_remat {
+                            ok = false;
+                            break;
+                        }
                         cnt += 1;
                         if a.score > max_sc {
                             max_sc = a.score;
@@ -2529,30 +2602,58 @@ pub fn allocate_with_config_and_scratch(
                     best_ri = Some((ri, max_sc, cnt, max_end));
                 }
             }
-            if let Some((ri, _, _, _)) = best_ri {
+            // Prefer 1-cycle address rematerialization (`lea`) over spilling a real value (`score >= 2`).
+            let avoid_real_spill = best_ri.is_none_or(|(_, bsc, _, _)| bsc >= 2);
+            if avoid_real_spill
+                && let Some(ra_loc) = try_remat_addr(
+                    iv.start,
+                    iv.end,
+                    iv.clob_gp,
+                    iv.remat_addr,
+                    &locs,
+                    assigned,
+                    active_gp,
+                )
+            {
+                locs[iv.val as usize] = ra_loc;
+                assigned[iv.val as usize] = true;
+            } else if let Some((ri, _, _, _)) = best_ri {
                 let g = gp_alloc[ri];
+                let mut evicted: Vec<ActiveEntry> = Vec::new();
                 let mut i = active_gp.len();
                 while i > 0 {
                     i -= 1;
                     if active_gp[i].reg_idx as usize == ri
                         && active_overlaps_iv(&active_gp[i], iv, &segs_pool)
                     {
-                        let ev = active_gp.swap_remove(i);
-                        if let Some(rc) = ev.remat {
-                            locs[ev.val as usize] = Loc::Remat(rc);
-                        } else {
-                            let sp = alloc_spill8(
-                                ev.val,
-                                ev.start,
-                                ev.end,
-                                &locs,
-                                assigned,
-                                slot8_end,
-                                free_spills8,
-                                &mut next_spill_off,
-                            )?;
-                            locs[ev.val as usize] = Loc::Spill(sp);
-                        }
+                        evicted.push(active_gp.swap_remove(i));
+                    }
+                }
+                for ev in evicted {
+                    if let Some(rc) = ev.remat {
+                        locs[ev.val as usize] = Loc::Remat(rc);
+                    } else if let Some(ra_loc) = try_remat_addr(
+                        ev.start,
+                        ev.end,
+                        val_clob_gp[ev.val as usize],
+                        ev.remat_addr,
+                        &locs,
+                        assigned,
+                        active_gp,
+                    ) {
+                        locs[ev.val as usize] = ra_loc;
+                    } else {
+                        let sp = alloc_spill8(
+                            ev.val,
+                            ev.start,
+                            ev.end,
+                            &locs,
+                            assigned,
+                            slot8_end,
+                            free_spills8,
+                            &mut next_spill_off,
+                        )?;
+                        locs[ev.val as usize] = Loc::Spill(sp);
                     }
                 }
                 locs[iv.val as usize] = Loc::Gp(g);
@@ -2566,6 +2667,8 @@ pub fn allocate_with_config_and_scratch(
                     val: iv.val,
                     score: iv.score,
                     remat: iv.remat,
+                    remat_addr: iv.remat_addr,
+                    pinned_by_remat: false,
                 });
             } else {
                 let sp = alloc_spill8(
@@ -2731,6 +2834,8 @@ pub fn allocate_with_config_and_scratch(
                 val: iv.val,
                 score: iv.score,
                 remat: iv.remat,
+                remat_addr: None,
+                pinned_by_remat: false,
             });
         } else if let Some(rc) = iv.remat {
             locs[iv.val as usize] = Loc::Remat(rc);
@@ -2814,6 +2919,8 @@ pub fn allocate_with_config_and_scratch(
                     val: iv.val,
                     score: iv.score,
                     remat: iv.remat,
+                    remat_addr: None,
+                    pinned_by_remat: false,
                 });
             } else {
                 let sp = alloc_spill_fp(
@@ -2957,6 +3064,7 @@ pub fn allocate_with_config_and_scratch(
                         match locs[vi] {
                             Loc::Gp(g) => gp_m |= 1u16 << g.id(),
                             Loc::Xmm(x) => xmm_m |= 1u16 << x.id(),
+                            Loc::RematAddr { base_reg, .. } => gp_m |= 1u16 << base_reg.id(),
                             Loc::Spill(_) | Loc::Remat(_) => {}
                         }
                     }

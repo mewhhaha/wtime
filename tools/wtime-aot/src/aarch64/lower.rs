@@ -47,6 +47,11 @@ enum MoveLoc {
     Fp(VReg),
     Stack(i32),
     Remat(A64RematConst),
+    RematAddr {
+        base_reg: Reg,
+        disp: i32,
+        is64: bool,
+    },
 }
 
 impl From<A64Loc> for MoveLoc {
@@ -56,7 +61,25 @@ impl From<A64Loc> for MoveLoc {
             A64Loc::Fp(v) => MoveLoc::Fp(v),
             A64Loc::Spill(off) => MoveLoc::Stack(off),
             A64Loc::Remat(rc) => MoveLoc::Remat(rc),
+            A64Loc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+                ..
+            } => MoveLoc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+            },
         }
+    }
+}
+
+#[inline]
+fn move_src_read_loc(src: MoveLoc) -> MoveLoc {
+    match src {
+        MoveLoc::RematAddr { base_reg, .. } => MoveLoc::Gp(base_reg),
+        other => other,
     }
 }
 
@@ -161,6 +184,35 @@ fn emit_single_move(asm: &mut A64Asm, dst: MoveLoc, src: MoveLoc, ty: Ty) {
             }
             emit_store_off(asm, ty, Some(SGP1), None, Reg::SP, off, SGP3);
         }
+        (
+            MoveLoc::Gp(d),
+            MoveLoc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+            },
+        ) => {
+            if disp >= 0 {
+                asm.add_imm(is64, d, base_reg, disp as u16);
+            } else {
+                asm.sub_imm(is64, d, base_reg, disp.unsigned_abs() as u16);
+            }
+        }
+        (
+            MoveLoc::Stack(off),
+            MoveLoc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+            },
+        ) => {
+            if disp >= 0 {
+                asm.add_imm(is64, SGP1, base_reg, disp as u16);
+            } else {
+                asm.sub_imm(is64, SGP1, base_reg, disp.unsigned_abs() as u16);
+            }
+            emit_store_off(asm, ty, Some(SGP1), None, Reg::SP, off, SGP3);
+        }
         (MoveLoc::Stack(doff), MoveLoc::Stack(soff)) => {
             if ty.is_fp() {
                 emit_load_off(asm, ty, None, Some(SFP2), Reg::SP, soff, SGP3);
@@ -199,7 +251,7 @@ fn emit_parallel_moves(asm: &mut A64Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) {
                     continue;
                 }
                 let dst = moves[i].0;
-                if (0..n).any(|j| active[j] && moves[j].1 == dst) {
+                if (0..n).any(|j| j != i && active[j] && move_src_read_loc(moves[j].1) == dst) {
                     continue;
                 }
                 active[i] = false;
@@ -365,6 +417,20 @@ impl<'a> LowerA64<'a> {
                 }
                 scratch
             }
+            A64Loc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+                ..
+            } => {
+                if disp >= 0 {
+                    self.asm.add_imm(is64, scratch, base_reg, disp as u16);
+                } else {
+                    self.asm
+                        .sub_imm(is64, scratch, base_reg, disp.unsigned_abs() as u16);
+                }
+                scratch
+            }
             A64Loc::Fp(_) => unreachable!("aarch64: expected GP val"),
         }
     }
@@ -373,7 +439,9 @@ impl<'a> LowerA64<'a> {
         match self.loc(v) {
             A64Loc::Gp(r) => r,
             A64Loc::Spill(_) => SGP1,
-            A64Loc::Fp(_) | A64Loc::Remat(_) => unreachable!("aarch64: expected GP val"),
+            A64Loc::Fp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => {
+                unreachable!("aarch64: expected GP val")
+            }
         }
     }
 
@@ -388,7 +456,7 @@ impl<'a> LowerA64<'a> {
             A64Loc::Spill(off) => {
                 emit_store_off(&mut self.asm, ty, Some(r), None, Reg::SP, off, SGP3);
             }
-            A64Loc::Fp(_) | A64Loc::Remat(_) => unreachable!(),
+            A64Loc::Fp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -400,7 +468,9 @@ impl<'a> LowerA64<'a> {
                 emit_load_off(&mut self.asm, ty, None, Some(scratch), Reg::SP, off, SGP3);
                 scratch
             }
-            A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!("aarch64: expected FP val"),
+            A64Loc::Gp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => {
+                unreachable!("aarch64: expected FP val")
+            }
         }
     }
 
@@ -408,7 +478,7 @@ impl<'a> LowerA64<'a> {
         match self.loc(v) {
             A64Loc::Fp(r) => r,
             A64Loc::Spill(_) => SFP1,
-            A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
+            A64Loc::Gp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -427,7 +497,7 @@ impl<'a> LowerA64<'a> {
             A64Loc::Spill(off) => {
                 emit_store_off(&mut self.asm, ty, None, Some(r), Reg::SP, off, SGP3);
             }
-            A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
+            A64Loc::Gp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -1790,6 +1860,17 @@ impl<'a> LowerA64<'a> {
     fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
         let prev_flags = self.live_flags.take();
         match op {
+            Op::Copy(src) => {
+                let r = res.unwrap();
+                let dl = MoveLoc::from(self.loc(r));
+                let sl = MoveLoc::from(self.loc(src));
+                let ty = self.ty(r);
+                if dl != sl {
+                    emit_single_move(&mut self.asm, dl, sl, ty);
+                } else {
+                    self.live_flags = prev_flags;
+                }
+            }
             Op::ConstI32(c) => {
                 let r = res.unwrap();
                 if matches!(self.loc(r), A64Loc::Remat(_)) {
@@ -1934,8 +2015,22 @@ impl<'a> LowerA64<'a> {
             }
             Op::I32Bin(bop, a, b) => self.emit_int_bin(false, bop, res.unwrap(), a, b),
             Op::I64Bin(bop, a, b) => self.emit_int_bin(true, bop, res.unwrap(), a, b),
-            Op::I32BinImm(bop, a, imm) => self.emit_int_bin_imm(false, bop, res.unwrap(), a, imm),
-            Op::I64BinImm(bop, a, imm) => self.emit_int_bin_imm(true, bop, res.unwrap(), a, imm),
+            Op::I32BinImm(bop, a, imm) => {
+                let r = res.unwrap();
+                if matches!(self.loc(r), A64Loc::RematAddr { .. }) {
+                    self.live_flags = prev_flags;
+                    return Ok(());
+                }
+                self.emit_int_bin_imm(false, bop, r, a, imm);
+            }
+            Op::I64BinImm(bop, a, imm) => {
+                let r = res.unwrap();
+                if matches!(self.loc(r), A64Loc::RematAddr { .. }) {
+                    self.live_flags = prev_flags;
+                    return Ok(());
+                }
+                self.emit_int_bin_imm(true, bop, r, a, imm);
+            }
             Op::AddScaled {
                 is64,
                 base,
@@ -4372,7 +4467,9 @@ impl<'a> LowerA64<'a> {
                                 SGP3,
                             );
                         }
-                        A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
+                        A64Loc::Gp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => {
+                            unreachable!()
+                        }
                     }
                     self.asm.bsl_16b(d, a_use, b_use);
                 } else {
@@ -5018,7 +5115,7 @@ pub fn lower_ir_to_aarch64(
                 if let Some((is_sub, z)) = fused
                     && let Some(res_val) = next.res
                     && match l.loc(z) {
-                        A64Loc::Gp(_) | A64Loc::Remat(_) => true,
+                        A64Loc::Gp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => true,
                         A64Loc::Spill(off) => {
                             let max_uimm = if is64 { 4095 * 8 } else { 4095 * 4 };
                             let mask = if is64 { 7 } else { 3 };

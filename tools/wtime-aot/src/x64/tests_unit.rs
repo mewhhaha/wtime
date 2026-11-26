@@ -5254,3 +5254,228 @@ fn x64_spectre_branchless_slh_bitwise_bce_and_dual_pinned_globals() {
         );
     }
 }
+
+#[test]
+fn x64_regalloc_live_range_splitting_and_address_remat() {
+    // 1. Live-range splitting around a call-free inner loop whose live-in parameters cross calls
+    //    both before and after the loop.
+    // f0(k): recursive sum 1..=k (never inlined).
+    let f0_body = vec![
+        0x20, 0, 0x41, 0, 0x4c, // local 0 <= 0
+        0x04, 0x7f, 0x41, 0,    // if -> 0
+        0x05, // else -> k + f0(k - 1)
+        0x20, 0, 0x20, 0, 0x41, 1, 0x6b, 0x10, 0, 0x6a, 0x0b,
+    ];
+    // f1(n: i32) -> i32:
+    //   a = n + 1; b = n + 2; c = n ^ 3; d = n + 4; e = n * 3; f = n + 6;
+    //   acc = f0(3)
+    //   for i in 0..n { acc = acc ^ ((a + i) * b + c * d + e - f) }
+    //   acc + f0(2) + a + b + c + d + e + f
+    let f1_body = vec![
+        // locals 1..=6 = a..=f derived from n (local 0)
+        0x20, 0, 0x41, 1, 0x6a, 0x21, 1, // a = n + 1
+        0x20, 0, 0x41, 2, 0x6a, 0x21, 2, // b = n + 2
+        0x20, 0, 0x41, 3, 0x73, 0x21, 3, // c = n ^ 3
+        0x20, 0, 0x41, 4, 0x6a, 0x21, 4, // d = n + 4
+        0x20, 0, 0x41, 3, 0x6c, 0x21, 5, // e = n * 3
+        0x20, 0, 0x41, 6, 0x6a, 0x21, 6, // f = n + 6
+        // local 7 = acc = f0(3)
+        0x41, 3, 0x10, 0, 0x21, 7, // local 8 = i = 0
+        0x41, 0, 0x21, 8, // loop
+        0x03, 0x40, // acc ^= (a + i) * b + c * d + e - f
+        0x20, 7, 0x20, 1, 0x20, 8, 0x6a, 0x20, 2, 0x6c, 0x20, 3, 0x20, 4, 0x6c, 0x6a, 0x20, 5,
+        0x6a, 0x20, 6, 0x6b, 0x73, 0x21, 7, // i += 1; br_if 0 (i < n)
+        0x20, 8, 0x41, 1, 0x6a, 0x22, 8, 0x20, 0, 0x49, 0x0d, 0, 0x0b,
+        // return acc + f0(2) + a + b + c + d + e + f
+        0x20, 7, 0x41, 2, 0x10, 0, 0x6a, 0x20, 1, 0x6a, 0x20, 2, 0x6a, 0x20, 3, 0x6a, 0x20, 4, 0x6a,
+        0x20, 5, 0x6a, 0x20, 6, 0x6a,
+    ];
+    let split_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        export_sec(&[("run", 0, 1)]),
+        code_sec(&[enc_body(&[], &f0_body), enc_body(&[(8, 0x7f)], &f1_body)]),
+    ]);
+    let val_split = wtime_validate::validate(
+        &split_wasm,
+        &x64_validate_features(),
+        &x64_validate_limits(),
+    )
+    .unwrap();
+    let mod_split = admit_x64_module(val_split.decoded()).unwrap();
+    let ir0_split = super::ir::lower_wasm_to_ir(val_split.decoded(), &mod_split, 0).unwrap();
+    let mut ir_split = super::ir::lower_wasm_to_ir(val_split.decoded(), &mod_split, 1).unwrap();
+    let eff_split =
+        super::opt::compute_module_effects(&[ir0_split, ir_split.clone()], &mod_split, None)
+            .unwrap();
+    super::opt::optimize_func_stage2(&mut ir_split, &mod_split, &eff_split, None).unwrap();
+    verify_ir(&ir_split, &mod_split).unwrap();
+    let copy_count = ir_split
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i.op, Op::Copy(_)))
+        .count();
+    assert!(
+        copy_count >= 1,
+        "expected live-range splitting to insert Op::Copy before call-free loop"
+    );
+    let alloc_split = super::regalloc::allocate(&ir_split).unwrap();
+    verify_alloc(&ir_split, &alloc_split).unwrap();
+
+    // 2. Address rematerialization (`Loc::RematAddr` / `A64Loc::RematAddr`) under GP pressure:
+    //    compute 24 distinct `base + k*4` values, mix them via non-foldable shifts/xors so Stage 2
+    //    keeps all 24 `I32BinImm(Add, base, k*4)` live simultaneously, and keep `base` live to the
+    //    very end so `base` covers every `p_k` live range!
+    let mut remat_body = Vec::new();
+    // locals 1..=24 = base + k*2 (2..=48 fits in 1-byte signed LEB128)
+    for k in 1u8..=24 {
+        remat_body.extend_from_slice(&[0x20, 0, 0x41, k * 2, 0x6a, 0x21, k]);
+    }
+    // Use all 24 in reverse order (so all 24 overlap simultaneously!), then again in forward order,
+    // and finally add `base` at the very end so `base`'s live range covers all 24 intervals.
+    remat_body.extend_from_slice(&[0x41, 0]); // acc = 0
+    for k in (1u8..=24).rev() {
+        remat_body.extend_from_slice(&[0x20, k, 0x41, 1, 0x76, 0x73]); // acc ^= (p_k >>u 1)
+    }
+    for k in 1u8..=24 {
+        remat_body.extend_from_slice(&[0x20, k, 0x6a]); // acc += p_k
+    }
+    remat_body.extend_from_slice(&[0x20, 0, 0x6a]); // acc += base (keeps base live to the end!)
+    let remat_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        export_sec(&[("run", 0, 0)]),
+        code_sec(&[enc_body(&[(24, 0x7f)], &remat_body)]),
+    ]);
+    let val_remat = wtime_validate::validate(
+        &remat_wasm,
+        &x64_validate_features(),
+        &x64_validate_limits(),
+    )
+    .unwrap();
+    let mod_remat = admit_x64_module(val_remat.decoded()).unwrap();
+    let mut ir_remat = super::ir::lower_wasm_to_ir(val_remat.decoded(), &mod_remat, 0).unwrap();
+    let eff_remat =
+        super::opt::compute_module_effects(&[ir_remat.clone()], &mod_remat, None).unwrap();
+    super::opt::optimize_func_stage2(&mut ir_remat, &mod_remat, &eff_remat, None).unwrap();
+    verify_ir(&ir_remat, &mod_remat).unwrap();
+    let alloc_x64 = super::regalloc::allocate(&ir_remat).unwrap();
+    verify_alloc(&ir_remat, &alloc_x64).unwrap();
+    let x64_remat_addrs = alloc_x64
+        .locs
+        .iter()
+        .filter(|l| matches!(l, super::regalloc::Loc::RematAddr { .. }))
+        .count();
+    assert!(
+        x64_remat_addrs >= 1,
+        "expected x64 regalloc to assign Loc::RematAddr under high GP pressure"
+    );
+    let alloc_a64 = crate::aarch64::regalloc::allocate(&ir_remat, None).unwrap();
+    let a64_remat_addrs = alloc_a64
+        .locs
+        .iter()
+        .filter(|l| matches!(l, crate::aarch64::regalloc::A64Loc::RematAddr { .. }))
+        .count();
+    assert!(
+        a64_remat_addrs >= 1,
+        "expected aarch64 regalloc to assign A64Loc::RematAddr under high GP pressure"
+    );
+
+    // Compile both modules with verify=true for x64 and AArch64, and execute natively on x86_64!
+    let split_so = compile_wasm_to_x64_so(
+        &split_wasm,
+        &X64CompileOptions {
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let remat_so = compile_wasm_to_x64_so(
+        &remat_wasm,
+        &X64CompileOptions {
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let _a64_split = crate::aarch64::compile_wasm_to_aarch64(
+        &split_wasm,
+        &crate::aarch64::A64CompileOptions::default(),
+    )
+    .unwrap();
+    let _a64_remat = crate::aarch64::compile_wasm_to_aarch64(
+        &remat_wasm,
+        &crate::aarch64::A64CompileOptions::default(),
+    )
+    .unwrap();
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (&split_so, &remat_so);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-regalloc-m3");
+        // Expected split_wasm result for n = 0xa (10):
+        let n = 10i32;
+        let (a, b, c, d, e, f) = (n + 1, n + 2, n ^ 3, n + 4, n * 3, n + 6);
+        let mut expected_split: i32 = 6; // f0(3) = 6
+        for i in 0..n {
+            let term = (a + i) * b + c * d + e - f;
+            expected_split ^= term;
+        }
+        expected_split += 3 + a + b + c + d + e + f; // + f0(2) + a..f
+        let sp_path = root.0.join("split.so");
+        std::fs::write(&sp_path, split_so).unwrap();
+        let mut child = Command::new(driver)
+            .arg(&sp_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"call run a\n")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            std::str::from_utf8(&out.stdout).unwrap(),
+            format!("NEW_OK\nCALL 0 {:016x} 0 0\n", expected_split as u32)
+        );
+
+        // Expected remat_wasm result for base = 0x100 (256):
+        let base: u32 = 256;
+        let mut expected_remat: u32 = 0;
+        for k in (1u32..=24).rev() {
+            expected_remat ^= base.wrapping_add(k * 2) >> 1;
+        }
+        for k in 1u32..=24 {
+            expected_remat = expected_remat.wrapping_add(base.wrapping_add(k * 2));
+        }
+        expected_remat = expected_remat.wrapping_add(base);
+        let rm_path = root.0.join("remat.so");
+        std::fs::write(&rm_path, remat_so).unwrap();
+        let mut child2 = Command::new(driver)
+            .arg(&rm_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child2
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"call run 100\n")
+            .unwrap();
+        let out2 = child2.wait_with_output().unwrap();
+        assert!(out2.status.success());
+        assert_eq!(
+            std::str::from_utf8(&out2.stdout).unwrap(),
+            format!("NEW_OK\nCALL 0 {expected_remat:016x} 0 0\n")
+        );
+    }
+}

@@ -45,6 +45,12 @@ pub enum MoveLoc {
     Stack(i32),
     /// Pure constant source (never a destination; emitted after all reg/stack moves).
     Remat(RematConst),
+    /// Rematerialized `base_reg + disp` address source (never a destination; reads `Gp(base_reg)`).
+    RematAddr {
+        base_reg: Gp,
+        disp: i32,
+        is64: bool,
+    },
 }
 
 impl From<Loc> for MoveLoc {
@@ -54,7 +60,25 @@ impl From<Loc> for MoveLoc {
             Loc::Xmm(x) => MoveLoc::Xmm(x),
             Loc::Spill(off) => MoveLoc::Stack(off),
             Loc::Remat(rc) => MoveLoc::Remat(rc),
+            Loc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+                ..
+            } => MoveLoc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+            },
         }
+    }
+}
+
+#[inline]
+fn move_src_read_loc(src: MoveLoc) -> MoveLoc {
+    match src {
+        MoveLoc::RematAddr { base_reg, .. } => MoveLoc::Gp(base_reg),
+        other => other,
     }
 }
 
@@ -117,6 +141,27 @@ fn emit_single_move(asm: &mut Asm, dst: MoveLoc, src: MoveLoc, ty: Ty) {
                 asm.mov_mr(true, Mem::base_disp(Gp::Rsp, off), SCRATCH_GP2);
             }
         }
+        (
+            MoveLoc::Gp(d),
+            MoveLoc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+            },
+        ) => {
+            asm.lea(is64, d, Mem::base_disp(base_reg, disp));
+        }
+        (
+            MoveLoc::Stack(off),
+            MoveLoc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+            },
+        ) => {
+            asm.lea(is64, SCRATCH_GP2, Mem::base_disp(base_reg, disp));
+            asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, off), SCRATCH_GP2);
+        }
         // Memory-to-memory through scratch2 (`R10` / `Xmm14`) so cycle-breaking scratch1 (`R11` / `Xmm15`) is never clobbered:
         (MoveLoc::Stack(doff), MoveLoc::Stack(soff)) => {
             if ty.is_fp() {
@@ -160,7 +205,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
     if raw_moves.len() == 1 {
         let (d, s, ty) = raw_moves[0];
         assert!(
-            !matches!(d, MoveLoc::Remat(_)),
+            !matches!(d, MoveLoc::Remat(_) | MoveLoc::RematAddr { .. }),
             "parallel move destination cannot be Remat"
         );
         if d != s {
@@ -173,7 +218,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
     if raw_moves.len() <= 16 {
         for (i, &(dst, _, _)) in raw_moves.iter().enumerate() {
             assert!(
-                !matches!(dst, MoveLoc::Remat(_)),
+                !matches!(dst, MoveLoc::Remat(_) | MoveLoc::RematAddr { .. }),
                 "parallel move destination cannot be Remat"
             );
             for &(prev_dst, _, _) in &raw_moves[..i] {
@@ -187,7 +232,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
         let mut seen_dst: HashMap<MoveLoc, ()> = HashMap::with_capacity(raw_moves.len());
         for &(dst, _, _) in raw_moves {
             assert!(
-                !matches!(dst, MoveLoc::Remat(_)),
+                !matches!(dst, MoveLoc::Remat(_) | MoveLoc::RematAddr { .. }),
                 "parallel move destination cannot be Remat"
             );
             assert!(
@@ -223,7 +268,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
                 *a = true;
             }
             while remaining > 0 {
-                // Drain any active move whose `dst` is not read as `src` by any active move.
+                // Drain any active move whose `dst` is not read as `src` by any OTHER active move.
                 let mut progressed = true;
                 while progressed {
                     progressed = false;
@@ -234,7 +279,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
                         let dst = moves[i].0;
                         let mut blocked = false;
                         for j in 0..n {
-                            if active[j] && moves[j].1 == dst {
+                            if j != i && active[j] && move_src_read_loc(moves[j].1) == dst {
                                 blocked = true;
                                 break;
                             }
@@ -287,7 +332,10 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
         let mut src_uses: HashMap<MoveLoc, usize> = HashMap::with_capacity(n);
         let mut dst_to_idx: HashMap<MoveLoc, usize> = HashMap::with_capacity(n);
         for (i, &(dst, src, _)) in moves.iter().enumerate() {
-            *src_uses.entry(src).or_insert(0) += 1;
+            let sr = move_src_read_loc(src);
+            if sr != dst {
+                *src_uses.entry(sr).or_insert(0) += 1;
+            }
             let prev = dst_to_idx.insert(dst, i);
             assert!(
                 prev.is_none(),
@@ -310,10 +358,13 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
                 remaining -= 1;
                 let (dst, src, ty) = moves[i];
                 emit_single_move(asm, dst, src, ty);
-                if let Some(cnt) = src_uses.get_mut(&src) {
+                let sr = move_src_read_loc(src);
+                if sr != dst
+                    && let Some(cnt) = src_uses.get_mut(&sr)
+                {
                     *cnt -= 1;
                     if *cnt == 0
-                        && let Some(&producer) = dst_to_idx.get(&src)
+                        && let Some(&producer) = dst_to_idx.get(&sr)
                         && active[producer]
                     {
                         ready.push(producer);
@@ -323,13 +374,13 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
             if remaining == 0 {
                 break;
             }
-            // All non-cycle trees have drained, so every remaining active node has `src_uses[dst] == 1`
-            // (pigeonhole over distinct destinations) and forms disjoint cycles.
+            // All non-cycle trees have drained, so every remaining active node has `src_uses[dst] >= 1`
+            // and forms cycles.
             while scan_cursor < n && !active[scan_cursor] {
                 scan_cursor += 1;
             }
             let k = scan_cursor;
-            let (_, src0, ty0) = moves[k];
+            let (dst0, src0, ty0) = moves[k];
             let tmp = if ty0.is_fp() {
                 MoveLoc::Xmm(SCRATCH_FP1)
             } else {
@@ -339,10 +390,13 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
             emit_single_move(asm, tmp, src0, ty0);
             moves[k].1 = tmp;
             *src_uses.entry(tmp).or_insert(0) += 1;
-            if let Some(cnt) = src_uses.get_mut(&src0) {
+            let sr0 = move_src_read_loc(src0);
+            if sr0 != dst0
+                && let Some(cnt) = src_uses.get_mut(&sr0)
+            {
                 *cnt -= 1;
                 if *cnt == 0
-                    && let Some(&producer) = dst_to_idx.get(&src0)
+                    && let Some(&producer) = dst_to_idx.get(&sr0)
                     && active[producer]
                 {
                     ready.push(producer);
@@ -669,6 +723,15 @@ impl<'a> Lower<'a> {
                 self.asm.mov_ri64(scratch, c as u64);
                 scratch
             }
+            Loc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+                ..
+            } => {
+                self.asm.lea(is64, scratch, Mem::base_disp(base_reg, disp));
+                scratch
+            }
             Loc::Xmm(_) | Loc::Remat(_) => unreachable!("expected gp val"),
         }
     }
@@ -688,6 +751,15 @@ impl<'a> Lower<'a> {
             }
             Loc::Remat(RematConst::I64(c)) => {
                 self.asm.mov_ri64_preserve_flags(scratch, c as u64);
+                scratch
+            }
+            Loc::RematAddr {
+                base_reg,
+                disp,
+                is64,
+                ..
+            } => {
+                self.asm.lea(is64, scratch, Mem::base_disp(base_reg, disp));
                 scratch
             }
             Loc::Xmm(_) | Loc::Remat(_) => unreachable!("expected gp val"),
@@ -720,7 +792,7 @@ impl<'a> Lower<'a> {
                 }
                 scratch
             }
-            Loc::Gp(_) | Loc::Remat(_) => unreachable!("expected fp val"),
+            Loc::Gp(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!("expected fp val"),
         }
     }
 
@@ -768,7 +840,7 @@ impl<'a> Lower<'a> {
         match self.loc(v) {
             Loc::Gp(g) => g,
             Loc::Spill(_) => SCRATCH_GP1,
-            Loc::Xmm(_) | Loc::Remat(_) => unreachable!(),
+            Loc::Xmm(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -784,7 +856,7 @@ impl<'a> Lower<'a> {
                 let is64 = self.ty(v) == Ty::I64;
                 self.asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, off), reg);
             }
-            Loc::Xmm(_) | Loc::Remat(_) => unreachable!(),
+            Loc::Xmm(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -792,7 +864,7 @@ impl<'a> Lower<'a> {
         match self.loc(v) {
             Loc::Xmm(x) => x,
             Loc::Spill(_) => SCRATCH_FP1,
-            Loc::Gp(_) | Loc::Remat(_) => unreachable!(),
+            Loc::Gp(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -801,7 +873,7 @@ impl<'a> Lower<'a> {
         match self.loc(v) {
             Loc::Xmm(d) => self.asm.movaps_rr(d, reg),
             Loc::Spill(off) => emit_fp_store(&mut self.asm, Mem::base_disp(Gp::Rsp, off), reg, ty),
-            Loc::Gp(_) | Loc::Remat(_) => unreachable!(),
+            Loc::Gp(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -1342,13 +1414,13 @@ impl<'a> Lower<'a> {
             // Disallow Remat sources (`mov_ri32(_, 0)` emits flag-clobbering `xor`) and Stack dests
             // (we track register-only live-in masks on `else_bb`). Pure GP/XMM moves & loads
             // (`mov`, `movaps`, `movss`, `movsd`, `movdqu`) never touch `RFLAGS`.
-            if matches!(sl, Loc::Remat(_)) {
+            if matches!(sl, Loc::Remat(_) | Loc::RematAddr { .. }) {
                 return false;
             }
             match dl {
                 Loc::Gp(g) => dst_gp |= 1u16 << g.id(),
                 Loc::Xmm(x) => dst_xmm |= 1u16 << x.id(),
-                Loc::Spill(_) | Loc::Remat(_) => return false,
+                Loc::Spill(_) | Loc::Remat(_) | Loc::RematAddr { .. } => return false,
             }
         }
         if !any_move {
@@ -1360,6 +1432,7 @@ impl<'a> Lower<'a> {
             match self.loc(ea) {
                 Loc::Gp(g) => else_live_gp |= 1u16 << g.id(),
                 Loc::Xmm(x) => else_live_xmm |= 1u16 << x.id(),
+                Loc::RematAddr { base_reg, .. } => else_live_gp |= 1u16 << base_reg.id(),
                 Loc::Spill(_) | Loc::Remat(_) => {}
             }
         }
@@ -2552,6 +2625,17 @@ impl<'a> Lower<'a> {
     fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
         let prev_flags = self.live_flags.take();
         match op {
+            Op::Copy(src) => {
+                let r = res.unwrap();
+                let dl = MoveLoc::from(self.loc(r));
+                let sl = MoveLoc::from(self.loc(src));
+                let ty = self.ty(r);
+                if dl != sl {
+                    emit_single_move(&mut self.asm, dl, sl, ty);
+                } else {
+                    self.live_flags = prev_flags;
+                }
+            }
             Op::ConstI32(c) => {
                 let r = res.unwrap();
                 if matches!(self.loc(r), Loc::Remat(_)) {
@@ -2748,8 +2832,22 @@ impl<'a> Lower<'a> {
             }
             Op::I32Bin(bop, a, b) => self.emit_int_bin(false, bop, res.unwrap(), a, b),
             Op::I64Bin(bop, a, b) => self.emit_int_bin(true, bop, res.unwrap(), a, b),
-            Op::I32BinImm(bop, a, imm) => self.emit_int_bin_imm(false, bop, res.unwrap(), a, imm),
-            Op::I64BinImm(bop, a, imm) => self.emit_int_bin_imm(true, bop, res.unwrap(), a, imm),
+            Op::I32BinImm(bop, a, imm) => {
+                let r = res.unwrap();
+                if matches!(self.loc(r), Loc::RematAddr { .. }) {
+                    self.live_flags = prev_flags;
+                    return Ok(());
+                }
+                self.emit_int_bin_imm(false, bop, r, a, imm);
+            }
+            Op::I64BinImm(bop, a, imm) => {
+                let r = res.unwrap();
+                if matches!(self.loc(r), Loc::RematAddr { .. }) {
+                    self.live_flags = prev_flags;
+                    return Ok(());
+                }
+                self.emit_int_bin_imm(true, bop, r, a, imm);
+            }
             Op::AddScaled {
                 is64,
                 base,

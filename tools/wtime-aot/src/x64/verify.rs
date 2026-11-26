@@ -786,6 +786,10 @@ fn verify_inst_types(
             }
             expect_res(ir, bi, res, Ty::V128, "ConstV128")?;
         }
+        Op::Copy(a) => {
+            let at = val_ty(ir, a, "Copy")?;
+            expect_res(ir, bi, res, at, "Copy")?;
+        }
         Op::I32Eqz(a)
         | Op::I32Clz(a)
         | Op::I32Ctz(a)
@@ -1939,6 +1943,7 @@ pub fn verify_alloc_with_config(
     // Collect defined values across reachable blocks and check their location validity.
     let mut defined_in_reach = vec![false; n_vals];
     let mut expected_remat: Vec<Option<RematConst>> = vec![None; n_vals];
+    let mut expected_remat_addr: Vec<Option<(Val, i32, bool)>> = vec![None; n_vals];
     let mut has_any_clobber_or_call = false;
     let self_param_tys: Vec<Ty> = ir
         .params
@@ -1959,6 +1964,15 @@ pub fn verify_alloc_with_config(
                     Op::ConstI64(c) => Some(RematConst::I64(c)),
                     Op::ConstF32(b) => Some(RematConst::F32(b)),
                     Op::ConstF64(b) => Some(RematConst::F64(b)),
+                    _ => None,
+                };
+                expected_remat_addr[r.0 as usize] = match inst.op {
+                    Op::I32BinImm(IntBinOp::Add, base, disp) if disp != 0 => {
+                        Some((base, disp, false))
+                    }
+                    Op::I64BinImm(IntBinOp::Add, base, disp) if disp != 0 => {
+                        Some((base, disp, true))
+                    }
                     _ => None,
                 };
             }
@@ -2132,6 +2146,27 @@ pub fn verify_alloc_with_config(
                     ));
                 }
             }
+            Loc::RematAddr {
+                base_val,
+                base_reg,
+                disp,
+                is64,
+            } => {
+                if expected_remat_addr[vi] != Some((base_val, disp, is64)) {
+                    return Err(format!(
+                        "verify_alloc fn {}: invalid Loc::RematAddr for v{vi} (expected {:?})",
+                        ir.func_index, expected_remat_addr[vi]
+                    ));
+                }
+                if (base_val.0 as usize) >= n_vals
+                    || alloc.locs[base_val.0 as usize] != Loc::Gp(base_reg)
+                {
+                    return Err(format!(
+                        "verify_alloc fn {}: Loc::RematAddr base v{} is not in {base_reg:?}",
+                        ir.func_index, base_val.0
+                    ));
+                }
+            }
         }
     }
 
@@ -2222,6 +2257,9 @@ pub fn verify_alloc_with_config(
         stamp: u32,
         gp_owner: [Option<u32>; 16],
         gp_mask: u16,
+        remat_gp_refs: [u32; 16],
+        remat_gp_base: [Option<u32>; 16],
+        remat_gp_mask: u16,
         xmm_owner: [Option<u32>; 16],
         xmm_mask: u16,
         spill_owner: Vec<Option<u32>>,
@@ -2239,6 +2277,9 @@ pub fn verify_alloc_with_config(
             }
             self.gp_owner = [None; 16];
             self.gp_mask = 0;
+            self.remat_gp_refs = [0; 16];
+            self.remat_gp_base = [None; 16];
+            self.remat_gp_mask = 0;
             self.xmm_owner = [None; 16];
             self.xmm_mask = 0;
             for s in self.dirty_spills.drain(..) {
@@ -2274,6 +2315,12 @@ pub fn verify_alloc_with_config(
                                 self.func_index
                             ),
                         });
+                    }
+                    if self.remat_gp_refs[gid] > 0 && self.remat_gp_base[gid] != Some(vi) {
+                        return Err(format!(
+                            "verify_alloc fn {} (bb{bb} {where_tag}): GP {g:?} overwritten by v{vi} while pinned by RematAddr base {:?}",
+                            self.func_index, self.remat_gp_base[gid]
+                        ));
                     }
                     self.gp_owner[gid] = Some(vi);
                     self.gp_mask |= 1u16 << gid;
@@ -2323,6 +2370,28 @@ pub fn verify_alloc_with_config(
                     }
                 }
                 Loc::Remat(_) => {}
+                Loc::RematAddr {
+                    base_val, base_reg, ..
+                } => {
+                    let gid = base_reg.id() as usize;
+                    if let Some(other) = self.gp_owner[gid]
+                        && other != base_val.0
+                    {
+                        return Err(format!(
+                            "verify_alloc fn {} (bb{bb} {where_tag}): RematAddr v{vi} base {base_reg:?} (v{}) conflicts with live v{other}",
+                            self.func_index, base_val.0
+                        ));
+                    }
+                    if self.remat_gp_refs[gid] > 0 && self.remat_gp_base[gid] != Some(base_val.0) {
+                        return Err(format!(
+                            "verify_alloc fn {} (bb{bb} {where_tag}): RematAddr v{vi} base v{} conflicts with existing base {:?}",
+                            self.func_index, base_val.0, self.remat_gp_base[gid]
+                        ));
+                    }
+                    self.remat_gp_refs[gid] += 1;
+                    self.remat_gp_base[gid] = Some(base_val.0);
+                    self.remat_gp_mask |= 1u16 << gid;
+                }
             }
             Ok(())
         }
@@ -2353,6 +2422,14 @@ pub fn verify_alloc_with_config(
                     }
                 }
                 Loc::Remat(_) => {}
+                Loc::RematAddr { base_reg, .. } => {
+                    let gid = base_reg.id() as usize;
+                    self.remat_gp_refs[gid] = self.remat_gp_refs[gid].saturating_sub(1);
+                    if self.remat_gp_refs[gid] == 0 {
+                        self.remat_gp_base[gid] = None;
+                        self.remat_gp_mask &= !(1u16 << gid);
+                    }
+                }
             }
         }
     }
@@ -2362,6 +2439,9 @@ pub fn verify_alloc_with_config(
         stamp: 0,
         gp_owner: [None; 16],
         gp_mask: 0,
+        remat_gp_refs: [0; 16],
+        remat_gp_base: [None; 16],
+        remat_gp_mask: 0,
         xmm_owner: [None; 16],
         xmm_mask: 0,
         spill_owner: vec![None; n_spill_slots],
@@ -2400,10 +2480,12 @@ pub fn verify_alloc_with_config(
                 for &v in ir.pool_slice(catch_args) {
                     tracker.insert(v.0, ir, alloc, b, "term.catch_args", None)?;
                 }
-                let hit_gp = MASK_GP_CALLER & tracker.gp_mask;
+                let hit_gp = MASK_GP_CALLER & (tracker.gp_mask | tracker.remat_gp_mask);
                 if hit_gp != 0 {
                     let gid = hit_gp.trailing_zeros() as usize;
-                    let vi = tracker.gp_owner[gid].unwrap();
+                    let vi = tracker.gp_owner[gid]
+                        .or(tracker.remat_gp_base[gid])
+                        .unwrap();
                     return Err(format!(
                         "verify_alloc fn {} bb{b} term: live value v{vi} in GP id {gid} clobbered by CallCatch",
                         ir.func_index
@@ -2431,10 +2513,12 @@ pub fn verify_alloc_with_config(
                 for &v in ir.pool_slice(catch_args) {
                     tracker.insert(v.0, ir, alloc, b, "term.catch_args", None)?;
                 }
-                let hit_gp = MASK_GP_CALLER & tracker.gp_mask;
+                let hit_gp = MASK_GP_CALLER & (tracker.gp_mask | tracker.remat_gp_mask);
                 if hit_gp != 0 {
                     let gid = hit_gp.trailing_zeros() as usize;
-                    let vi = tracker.gp_owner[gid].unwrap();
+                    let vi = tracker.gp_owner[gid]
+                        .or(tracker.remat_gp_base[gid])
+                        .unwrap();
                     return Err(format!(
                         "verify_alloc fn {} bb{b} term: live value v{vi} in GP id {gid} clobbered by CallIndirectCatch",
                         ir.func_index
@@ -2536,10 +2620,12 @@ pub fn verify_alloc_with_config(
                 Op::F64AxpyLoop { .. } => (MASK_RAX_RDX | MASK_RCX, (1 << 0) | (1 << 1) | (1 << 2)),
                 _ => (0, 0),
             };
-            let hit_gp = gp_clob & tracker.gp_mask;
+            let hit_gp = gp_clob & (tracker.gp_mask | tracker.remat_gp_mask);
             if hit_gp != 0 {
                 let gid = hit_gp.trailing_zeros() as usize;
-                let vi = tracker.gp_owner[gid].unwrap();
+                let vi = tracker.gp_owner[gid]
+                    .or(tracker.remat_gp_base[gid])
+                    .unwrap();
                 return Err(format!(
                     "verify_alloc fn {} bb{b} inst {ii}: live value v{vi} in GP id {gid} clobbered by {:?}",
                     ir.func_index, inst.op
