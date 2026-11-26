@@ -5248,3 +5248,41 @@ fn aarch64_pgo_gen_and_use_speculative_devirt_parity() {
     let calls = [1, 0, 2, 7].map(|s| ("run", Value::I32(s)));
     assert_aarch64_image_matches_oracle("aarch64 pgo_use", &wasm, &calls, 0, &use_img);
 }
+
+#[test]
+fn aarch64_audit_spectre_dropped_load_preserves_oob_trap() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_u32, section, type_sec, wasm_module,
+    };
+    // Regression: Pass 2 coalesces `(i32.load offset=0 p); drop(i32.load offset=100000 p)` into
+    // `Op::BoundsCheck { for_bulk: false, end_off: 100004 }` and Pass 3 DCE deletes the dead load.
+    // Under `--spectre-mitigations`, AArch64 MUST still emit the OOB trap check (without barriers)!
+    let mut f_oob = vec![0x20, 0, 0x28, 0x02, 0x00, 0x20, 0, 0x28, 0x02];
+    leb_u32(&mut f_oob, 100_000);
+    f_oob.push(0x1a); // drop
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x00, 1]), // 1 page (65,536 B)
+        export_sec(&[("oob", 0, 0)]),
+        code_sec(&[enc_body(&[], &f_oob)]),
+    ]);
+
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            spectre_mitigations: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_spectre_dropped_load_oob", &img.elf);
+    assert_aarch64_image_matches_oracle(
+        "aarch64 spectre dropped load oob",
+        &wasm,
+        &[("oob", Value::I32(0))],
+        0,
+        &img,
+    );
+}

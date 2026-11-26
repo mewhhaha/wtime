@@ -3500,9 +3500,9 @@ fn compile_wasm_to_x64_so_inner(
                     if failed.load(Ordering::Acquire) {
                         break;
                     }
-                    let base_off = func_text_offs[n_imports + start_bi];
+                    let base_off = func_text_offs[n_imports + text_order[start_bi]];
                     let end_off = if end_bi < n_defs {
-                        func_text_offs[n_imports + end_bi]
+                        func_text_offs[n_imports + text_order[end_bi]]
                     } else {
                         planned_text_len as u64
                     };

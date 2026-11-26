@@ -4389,9 +4389,14 @@ pub fn devirtualize_hot_indirect_calls(
                     ii += 1;
                     continue;
                 }
+                let need_vals = (rets.len as usize).saturating_mul(2).saturating_add(4);
+                let need_pool = (rets.len as usize)
+                    .saturating_add(args.len as usize)
+                    .saturating_mul(2)
+                    .saturating_add(4);
                 if ir.blocks.len() + 3 > MAX_BLOCKS_PER_FN
-                    || ir.val_tys.len() + 64 > MAX_IR_VALS_PER_FN
-                    || ir.val_pool.len() + 128 > MAX_VAL_POOL_PER_FN
+                    || ir.val_tys.len().saturating_add(need_vals) > MAX_IR_VALS_PER_FN
+                    || ir.val_pool.len().saturating_add(need_pool) > MAX_VAL_POOL_PER_FN
                 {
                     ii += 1;
                     continue;
@@ -17048,13 +17053,23 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
     }
 
     for bi in 1..orig_blocks {
+        let bb = &ir.blocks[bi];
         if ir.blocks.len() + 4 > MAX_BLOCKS_PER_FN
-            || ir.val_tys.len() + 64 > MAX_IR_VALS_PER_FN
-            || ir.val_pool.len() + 128 > MAX_VAL_POOL_PER_FN
+            || ir
+                .val_tys
+                .len()
+                .saturating_add(160)
+                .saturating_add(bb.params.len())
+                > MAX_IR_VALS_PER_FN
+            || ir
+                .val_pool
+                .len()
+                .saturating_add(160)
+                .saturating_add(bb.params.len().saturating_mul(4))
+                > MAX_VAL_POOL_PER_FN
         {
             break;
         }
-        let bb = &ir.blocks[bi];
         if !bb.is_loop_header || bb.params.is_empty() || bb.insts.len() < 3 || bb.insts.len() > 24 {
             continue;
         }
@@ -17316,7 +17331,11 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                     idx,
                     shift,
                     disp,
-                }) if shift == elem_shift && disp >= 0 && !is_bi_def(base) => {
+                }) if shift == elem_shift
+                    && disp >= 0
+                    && !is_bi_def(base)
+                    && ir.val_tys[base.0 as usize] == Ty::I32 =>
+                {
                     let pi = bb.params.iter().position(|&p| p == idx)?;
                     let off = offset.checked_add(disp as u64)?;
                     (param_step(pi) == Some(1) && off <= u32::MAX as u64).then_some(

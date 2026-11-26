@@ -5917,3 +5917,333 @@ fn x64_pgo_gen_use_speculative_devirt_and_inlining() {
         );
     }
 }
+
+#[test]
+fn x64_pgo_spilled_ci_check_target_preserves_mismatch_null_and_oob() {
+    // Regression for spilled `Op::CiCheckTarget` destination (`SCRATCH_GP1 = R11`):
+    //   - Table 0 (dynamic via `table.set`): [f0, f1, null, f3(bad sig)]
+    //   - Table 1 (static multi-slot: f1 at slots 1 & 2): [f0, f1, f1, null, f3(bad sig)]
+    //   - A 12-argument `call_indirect` keeps 12 distinct non-rematerializable GP values
+    //     live up to (but not across) the call, occupying all 11 allocatable GP registers
+    //     (callee-saved AND caller-saved) at `Op::CiCheckTarget` and forcing its result
+    //     into `Loc::Spill` (`d = SCRATCH_GP1`).
+    // f0(a0..a15) -> a0 * 13 + 7 + sum(a1..a15)
+    let mut f0 = vec![0x20, 0, 0x41, 13, 0x6c, 0x41, 7, 0x6a];
+    for k in 1u8..16 {
+        f0.extend_from_slice(&[0x20, k, 0x6a]);
+    }
+    // f1(a0..a15) -> a0 * 3 + 5 + sum(a1..a15)
+    let mut f1 = vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 5, 0x6a];
+    for k in 1u8..16 {
+        f1.extend_from_slice(&[0x20, k, 0x6a]);
+    }
+    // `table.set 0` inside f3 forces table 0 to use a dynamic table descriptor (`dyn_table_desc_off >= 0`).
+    let f3 = vec![0x41, 1, 0xd2, 1, 0x26, 0];
+    let make_spilled_caller = |table_idx: u8| {
+        let mut body = Vec::new();
+        // Compute 16 distinct non-rematerializable GP args `(slot + 1) * (2*k + 1)`.
+        for k in 0u8..16 {
+            body.extend_from_slice(&[0x20, 0, 0x41, 1, 0x6a, 0x41, 2 * k + 1, 0x6c, 0x21, k + 1]);
+        }
+        // Cold 2-deep real loop (both loops have backedges -> loop_depth=2, w=1024) with real
+        // SSA uses of all 16 locals BEFORE the call so every local outscores `CiCheckTarget` (depth 0)
+        // while dying at `call_indirect`, forcing `CiCheckTarget` into `Loc::Spill`!
+        body.extend_from_slice(&[
+            0x20, 0, 0x41, 0x7f, 0x46, 0x04, 0x40, 0x03, 0x40, 0x03, 0x40,
+        ]);
+        body.extend_from_slice(&[0x20, 1]);
+        for _ in 0..4 {
+            for k in 1u8..=16 {
+                body.extend_from_slice(&[0x20, k, 0x73]);
+            }
+        }
+        body.extend_from_slice(&[
+            0x41, 0x7f, 0x46, 0x0d, 0, 0x0b, // inner loop backedge
+            0x20, 0, 0x41, 0x7f, 0x46, 0x0d, 0, 0x0b, // outer loop backedge
+            0x0b, // end if
+        ]);
+        // Push all 16 locals + `slot` and run `call_indirect` on `table_idx`.
+        for k in 1u8..=16 {
+            body.extend_from_slice(&[0x20, k]);
+        }
+        body.extend_from_slice(&[0x20, 0, 0x11, 0, table_idx]);
+        body
+    };
+    let f_dyn = make_spilled_caller(0);
+    let f_multi = make_spilled_caller(1);
+
+    let tbl = vec![2, 0x70, 0x00, 4, 0x70, 0x00, 5];
+    let elem = vec![
+        4, // table 0: [f0, f1] at 0, [f3] at 3 (slot 2 null)
+        0x02, 0, 0x41, 0, 0x0b, 0x00, 2, 0, 1, 0x02, 0, 0x41, 3, 0x0b, 0x00, 1, 3,
+        // table 1: [f0, f1, f1] at 0, [f3] at 4 (slot 3 null)
+        0x02, 1, 0x41, 0, 0x0b, 0x00, 3, 0, 1, 1, 0x02, 1, 0x41, 4, 0x0b, 0x00, 1, 3,
+    ];
+    let sixteen_i32 = [0x7f; 16];
+    let wasm = wasm_module(&[
+        type_sec(&[(&sixteen_i32, &[0x7f]), (&[], &[]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 2, 1, 2]),
+        section(4, &tbl),
+        export_sec(&[("run_dyn", 0, 2), ("run_multi", 0, 4)]),
+        section(9, &elem),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[(16, 0x7f)], &f_dyn),
+            enc_body(&[], &f3),
+            enc_body(&[(16, 0x7f)], &f_multi),
+        ]),
+    ]);
+
+    // Build a synthetic PGO profile marking f1 (index 1) hot at BOTH CallIndirect sites (0 & 1).
+    let raw_prof = crate::pgo::PgoProfile {
+        n_defs: 5,
+        n_ci_sites: 2,
+        module_hash_lo: crate::pgo::module_hash_lo(&wasm),
+        func_counts: vec![1, 500, 500, 0, 500],
+        ci_sites: vec![
+            crate::pgo::CiSiteProfile {
+                total_hits: 500,
+                top_hits: 500,
+                top_target: 1,
+            },
+            crate::pgo::CiSiteProfile {
+                total_hits: 500,
+                top_hits: 500,
+                top_target: 1,
+            },
+        ],
+        total_func_calls: 1501,
+        hot_threshold: 64,
+        digest: [0u8; 32],
+    };
+    let prof = crate::pgo::PgoProfile::parse(&raw_prof.to_bytes()).unwrap();
+
+    // Confirm BOTH sites emit `Op::CiCheckTarget` AND that `CiCheckTarget`'s result is spilled!
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..5)
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let devirted = super::opt::devirtualize_hot_indirect_calls(&mut irs, &module, &prof).unwrap();
+    assert_eq!(devirted, 2);
+    super::opt::inline_small_helpers_with_pgo(&mut irs, &module, Some(&prof), None).unwrap();
+    for bi in [2usize, 4usize] {
+        let mut ci_val = None;
+        for bb in &irs[bi].blocks {
+            for ins in &bb.insts {
+                if matches!(ins.op, Op::CiCheckTarget { .. }) {
+                    ci_val = ins.res;
+                }
+            }
+        }
+        let cv = ci_val.expect("expected Op::CiCheckTarget");
+        let alloc = allocate(&irs[bi]).unwrap();
+        verify_alloc(&irs[bi], &alloc).unwrap();
+        assert!(
+            matches!(alloc.locs[cv.0 as usize], super::regalloc::Loc::Spill(_)),
+            "body {bi} must spill Op::CiCheckTarget result to exercise SCRATCH_GP1 path, got {:?}",
+            alloc.locs[cv.0 as usize]
+        );
+    }
+
+    let use_so = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            pgo_use: Some(prof),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = use_so;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-pgo-spilled-ci");
+        let so_path = root.0.join("use.so");
+        std::fs::write(&so_path, &use_so).unwrap();
+        let mut child = Command::new(driver)
+            .arg(&so_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                b"call run_dyn 1\ncall run_dyn 0\ncall run_dyn 2\ncall run_dyn 3\ncall run_dyn 9\n\
+                  call run_multi 1\ncall run_multi 2\ncall run_multi 0\ncall run_multi 3\ncall run_multi 4\ncall run_multi 9\n",
+            )
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        let expected_sum = |slot: i32, hot: bool| -> u64 {
+            let a = |k: i32| slot.wrapping_add(1).wrapping_mul(2 * k + 1);
+            let mut acc = if hot {
+                a(0).wrapping_mul(3).wrapping_add(5)
+            } else {
+                a(0).wrapping_mul(13).wrapping_add(7)
+            };
+            for k in 1i32..16 {
+                acc = acc.wrapping_add(a(k));
+            }
+            acc as u32 as u64
+        };
+        assert_eq!(
+            std::str::from_utf8(&out.stdout).unwrap(),
+            format!(
+                "NEW_OK\n\
+                 CALL 0 {:016x} 0 0\n\
+                 CALL 0 {:016x} 0 0\n\
+                 CALL 1 deadbeefcafebabe 4 0\n\
+                 CALL 1 deadbeefcafebabe 4 0\n\
+                 CALL 1 deadbeefcafebabe 3 0\n\
+                 CALL 0 {:016x} 0 0\n\
+                 CALL 0 {:016x} 0 0\n\
+                 CALL 0 {:016x} 0 0\n\
+                 CALL 1 deadbeefcafebabe 4 0\n\
+                 CALL 1 deadbeefcafebabe 4 0\n\
+                 CALL 1 deadbeefcafebabe 3 0\n",
+                expected_sum(1, true),
+                expected_sum(0, false),
+                expected_sum(1, true),
+                expected_sum(2, true),
+                expected_sum(0, false),
+            )
+        );
+    }
+}
+
+#[test]
+fn x64_audit_spectre_dropped_load_oob_and_remat_addr_select() {
+    // 1) Dropped OOB load coalesced with an in-bounds load MUST still trap TRAP_OOB under
+    //    `--spectre-mitigations` (even though Pass 2 coalesced BoundsCheck and Pass 3 DCE removed the load!).
+    let mut f_oob = vec![
+        0x20, 0, 0x28, 0x02, 0x00, // i32.load offset=0 (in-bounds at p=0)
+        0x20, 0, 0x28, 0x02, // i32.load offset=100000 (MUST trap OOB!)
+    ];
+    leb_u32(&mut f_oob, 100_000);
+    f_oob.push(0x1a); // drop
+
+    // 2) `Loc::RematAddr` `base_reg` preservation in `Op::Select` and `Op::CmpSelect`:
+    //    Pack `base = arg & 0xffff` (local 1) and `fallback = arg >> 16` (local 2) so the 1-arg
+    //    oracle driver can invoke `sel` directly. Create high GP pressure so `base + 16` is
+    //    allocated `Loc::RematAddr { base_reg, disp: 16 }`, then select `(base <u 100 ? base + 16 : fb)`
+    //    and `(fb & 1 ? base + 32 : fb)` where `base` dies at the select and `r` can reuse `base_reg`!
+    let mut f_sel = vec![
+        // local 1 = arg & 0xffff (base)
+        0x20, 0, 0x41, 0xff, 0xff, 0x03, 0x71, 0x21, 1,
+        // local 2 = arg >>u 16 (fallback)
+        0x20, 0, 0x41, 16, 0x76, 0x21, 2,
+    ];
+    // 12 live non-remat values derived from `fallback` (local 2) so GP regs are saturated:
+    for k in 0u8..12 {
+        f_sel.extend_from_slice(&[0x20, 2, 0x41, 2 * k + 3, 0x6c, 0x21, k + 3]);
+    }
+    // `s1 = select(base + 16, fallback, base <u 100)` (`Op::CmpSelect`),
+    // `s2 = select(base + 32, fallback, (fallback & 1))` (`Op::Select`).
+    f_sel.extend_from_slice(&[
+        0x20, 1, 0x41, 16, 0x6a, // base + 16
+        0x20, 2, // fallback
+        0x20, 1, 0x41, 0xe4, 0x00, 0x49, // base <u 100
+        0x1b, // select -> CmpSelect
+        0x20, 1, 0x41, 32, 0x6a, // base + 32
+        0x20, 2, // fallback
+        0x20, 2, 0x41, 1, 0x71, // fallback & 1
+        0x1b, // select -> Select
+        0x6a, // s1 + s2
+    ]);
+    for k in 0u8..12 {
+        f_sel.extend_from_slice(&[0x20, k + 3, 0x6a]);
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 0x00, 1]), // 1 page (65,536 B)
+        export_sec(&[("oob", 0, 0), ("sel", 0, 1)]),
+        code_sec(&[enc_body(&[], &f_oob), enc_body(&[(14, 0x7f)], &f_sel)]),
+    ]);
+
+    let so_spectre = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            spectre_mitigations: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_default = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_spectre, so_default);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-audit-fixes");
+        let expected_sel = |base: i32, fb: i32| -> u64 {
+            let s1 = if (base as u32) < 100 {
+                base.wrapping_add(16)
+            } else {
+                fb
+            };
+            let s2 = if (fb & 1) != 0 {
+                base.wrapping_add(32)
+            } else {
+                fb
+            };
+            let mut acc = s1.wrapping_add(s2);
+            for k in 0i32..12 {
+                acc = acc.wrapping_add(fb.wrapping_mul(2 * k + 3));
+            }
+            acc as u32 as u64
+        };
+        for (name, bytes) in [("spectre.so", &so_spectre), ("default.so", &so_default)] {
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let arg1 = (999u32 << 16) | 10u32;
+            let arg2 = (998u32 << 16) | 200u32;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("call sel {arg1:x}\ncall sel {arg2:x}\ncall oob 0\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                std::str::from_utf8(&out.stdout).unwrap(),
+                format!(
+                    "NEW_OK\nCALL 0 {:016x} 0 0\nCALL 0 {:016x} 0 0\nCALL 1 deadbeefcafebabe 2 0\n",
+                    expected_sel(10, 999),
+                    expected_sel(200, 998),
+                ),
+                "mismatch on {name}"
+            );
+        }
+    }
+}

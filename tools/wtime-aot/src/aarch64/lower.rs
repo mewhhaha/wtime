@@ -819,6 +819,10 @@ impl<'a> LowerA64<'a> {
     }
 
     fn emit_bounds_check(&mut self, addr: Reg, end_off: u64) {
+        self.emit_bounds_check_maybe_barrier(addr, end_off, true);
+    }
+
+    fn emit_bounds_check_maybe_barrier(&mut self, addr: Reg, end_off: u64, with_barrier: bool) {
         let oob = self.trap_oob_lbl();
         if !self.layout.memory64 {
             // Zero-extend 32-bit guest address into 64-bit SGP2.
@@ -839,13 +843,17 @@ impl<'a> LowerA64<'a> {
                 self.asm.cmp_r(true, SGP2, SGP3);
             }
             self.asm.b_cond(Cond::Hi, oob);
-            self.emit_speculation_barrier();
+            if with_barrier {
+                self.emit_speculation_barrier();
+            }
             return;
         }
         if end_off == 0 {
             self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
             self.asm.b_cond(Cond::Hi, oob);
-            self.emit_speculation_barrier();
+            if with_barrier {
+                self.emit_speculation_barrier();
+            }
             return;
         }
         if self.layout.memory64 {
@@ -860,7 +868,9 @@ impl<'a> LowerA64<'a> {
                 }
                 self.asm.cmp_r(true, SGP2, SGP3);
                 self.asm.b_cond(Cond::Hi, oob);
-                self.emit_speculation_barrier();
+                if with_barrier {
+                    self.emit_speculation_barrier();
+                }
                 return;
             }
             self.asm.mov_imm64(SGP3, end_off);
@@ -868,7 +878,9 @@ impl<'a> LowerA64<'a> {
             self.asm.b_cond(Cond::Hs, oob); // carry set => 64-bit unsigned overflow!
             self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
             self.asm.b_cond(Cond::Hi, oob);
-            self.emit_speculation_barrier();
+            if with_barrier {
+                self.emit_speculation_barrier();
+            }
             return;
         }
         if end_off < 4096 {
@@ -879,7 +891,9 @@ impl<'a> LowerA64<'a> {
         }
         self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
         self.asm.b_cond(Cond::Hi, oob);
-        self.emit_speculation_barrier();
+        if with_barrier {
+            self.emit_speculation_barrier();
+        }
     }
 
     /// Computes effective host address `MEM_BASE_REG + zext(addr) + offset` into `SGP3`
@@ -2486,9 +2500,6 @@ impl<'a> LowerA64<'a> {
                 end_off,
                 for_bulk,
             } => {
-                if !for_bulk && self.layout.spectre_mitigations {
-                    return Ok(());
-                }
                 if !for_bulk
                     && self.layout.use_guard_pages
                     && !self.layout.memory64
@@ -2497,7 +2508,7 @@ impl<'a> LowerA64<'a> {
                     return Ok(());
                 }
                 let ar = self.gp_read(addr, SGP1);
-                self.emit_bounds_check(ar, end_off);
+                self.emit_bounds_check_maybe_barrier(ar, end_off, for_bulk);
             }
             Op::Load {
                 kind,
@@ -5156,12 +5167,13 @@ impl<'a> LowerA64<'a> {
                     self.asm.mov_r(is64, SGP2, ir);
                 }
                 let d = self.gp_write_reg(r);
-                self.asm.movz(false, d, 0, 0);
+                let lbl_false = self.asm.new_label();
                 let lbl_done = self.asm.new_label();
                 if ci.is_call_ref {
                     self.asm.mov_imm64(SGP1, u64::from(expected_func) + 1);
                     self.asm.cmp_r(true, SGP2, SGP1);
                     self.asm.cset(false, d, Cond::Eq);
+                    self.asm.b(lbl_done);
                 } else if ci.dyn_table_desc_off >= 0 {
                     emit_load_off(
                         &mut self.asm,
@@ -5173,7 +5185,7 @@ impl<'a> LowerA64<'a> {
                         SGP1,
                     );
                     self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
-                    self.asm.b_cond(Cond::Hs, lbl_done);
+                    self.asm.b_cond(Cond::Hs, lbl_false);
                     self.emit_speculation_barrier();
                     emit_load_off(
                         &mut self.asm,
@@ -5188,10 +5200,11 @@ impl<'a> LowerA64<'a> {
                     self.asm.mov_imm64(SGP1, u64::from(expected_func) + 1);
                     self.asm.cmp_r(true, SGP2, SGP1);
                     self.asm.cset(false, d, Cond::Eq);
+                    self.asm.b(lbl_done);
                 } else if ci.span > 0 {
                     self.asm.mov_imm32(SGP3, ci.table_len);
                     self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
-                    self.asm.b_cond(Cond::Hs, lbl_done);
+                    self.asm.b_cond(Cond::Hs, lbl_false);
                     self.emit_speculation_barrier();
                     if ci.min_slot > 0 {
                         self.asm.mov_imm32(SGP3, ci.min_slot);
@@ -5199,7 +5212,7 @@ impl<'a> LowerA64<'a> {
                     }
                     self.asm.mov_imm32(SGP3, ci.span);
                     self.asm.cmp_r(false, SGP2, SGP3);
-                    self.asm.b_cond(Cond::Hs, lbl_done);
+                    self.asm.b_cond(Cond::Hs, lbl_false);
                     self.emit_speculation_barrier();
                     self.asm
                         .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
@@ -5209,7 +5222,10 @@ impl<'a> LowerA64<'a> {
                         .adr_reloc(SGP1, A64RelocTarget::Func(expected_func));
                     self.asm.cmp_r(true, SGP2, SGP1);
                     self.asm.cset(false, d, Cond::Eq);
+                    self.asm.b(lbl_done);
                 }
+                self.asm.bind(lbl_false);
+                self.asm.movz(false, d, 0, 0);
                 self.asm.bind(lbl_done);
                 self.gp_commit(r, d);
             }

@@ -1138,6 +1138,10 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_bounds_check(&mut self, addr: Gp, end_off: u64) {
+        self.emit_bounds_check_maybe_barrier(addr, end_off, true);
+    }
+
+    fn emit_bounds_check_maybe_barrier(&mut self, addr: Gp, end_off: u64, with_barrier: bool) {
         let oob = self.trap_oob_lbl();
         if let Some(cap) = self.layout.fixed_mem_bytes {
             // Fixed-size memory (`min == max`): works identically for Wasm32 and memory64!
@@ -1153,13 +1157,17 @@ impl<'a> Lower<'a> {
                 self.asm.cmp_rr(true, addr, SCRATCH_GP1);
             }
             self.asm.jcc(Cond::A, oob);
-            self.emit_speculation_barrier();
+            if with_barrier {
+                self.emit_speculation_barrier();
+            }
             return;
         }
         if end_off == 0 {
             self.asm.cmp_rr(true, addr, Gp::R13);
             self.asm.jcc(Cond::A, oob);
-            self.emit_speculation_barrier();
+            if with_barrier {
+                self.emit_speculation_barrier();
+            }
             return;
         }
         if self.layout.memory64 {
@@ -1172,7 +1180,9 @@ impl<'a> Lower<'a> {
                     .lea(true, SCRATCH_GP1, Mem::base_disp(Gp::R13, neg_disp));
                 self.asm.cmp_rr(true, addr, SCRATCH_GP1);
                 self.asm.jcc(Cond::A, oob);
-                self.emit_speculation_barrier();
+                if with_barrier {
+                    self.emit_speculation_barrier();
+                }
                 return;
             }
             // Wrap-proof 64-bit unsigned addition: CF=1 (Cond::B) => overflow trap!
@@ -1186,7 +1196,9 @@ impl<'a> Lower<'a> {
             self.asm.jcc(Cond::B, oob);
             self.asm.cmp_rr(true, SCRATCH_GP1, Gp::R13);
             self.asm.jcc(Cond::A, oob);
-            self.emit_speculation_barrier();
+            if with_barrier {
+                self.emit_speculation_barrier();
+            }
             return;
         }
         if let Ok(disp) = i32::try_from(end_off) {
@@ -1197,7 +1209,9 @@ impl<'a> Lower<'a> {
         }
         self.asm.cmp_rr(true, SCRATCH_GP1, Gp::R13);
         self.asm.jcc(Cond::A, oob);
-        self.emit_speculation_barrier();
+        if with_barrier {
+            self.emit_speculation_barrier();
+        }
     }
 
     fn mem_addr(&mut self, addr: Gp, offset: u64) -> Mem {
@@ -3539,11 +3553,11 @@ impl<'a> Lower<'a> {
                         let ar = self.gp_read_preserve_flags(a, SCRATCH_GP2);
                         self.asm.cmovcc(Cond::Ne, is64, d, ar);
                     } else {
+                        let ar = self.gp_read_preserve_flags(a, SCRATCH_GP2);
                         let br = self.gp_read_preserve_flags(b, d);
                         if br != d {
                             self.asm.mov_rr(is64, d, br);
                         }
-                        let ar = self.gp_read_preserve_flags(a, SCRATCH_GP2);
                         self.asm.cmovcc(Cond::Ne, is64, d, ar);
                     }
                     self.gp_commit(r, d);
@@ -3762,11 +3776,11 @@ impl<'a> Lower<'a> {
                         let tv_reg = self.gp_read_preserve_flags(tv, SCRATCH_GP2);
                         self.asm.cmovcc(cond, is64, d, tv_reg);
                     } else {
+                        let tv_reg = self.gp_read_preserve_flags(tv, SCRATCH_GP2);
                         let fr = self.gp_read_preserve_flags(fv, d);
                         if fr != d {
                             self.asm.mov_rr(is64, d, fr);
                         }
-                        let tv_reg = self.gp_read_preserve_flags(tv, SCRATCH_GP2);
                         self.asm.cmovcc(cond, is64, d, tv_reg);
                     }
                     self.gp_commit(r, d);
@@ -4177,17 +4191,17 @@ impl<'a> Lower<'a> {
                 end_off,
                 for_bulk,
             } => {
-                // Under `--spectre-mitigations`, every `Load`/`Store` emits its own exact
-                // bounds check + branchless SLH clamp, so Stage 1 coalesced `for_bulk: false`
-                // bounds checks are redundant (and would otherwise insert an `lfence`!).
-                let spectre_redundant = !for_bulk && self.layout.spectre_mitigations;
+                // Under `--spectre-mitigations`, every surviving `Load`/`Store` still emits its
+                // own branchless SLH clamp, while `Op::BoundsCheck { for_bulk: false }` may be
+                // the sole surviving trap for a DCE'd load. Emit the exact OOB branch without a
+                // speculation barrier (since `BoundsCheck` performs no memory access itself).
                 let guard_covers = !for_bulk
                     && self.layout.use_guard_pages
                     && !self.layout.memory64
                     && end_off <= (u32::MAX as u64) + 16;
-                if !spectre_redundant && !guard_covers {
+                if !guard_covers {
                     let ar = self.gp_read(addr, SCRATCH_GP2);
-                    self.emit_bounds_check(ar, end_off);
+                    self.emit_bounds_check_maybe_barrier(ar, end_off, for_bulk);
                 }
             }
             Op::Load {
@@ -7159,12 +7173,14 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(is64, SCRATCH_GP2, ir);
                 }
                 let d = self.gp_write_reg(r);
-                self.asm.xor_rr(false, d, d);
+                let lbl_false = self.asm.new_label();
                 let lbl_done = self.asm.new_label();
                 if ci.is_call_ref {
                     self.asm.mov_ri64(SCRATCH_GP1, u64::from(expected_func) + 1);
                     self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
                     self.asm.setcc(Cond::E, d);
+                    self.asm.movzx_rr8(d, d);
+                    self.asm.jmp(lbl_done);
                 } else if ci.dyn_table_desc_off >= 0 {
                     if ci.table_is64 {
                         self.asm.mov_rm(
@@ -7180,7 +7196,7 @@ impl<'a> Lower<'a> {
                             Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
                         );
                     }
-                    self.asm.jcc(Cond::Ae, lbl_done);
+                    self.asm.jcc(Cond::Ae, lbl_false);
                     self.emit_speculation_barrier();
                     self.asm.mov_rm(
                         true,
@@ -7195,6 +7211,8 @@ impl<'a> Lower<'a> {
                     self.asm.mov_ri64(SCRATCH_GP1, u64::from(expected_func) + 1);
                     self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
                     self.asm.setcc(Cond::E, d);
+                    self.asm.movzx_rr8(d, d);
+                    self.asm.jmp(lbl_done);
                 } else if ci.span > 0 {
                     if ci.table_is64 {
                         self.asm.mov_ri32(SCRATCH_GP1, ci.table_len);
@@ -7202,13 +7220,13 @@ impl<'a> Lower<'a> {
                     } else {
                         self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
                     }
-                    self.asm.jcc(Cond::Ae, lbl_done);
+                    self.asm.jcc(Cond::Ae, lbl_false);
                     self.emit_speculation_barrier();
                     if ci.min_slot > 0 {
                         self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
                     }
                     self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
-                    self.asm.jcc(Cond::Ae, lbl_done);
+                    self.asm.jcc(Cond::Ae, lbl_false);
                     self.emit_speculation_barrier();
                     self.asm
                         .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
@@ -7219,7 +7237,11 @@ impl<'a> Lower<'a> {
                         .lea_rip(SCRATCH_GP1, RelocTarget::Func(expected_func));
                     self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
                     self.asm.setcc(Cond::E, d);
+                    self.asm.movzx_rr8(d, d);
+                    self.asm.jmp(lbl_done);
                 }
+                self.asm.bind(lbl_false);
+                self.asm.xor_rr(false, d, d);
                 self.asm.bind(lbl_done);
                 self.gp_commit(r, d);
             }
