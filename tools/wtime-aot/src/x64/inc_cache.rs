@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 15;
+const FORMAT_VERSION: u32 = 16;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -237,6 +237,7 @@ pub fn compute_abi_hash(
         u8::from(isa.has_abm_bmi1),
         u8::from(isa.has_bmi2),
         u8::from(isa.has_avx2),
+        u8::from(isa.has_avx512),
         u8::from(opt),
         u8::from(verify),
         u8::from(spectre_mitigations),
@@ -1826,6 +1827,7 @@ pub fn scan_wasm_shell_and_body_spans(
         u8::from(isa.has_abm_bmi1),
         u8::from(isa.has_bmi2),
         u8::from(isa.has_avx2),
+        u8::from(isa.has_avx512),
         u8::from(opt),
         u8::from(verify),
         match target {

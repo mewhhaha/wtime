@@ -1575,13 +1575,13 @@ fn emit_export_new(
     a.mov_rr(false, Gp::Rbp, Gp::Rax);
     a.cmp_ri(false, Gp::Rbp, 1);
     a.jcc(Cond::B, lbl_fail_isa);
-    if isa.has_abm_bmi1 || isa.has_bmi2 || isa.has_avx2 {
+    if isa.has_abm_bmi1 || isa.has_bmi2 || isa.has_avx2 || isa.has_avx512 {
         a.cmp_ri(false, Gp::Rbp, 7);
         a.jcc(Cond::B, lbl_fail_isa);
     }
 
     // 2. Leaf 1 -> require x86-64-v2 baseline: SSSE3 (bit 9), SSE4.1 (bit 19), SSE4.2 (bit 20), POPCNT (bit 23),
-    //    plus OSXSAVE (bit 27) & AVX (bit 28) when AVX2 codegen is enabled.
+    //    plus OSXSAVE (bit 27) & AVX (bit 28) when AVX2/AVX-512 codegen is enabled.
     match hooks.cpuid {
         CpuidSource::Real => {
             a.mov_ri32(Gp::Rax, 1);
@@ -1593,15 +1593,15 @@ fn emit_export_new(
         }
     }
     let mut baseline_mask: i32 = (1 << 9) | (1 << 19) | (1 << 20) | (1 << 23);
-    if isa.has_avx2 {
+    if isa.has_avx2 || isa.has_avx512 {
         baseline_mask |= (1 << 27) | (1 << 28); // OSXSAVE + AVX
     }
     a.and_ri(false, Gp::Rcx, baseline_mask);
     a.cmp_ri(false, Gp::Rcx, baseline_mask);
     a.jcc(Cond::Ne, lbl_fail_isa);
 
-    // 2b. Verify OS enabled XMM + YMM state saving via XGETBV(0) when AVX2 is enabled!
-    if isa.has_avx2 {
+    // 2b. Verify OS enabled XMM/YMM (+ opmask/ZMM for AVX-512) state saving via XGETBV(0)!
+    if isa.has_avx2 || isa.has_avx512 {
         match hooks.cpuid {
             CpuidSource::Real => {
                 a.xor_rr(false, Gp::Rcx, Gp::Rcx);
@@ -1612,8 +1612,9 @@ fn emit_export_new(
                 a.mov_ri32(Gp::Rax, xcr0);
             }
         }
-        a.and_ri(false, Gp::Rax, 0x6);
-        a.cmp_ri(false, Gp::Rax, 0x6);
+        let xcr0_mask: i32 = if isa.has_avx512 { 0xe6 } else { 0x6 };
+        a.and_ri(false, Gp::Rax, xcr0_mask);
+        a.cmp_ri(false, Gp::Rax, xcr0_mask);
         a.jcc(Cond::Ne, lbl_fail_isa);
     }
 
@@ -1646,15 +1647,18 @@ fn emit_export_new(
         a.and_ri(false, Gp::Rcx, 1 << 5);
         a.jcc(Cond::E, lbl_fail_isa);
     }
-    let mut need_ebx7: i32 = 0;
+    let mut need_ebx7: u32 = 0;
     if isa.has_abm_bmi1 {
         need_ebx7 |= 1 << 3; // BMI1
     }
-    if isa.has_avx2 {
+    if isa.has_avx2 || isa.has_avx512 {
         need_ebx7 |= 1 << 5; // AVX2
     }
     if isa.has_bmi2 {
         need_ebx7 |= 1 << 8; // BMI2
+    }
+    if isa.has_avx512 {
+        need_ebx7 |= (1 << 16) | (1 << 17) | (1 << 30) | (1u32 << 31); // AVX512F+DQ+BW+VL
     }
     if need_ebx7 != 0 {
         match hooks.cpuid {
@@ -1668,8 +1672,8 @@ fn emit_export_new(
                 a.mov_ri32(Gp::Rbx, ebx7);
             }
         }
-        a.and_ri(false, Gp::Rbx, need_ebx7);
-        a.cmp_ri(false, Gp::Rbx, need_ebx7);
+        a.and_ri(false, Gp::Rbx, need_ebx7 as i32);
+        a.cmp_ri(false, Gp::Rbx, need_ebx7 as i32);
         a.jcc(Cond::Ne, lbl_fail_isa);
     }
 

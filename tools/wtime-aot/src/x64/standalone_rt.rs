@@ -618,24 +618,25 @@ pub fn emit_standalone_entry(
     a.mov_rr(false, Gp::Rbp, Gp::Rax);
     a.cmp_ri(false, Gp::Rbp, 1);
     a.jcc(Cond::B, lbl_fail_isa);
-    if isa.has_abm_bmi1 || isa.has_bmi2 || isa.has_avx2 {
+    if isa.has_abm_bmi1 || isa.has_bmi2 || isa.has_avx2 || isa.has_avx512 {
         a.cmp_ri(false, Gp::Rbp, 7);
         a.jcc(Cond::B, lbl_fail_isa);
     }
     a.mov_ri32(Gp::Rax, 1);
     a.cpuid();
     let mut baseline_mask: i32 = (1 << 9) | (1 << 19) | (1 << 20) | (1 << 23);
-    if isa.has_avx2 {
+    if isa.has_avx2 || isa.has_avx512 {
         baseline_mask |= (1 << 27) | (1 << 28); // OSXSAVE + AVX
     }
     a.and_ri(false, Gp::Rcx, baseline_mask);
     a.cmp_ri(false, Gp::Rcx, baseline_mask);
     a.jcc(Cond::Ne, lbl_fail_isa);
-    if isa.has_avx2 {
+    if isa.has_avx2 || isa.has_avx512 {
         a.xor_rr(false, Gp::Rcx, Gp::Rcx);
         a.xgetbv();
-        a.and_ri(false, Gp::Rax, 0x6);
-        a.cmp_ri(false, Gp::Rax, 0x6);
+        let xcr0_mask: i32 = if isa.has_avx512 { 0xe6 } else { 0x6 };
+        a.and_ri(false, Gp::Rax, xcr0_mask);
+        a.cmp_ri(false, Gp::Rax, xcr0_mask);
         a.jcc(Cond::Ne, lbl_fail_isa);
     }
     if isa.has_abm_bmi1 {
@@ -648,22 +649,25 @@ pub fn emit_standalone_entry(
         a.and_ri(false, Gp::Rcx, 1 << 5);
         a.jcc(Cond::E, lbl_fail_isa);
     }
-    let mut need_ebx7: i32 = 0;
+    let mut need_ebx7: u32 = 0;
     if isa.has_abm_bmi1 {
         need_ebx7 |= 1 << 3;
     }
-    if isa.has_avx2 {
+    if isa.has_avx2 || isa.has_avx512 {
         need_ebx7 |= 1 << 5; // AVX2
     }
     if isa.has_bmi2 {
         need_ebx7 |= 1 << 8;
     }
+    if isa.has_avx512 {
+        need_ebx7 |= (1 << 16) | (1 << 17) | (1 << 30) | (1u32 << 31); // AVX512F+DQ+BW+VL
+    }
     if need_ebx7 != 0 {
         a.mov_ri32(Gp::Rax, 7);
         a.xor_rr(false, Gp::Rcx, Gp::Rcx);
         a.cpuid();
-        a.and_ri(false, Gp::Rbx, need_ebx7);
-        a.cmp_ri(false, Gp::Rbx, need_ebx7);
+        a.and_ri(false, Gp::Rbx, need_ebx7 as i32);
+        a.cmp_ri(false, Gp::Rbx, need_ebx7 as i32);
         a.jcc(Cond::Ne, lbl_fail_isa);
     }
 

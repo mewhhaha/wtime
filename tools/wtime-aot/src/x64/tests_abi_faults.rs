@@ -803,9 +803,10 @@ fn fault_injection_cpuid_and_cet_shstk() {
     const OK_EBX7: u32 = (1 << 3) | (1 << 5) | (1 << 8); // BMI1 + AVX2 + BMI2
     const CET_SS: u32 = 1 << 7;
 
-    let cases: [(&str, bool, CpuidSource, RdsspSource, bool); 15] = [
+    let cases: [(&str, bool, bool, CpuidSource, RdsspSource, bool); 18] = [
         (
             "v2_missing_leaf1",
+            false,
             false,
             CpuidSource::Mock {
                 max_leaf: 0,
@@ -822,6 +823,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v2_missing_sse41",
             false,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: 1 << 23,
@@ -836,6 +838,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         ),
         (
             "v2_missing_popcnt",
+            false,
             false,
             CpuidSource::Mock {
                 max_leaf: 7,
@@ -852,6 +855,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_missing_leaf7",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 6,
                 ecx1: OK_ECX1_V3,
@@ -868,6 +872,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_ext_max_unsigned",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -883,6 +888,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_missing_lzcnt",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -898,6 +904,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_missing_bmi1",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -913,6 +920,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_missing_bmi2",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -928,6 +936,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_missing_avx2",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -943,6 +952,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_missing_osxsave",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1 | (1 << 28),
@@ -958,6 +968,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_bad_xcr0_no_ymm",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -974,6 +985,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v2_cet_active_fails",
             false,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1,
@@ -988,6 +1000,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         ),
         (
             "v2_cet_off_passes",
+            false,
             false,
             CpuidSource::Mock {
                 max_leaf: 7,
@@ -1005,6 +1018,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v2_no_cet_bypasses",
             false,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1,
@@ -1020,6 +1034,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         (
             "v3_all_ok",
             true,
+            false,
             CpuidSource::Mock {
                 max_leaf: 7,
                 ecx1: OK_ECX1_V3,
@@ -1032,9 +1047,57 @@ fn fault_injection_cpuid_and_cet_shstk() {
             RdsspSource::Mock { ssp: 0 },
             true,
         ),
+        (
+            "v4_missing_avx512vl",
+            true,
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1_V3,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: OK_EBX7 | (1 << 16) | (1 << 17) | (1 << 30), // missing bit 31 (VL)
+                ecx7: 0,
+                xcr0: 0xe6,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v4_bad_xcr0_no_zmm",
+            true,
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1_V3,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: OK_EBX7 | (1 << 16) | (1 << 17) | (1 << 30) | (1u32 << 31),
+                ecx7: 0,
+                xcr0: 0x6, // YMM enabled, opmask/ZMM disabled!
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v4_all_ok",
+            true,
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1_V3,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: OK_EBX7 | (1 << 16) | (1 << 17) | (1 << 30) | (1u32 << 31),
+                ecx7: CET_SS,
+                xcr0: 0xe6,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            true,
+        ),
     ];
 
-    for (tag, is_v3, cpuid, rdssp, expect_ok) in cases {
+    for (tag, is_v3, is_v4, cpuid, rdssp, expect_ok) in cases {
         let so_path = root.0.join(format!("{tag}.so"));
         let bytes = compile_wasm_to_x64_so(
             &wasm,
@@ -1043,6 +1106,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
                     has_abm_bmi1: is_v3,
                     has_bmi2: is_v3,
                     has_avx2: is_v3,
+                    has_avx512: is_v4,
                 },
                 jobs: 1,
                 deadline: None,

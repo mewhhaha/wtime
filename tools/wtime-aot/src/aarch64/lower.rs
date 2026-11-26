@@ -20,7 +20,7 @@ use super::simd_lower::{
 };
 use crate::x64::ir::{
     CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, SimdLaneKind,
-    SimdSplatKind, StoreKind, Term, TruncOp, Ty, Val, ValRange,
+    SimdSplatKind, StoreKind, Term, TruncOp, Ty, Val, ValRange, VecElemKind, VecReduceKind,
 };
 use crate::x64::{
     CtxLayout, HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW,
@@ -327,70 +327,78 @@ struct LowerA64<'a> {
 
 impl<'a> LowerA64<'a> {
     fn is_upper32_zero(&mut self, v: Val) -> bool {
-        let table = self.val_upper32_zero.get_or_insert_with(|| {
-            let mut flags = vec![false; self.ir.val_tys.len()];
-            for bb in &self.ir.blocks {
-                for inst in &bb.insts {
-                    let Some(res) = inst.res else {
-                        continue;
-                    };
-                    let z = match inst.op {
-                        Op::ConstI32(_)
-                        | Op::I32Eqz(_)
-                        | Op::I64Eqz(_)
-                        | Op::I32Clz(_)
-                        | Op::I32Ctz(_)
-                        | Op::I32Popcnt(_)
-                        | Op::I64Clz(_)
-                        | Op::I64Ctz(_)
-                        | Op::I64Popcnt(_)
-                        | Op::I32WrapI64(_)
-                        | Op::I64ExtendI32U(_)
-                        | Op::I32Extend8S(_)
-                        | Op::I32Extend16S(_)
-                        | Op::I32Bin(..)
-                        | Op::I32BinImm(..)
-                        | Op::AddScaled { is64: false, .. }
-                        | Op::I32Cmp(..)
-                        | Op::I32CmpImm(..)
-                        | Op::I64Cmp(..)
-                        | Op::I64CmpImm(..)
-                        | Op::F32Cmp(..)
-                        | Op::F64Cmp(..)
-                        | Op::I32ReinterpretF32(_)
-                        | Op::MemByteSum { .. }
-                        | Op::V128ToI32 { .. } => true,
-                        Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
-                        Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
-                        Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
-                        Op::Load { kind, .. } | Op::LoadScaled { kind, .. } => matches!(
-                            kind,
-                            LoadKind::I32
-                                | LoadKind::I32Load8S
-                                | LoadKind::I32Load8U
-                                | LoadKind::I32Load16S
-                                | LoadKind::I32Load16U
-                                | LoadKind::I64Load8U
-                                | LoadKind::I64Load16U
-                                | LoadKind::I64Load32U
-                        ),
-                        Op::V128ExtractLane { kind, .. } => matches!(
-                            kind,
-                            SimdLaneKind::I8x16S
-                                | SimdLaneKind::I8x16U
-                                | SimdLaneKind::I16x8S
-                                | SimdLaneKind::I16x8U
-                                | SimdLaneKind::I32x4
-                        ),
-                        _ => false,
-                    };
-                    if z {
-                        flags[res.0 as usize] = true;
+        let table =
+            self.val_upper32_zero.get_or_insert_with(|| {
+                let mut flags = vec![false; self.ir.val_tys.len()];
+                for bb in &self.ir.blocks {
+                    for inst in &bb.insts {
+                        let Some(res) = inst.res else {
+                            continue;
+                        };
+                        let z = match inst.op {
+                            Op::ConstI32(_)
+                            | Op::I32Eqz(_)
+                            | Op::I64Eqz(_)
+                            | Op::I32Clz(_)
+                            | Op::I32Ctz(_)
+                            | Op::I32Popcnt(_)
+                            | Op::I64Clz(_)
+                            | Op::I64Ctz(_)
+                            | Op::I64Popcnt(_)
+                            | Op::I32WrapI64(_)
+                            | Op::I64ExtendI32U(_)
+                            | Op::I32Extend8S(_)
+                            | Op::I32Extend16S(_)
+                            | Op::I32Bin(..)
+                            | Op::I32BinImm(..)
+                            | Op::AddScaled { is64: false, .. }
+                            | Op::I32Cmp(..)
+                            | Op::I32CmpImm(..)
+                            | Op::I64Cmp(..)
+                            | Op::I64CmpImm(..)
+                            | Op::F32Cmp(..)
+                            | Op::F64Cmp(..)
+                            | Op::I32ReinterpretF32(_)
+                            | Op::MemByteSum { .. }
+                            | Op::VecReduceLoop {
+                                kind:
+                                    VecReduceKind::I32Sum
+                                    | VecReduceKind::I32Xor
+                                    | VecReduceKind::I32Dot,
+                                ..
+                            }
+                            | Op::V128ToI32 { .. } => true,
+                            Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
+                            Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
+                            Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
+                            Op::Load { kind, .. } | Op::LoadScaled { kind, .. } => matches!(
+                                kind,
+                                LoadKind::I32
+                                    | LoadKind::I32Load8S
+                                    | LoadKind::I32Load8U
+                                    | LoadKind::I32Load16S
+                                    | LoadKind::I32Load16U
+                                    | LoadKind::I64Load8U
+                                    | LoadKind::I64Load16U
+                                    | LoadKind::I64Load32U
+                            ),
+                            Op::V128ExtractLane { kind, .. } => matches!(
+                                kind,
+                                SimdLaneKind::I8x16S
+                                    | SimdLaneKind::I8x16U
+                                    | SimdLaneKind::I16x8S
+                                    | SimdLaneKind::I16x8U
+                                    | SimdLaneKind::I32x4
+                            ),
+                            _ => false,
+                        };
+                        if z {
+                            flags[res.0 as usize] = true;
+                        }
                     }
                 }
-            }
-            flags
-        });
+                flags
+            });
         table.get(v.0 as usize).copied().unwrap_or(false)
     }
     #[inline]
@@ -4192,6 +4200,349 @@ impl<'a> LowerA64<'a> {
                 self.asm
                     .ldr_q_uimm(VReg::V0, CTX_REG, OFF_SCRATCH_V128 as u32);
                 self.asm.bind(lbl_done);
+            }
+            Op::VecElemLoop {
+                kind,
+                dst,
+                src_a,
+                src_b,
+                count,
+                rhs_is_scalar,
+            } => {
+                // Regalloc reserves clobbers X0..X3 and V0..V2.
+                // X0 = dst_ptr, X1 = src_a_ptr, X2 = src_b_ptr (if array), X3 = count.
+                let is8 = kind.elem_bytes() == 8;
+                let size_code: u8 = if is8 { 3 } else { 2 };
+                let lanes: u16 = if is8 { 2 } else { 4 };
+                if rhs_is_scalar {
+                    if kind.elem_ty().is_fp() {
+                        let rr = self.fp_read(src_b, VReg::V0);
+                        self.asm.dup_elt_128(size_code, VReg::V0, rr, 0);
+                    } else {
+                        let gr = self.gp_read(src_b, SGP1);
+                        self.asm.dup_gp_128(size_code, VReg::V0, gr);
+                    }
+                    let moves = [
+                        (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                        (
+                            MoveLoc::Gp(Reg::X1),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Reg::X3),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                } else {
+                    let moves = [
+                        (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                        (
+                            MoveLoc::Gp(Reg::X1),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Reg::X2),
+                            MoveLoc::from(self.loc(src_b)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Reg::X3),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                }
+                let lbl_done = self.asm.new_label();
+                self.asm.uxtw(Reg::X3, Reg::X3);
+                self.asm.cbz(true, Reg::X3, lbl_done);
+                self.asm.uxtw(Reg::X0, Reg::X0);
+                self.asm.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
+                self.asm.uxtw(Reg::X1, Reg::X1);
+                self.asm.add_r(true, Reg::X1, MEM_BASE_REG, Reg::X1);
+                if !rhs_is_scalar {
+                    self.asm.uxtw(Reg::X2, Reg::X2);
+                    self.asm.add_r(true, Reg::X2, MEM_BASE_REG, Reg::X2);
+                }
+
+                let lbl_vec = self.asm.new_label();
+                let lbl_tail = self.asm.new_label();
+                self.asm.cmp_imm(true, Reg::X3, lanes);
+                self.asm.b_cond(Cond::Lo, lbl_tail);
+
+                self.asm.bind(lbl_vec);
+                self.asm.ldr_q_uimm(VReg::V1, Reg::X1, 0);
+                let rhs_v = if rhs_is_scalar {
+                    VReg::V0
+                } else {
+                    self.asm.ldr_q_uimm(VReg::V2, Reg::X2, 0);
+                    self.asm.add_imm(true, Reg::X2, Reg::X2, 16);
+                    VReg::V2
+                };
+                match kind {
+                    VecElemKind::I32Add => self.asm.add_v128(2, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::I32Sub => self.asm.sub_v128(2, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::I32Mul => self.asm.mul_v128(2, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::I32And | VecElemKind::I64And => {
+                        self.asm.and_16b(VReg::V1, VReg::V1, rhs_v)
+                    }
+                    VecElemKind::I32Or | VecElemKind::I64Or => {
+                        self.asm.orr_16b(VReg::V1, VReg::V1, rhs_v)
+                    }
+                    VecElemKind::I32Xor | VecElemKind::I64Xor => {
+                        self.asm.eor_16b(VReg::V1, VReg::V1, rhs_v)
+                    }
+                    VecElemKind::I64Add => self.asm.add_v128(3, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::I64Sub => self.asm.sub_v128(3, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F32Add => self.asm.fadd_v128(false, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F32Sub => self.asm.fsub_v128(false, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F32Mul => self.asm.fmul_v128(false, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F32Div => self.asm.fdiv_v128(false, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F64Add => self.asm.fadd_v128(true, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F64Sub => self.asm.fsub_v128(true, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F64Mul => self.asm.fmul_v128(true, VReg::V1, VReg::V1, rhs_v),
+                    VecElemKind::F64Div => self.asm.fdiv_v128(true, VReg::V1, VReg::V1, rhs_v),
+                }
+                self.asm.str_q_uimm(VReg::V1, Reg::X0, 0);
+                self.asm.add_imm(true, Reg::X0, Reg::X0, 16);
+                self.asm.add_imm(true, Reg::X1, Reg::X1, 16);
+                self.asm.sub_imm(true, Reg::X3, Reg::X3, lanes);
+                self.asm.cmp_imm(true, Reg::X3, lanes);
+                self.asm.b_cond(Cond::Hs, lbl_vec);
+
+                self.asm.bind(lbl_tail);
+                self.asm.cbz(true, Reg::X3, lbl_done);
+                if rhs_is_scalar && !kind.elem_ty().is_fp() {
+                    self.asm.umov(size_code, SGP2, VReg::V0, 0);
+                }
+                let lbl_sc = self.asm.new_label();
+                self.asm.bind(lbl_sc);
+                match kind {
+                    VecElemKind::I32Add
+                    | VecElemKind::I32Sub
+                    | VecElemKind::I32Mul
+                    | VecElemKind::I32And
+                    | VecElemKind::I32Or
+                    | VecElemKind::I32Xor
+                    | VecElemKind::I64Add
+                    | VecElemKind::I64Sub
+                    | VecElemKind::I64And
+                    | VecElemKind::I64Or
+                    | VecElemKind::I64Xor => {
+                        self.asm.ldr_uimm(is8, SGP1, Reg::X1, 0);
+                        let rhs_r = if rhs_is_scalar {
+                            SGP2
+                        } else {
+                            self.asm.ldr_uimm(is8, SGP2, Reg::X2, 0);
+                            self.asm
+                                .add_imm(true, Reg::X2, Reg::X2, if is8 { 8 } else { 4 });
+                            SGP2
+                        };
+                        match kind {
+                            VecElemKind::I32Add | VecElemKind::I64Add => {
+                                self.asm.add_r(is8, SGP1, SGP1, rhs_r)
+                            }
+                            VecElemKind::I32Sub | VecElemKind::I64Sub => {
+                                self.asm.sub_r(is8, SGP1, SGP1, rhs_r)
+                            }
+                            VecElemKind::I32Mul => self.asm.mul(false, SGP1, SGP1, rhs_r),
+                            VecElemKind::I32And | VecElemKind::I64And => {
+                                self.asm.and_r(is8, SGP1, SGP1, rhs_r)
+                            }
+                            VecElemKind::I32Or | VecElemKind::I64Or => {
+                                self.asm.orr_r(is8, SGP1, SGP1, rhs_r)
+                            }
+                            VecElemKind::I32Xor | VecElemKind::I64Xor => {
+                                self.asm.eor_r(is8, SGP1, SGP1, rhs_r)
+                            }
+                            _ => unreachable!(),
+                        }
+                        self.asm.str_uimm(is8, SGP1, Reg::X0, 0);
+                    }
+                    VecElemKind::F32Add
+                    | VecElemKind::F32Sub
+                    | VecElemKind::F32Mul
+                    | VecElemKind::F32Div => {
+                        self.asm.ldr_s_uimm(VReg::V1, Reg::X1, 0);
+                        let rhs_v = if rhs_is_scalar {
+                            VReg::V0
+                        } else {
+                            self.asm.ldr_s_uimm(VReg::V2, Reg::X2, 0);
+                            self.asm.add_imm(true, Reg::X2, Reg::X2, 4);
+                            VReg::V2
+                        };
+                        match kind {
+                            VecElemKind::F32Add => self.asm.fadd(false, VReg::V1, VReg::V1, rhs_v),
+                            VecElemKind::F32Sub => self.asm.fsub(false, VReg::V1, VReg::V1, rhs_v),
+                            VecElemKind::F32Mul => self.asm.fmul(false, VReg::V1, VReg::V1, rhs_v),
+                            VecElemKind::F32Div => self.asm.fdiv(false, VReg::V1, VReg::V1, rhs_v),
+                            _ => unreachable!(),
+                        }
+                        self.asm.str_s_uimm(VReg::V1, Reg::X0, 0);
+                    }
+                    VecElemKind::F64Add
+                    | VecElemKind::F64Sub
+                    | VecElemKind::F64Mul
+                    | VecElemKind::F64Div => {
+                        self.asm.ldr_d_uimm(VReg::V1, Reg::X1, 0);
+                        let rhs_v = if rhs_is_scalar {
+                            VReg::V0
+                        } else {
+                            self.asm.ldr_d_uimm(VReg::V2, Reg::X2, 0);
+                            self.asm.add_imm(true, Reg::X2, Reg::X2, 8);
+                            VReg::V2
+                        };
+                        match kind {
+                            VecElemKind::F64Add => self.asm.fadd(true, VReg::V1, VReg::V1, rhs_v),
+                            VecElemKind::F64Sub => self.asm.fsub(true, VReg::V1, VReg::V1, rhs_v),
+                            VecElemKind::F64Mul => self.asm.fmul(true, VReg::V1, VReg::V1, rhs_v),
+                            VecElemKind::F64Div => self.asm.fdiv(true, VReg::V1, VReg::V1, rhs_v),
+                            _ => unreachable!(),
+                        }
+                        self.asm.str_d_uimm(VReg::V1, Reg::X0, 0);
+                    }
+                }
+                self.asm
+                    .add_imm(true, Reg::X0, Reg::X0, if is8 { 8 } else { 4 });
+                self.asm
+                    .add_imm(true, Reg::X1, Reg::X1, if is8 { 8 } else { 4 });
+                self.asm.sub_imm(true, Reg::X3, Reg::X3, 1);
+                self.asm.cbnz(true, Reg::X3, lbl_sc);
+                self.asm.bind(lbl_done);
+            }
+            Op::VecReduceLoop {
+                kind,
+                src_a,
+                src_b,
+                count,
+            } => {
+                // Regalloc reserves clobbers X0..X3 and V0..V2.
+                // X0 = src_a_ptr, X1 = src_b_ptr (if dot), X2 = count.
+                let r = res.unwrap();
+                let is8 = kind.elem_bytes() == 8;
+                let is_dot = matches!(kind, VecReduceKind::I32Dot);
+                let is_xor = matches!(kind, VecReduceKind::I32Xor | VecReduceKind::I64Xor);
+                let lanes: u16 = if is8 { 2 } else { 4 };
+                if is_dot {
+                    let moves = [
+                        (
+                            MoveLoc::Gp(Reg::X0),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Reg::X1),
+                            MoveLoc::from(self.loc(src_b)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Reg::X2),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                } else {
+                    let moves = [
+                        (
+                            MoveLoc::Gp(Reg::X0),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Reg::X2),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                }
+                let lbl_zero = self.asm.new_label();
+                let lbl_done = self.asm.new_label();
+                self.asm.uxtw(Reg::X2, Reg::X2);
+                self.asm.cbz(true, Reg::X2, lbl_zero);
+                self.asm.uxtw(Reg::X0, Reg::X0);
+                self.asm.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
+                if is_dot {
+                    self.asm.uxtw(Reg::X1, Reg::X1);
+                    self.asm.add_r(true, Reg::X1, MEM_BASE_REG, Reg::X1);
+                }
+
+                self.asm.movi_zero_16b(VReg::V0);
+                let lbl_vec = self.asm.new_label();
+                let lbl_red = self.asm.new_label();
+                self.asm.cmp_imm(true, Reg::X2, lanes);
+                self.asm.b_cond(Cond::Lo, lbl_red);
+
+                self.asm.bind(lbl_vec);
+                self.asm.ldr_q_uimm(VReg::V1, Reg::X0, 0);
+                if is_dot {
+                    self.asm.ldr_q_uimm(VReg::V2, Reg::X1, 0);
+                    self.asm.mul_v128(2, VReg::V1, VReg::V1, VReg::V2);
+                    self.asm.add_v128(2, VReg::V0, VReg::V0, VReg::V1);
+                    self.asm.add_imm(true, Reg::X1, Reg::X1, 16);
+                } else if is_xor {
+                    self.asm.eor_16b(VReg::V0, VReg::V0, VReg::V1);
+                } else if is8 {
+                    self.asm.add_v128(3, VReg::V0, VReg::V0, VReg::V1);
+                } else {
+                    self.asm.add_v128(2, VReg::V0, VReg::V0, VReg::V1);
+                }
+                self.asm.add_imm(true, Reg::X0, Reg::X0, 16);
+                self.asm.sub_imm(true, Reg::X2, Reg::X2, lanes);
+                self.asm.cmp_imm(true, Reg::X2, lanes);
+                self.asm.b_cond(Cond::Hs, lbl_vec);
+
+                self.asm.bind(lbl_red);
+                // Extract lanes into SGP1 using umov + add/eor (fully supported in A64Vm!).
+                if is8 {
+                    self.asm.umov(3, SGP1, VReg::V0, 0);
+                    self.asm.umov(3, SGP2, VReg::V0, 1);
+                    if is_xor {
+                        self.asm.eor_r(true, SGP1, SGP1, SGP2);
+                    } else {
+                        self.asm.add_r(true, SGP1, SGP1, SGP2);
+                    }
+                } else {
+                    self.asm.umov(2, SGP1, VReg::V0, 0);
+                    for lane in 1u8..4 {
+                        self.asm.umov(2, SGP2, VReg::V0, lane);
+                        if is_xor {
+                            self.asm.eor_r(false, SGP1, SGP1, SGP2);
+                        } else {
+                            self.asm.add_r(false, SGP1, SGP1, SGP2);
+                        }
+                    }
+                }
+
+                self.asm.cbz(true, Reg::X2, lbl_done);
+                let lbl_sc = self.asm.new_label();
+                self.asm.bind(lbl_sc);
+                self.asm.ldr_uimm(is8, SGP2, Reg::X0, 0);
+                if is_dot {
+                    self.asm.ldr_uimm(false, SGP3, Reg::X1, 0);
+                    self.asm.mul(false, SGP2, SGP2, SGP3);
+                    self.asm.add_r(false, SGP1, SGP1, SGP2);
+                    self.asm.add_imm(true, Reg::X1, Reg::X1, 4);
+                } else if is_xor {
+                    self.asm.eor_r(is8, SGP1, SGP1, SGP2);
+                } else {
+                    self.asm.add_r(is8, SGP1, SGP1, SGP2);
+                }
+                self.asm
+                    .add_imm(true, Reg::X0, Reg::X0, if is8 { 8 } else { 4 });
+                self.asm.sub_imm(true, Reg::X2, Reg::X2, 1);
+                self.asm.cbnz(true, Reg::X2, lbl_sc);
+                self.asm.b(lbl_done);
+
+                self.asm.bind(lbl_zero);
+                self.asm.mov_imm64(SGP1, 0);
+                self.asm.bind(lbl_done);
+                self.gp_commit(r, SGP1);
             }
             Op::F64x4BinMem {
                 op,

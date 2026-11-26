@@ -557,6 +557,9 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     has_calls = true;
                     clobbers.push((pos, MASK_GP_CALLER, 0));
                 }
+                Op::VecElemLoop { .. } | Op::VecReduceLoop { .. } => {
+                    clobbers.push((pos, 0x000f, 0x0007));
+                }
                 _ => {}
             }
             if let Some(r) = inst.res {

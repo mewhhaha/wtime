@@ -342,6 +342,118 @@ impl SimdLaneKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VecElemKind {
+    I32Add,
+    I32Sub,
+    I32Mul,
+    I32And,
+    I32Or,
+    I32Xor,
+    I64Add,
+    I64Sub,
+    I64And,
+    I64Or,
+    I64Xor,
+    F32Add,
+    F32Sub,
+    F32Mul,
+    F32Div,
+    F64Add,
+    F64Sub,
+    F64Mul,
+    F64Div,
+}
+
+impl VecElemKind {
+    #[inline]
+    pub const fn elem_bytes(self) -> u64 {
+        match self {
+            VecElemKind::I32Add
+            | VecElemKind::I32Sub
+            | VecElemKind::I32Mul
+            | VecElemKind::I32And
+            | VecElemKind::I32Or
+            | VecElemKind::I32Xor
+            | VecElemKind::F32Add
+            | VecElemKind::F32Sub
+            | VecElemKind::F32Mul
+            | VecElemKind::F32Div => 4,
+            VecElemKind::I64Add
+            | VecElemKind::I64Sub
+            | VecElemKind::I64And
+            | VecElemKind::I64Or
+            | VecElemKind::I64Xor
+            | VecElemKind::F64Add
+            | VecElemKind::F64Sub
+            | VecElemKind::F64Mul
+            | VecElemKind::F64Div => 8,
+        }
+    }
+
+    #[inline]
+    pub const fn elem_shift(self) -> u8 {
+        if self.elem_bytes() == 4 { 2 } else { 3 }
+    }
+
+    #[inline]
+    pub const fn elem_ty(self) -> Ty {
+        match self {
+            VecElemKind::I32Add
+            | VecElemKind::I32Sub
+            | VecElemKind::I32Mul
+            | VecElemKind::I32And
+            | VecElemKind::I32Or
+            | VecElemKind::I32Xor => Ty::I32,
+            VecElemKind::I64Add
+            | VecElemKind::I64Sub
+            | VecElemKind::I64And
+            | VecElemKind::I64Or
+            | VecElemKind::I64Xor => Ty::I64,
+            VecElemKind::F32Add
+            | VecElemKind::F32Sub
+            | VecElemKind::F32Mul
+            | VecElemKind::F32Div => Ty::F32,
+            VecElemKind::F64Add
+            | VecElemKind::F64Sub
+            | VecElemKind::F64Mul
+            | VecElemKind::F64Div => Ty::F64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VecReduceKind {
+    I32Sum,
+    I32Xor,
+    I64Sum,
+    I64Xor,
+    I32Dot,
+}
+
+impl VecReduceKind {
+    #[inline]
+    pub const fn elem_bytes(self) -> u64 {
+        match self {
+            VecReduceKind::I32Sum | VecReduceKind::I32Xor | VecReduceKind::I32Dot => 4,
+            VecReduceKind::I64Sum | VecReduceKind::I64Xor => 8,
+        }
+    }
+
+    #[inline]
+    pub const fn elem_shift(self) -> u8 {
+        if self.elem_bytes() == 4 { 2 } else { 3 }
+    }
+
+    #[inline]
+    pub const fn result_ty(self) -> Ty {
+        match self {
+            VecReduceKind::I32Sum | VecReduceKind::I32Xor | VecReduceKind::I32Dot => Ty::I32,
+            VecReduceKind::I64Sum | VecReduceKind::I64Xor => Ty::I64,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreKind {
     I32,
@@ -696,6 +808,25 @@ pub enum Op {
         scale: Val,
         is_sub: bool,
     },
+    /// Guarded contiguous elementwise vector loop over linear memory 0 (`memory32`):
+    /// `for k in 0..count { dst[k] = src_a[k] <op> (rhs_is_scalar ? src_b : src_b[k]) }`.
+    /// Preheader guarantees in-bounds, no `u32` wrap, and no partial overlap with `dst`.
+    VecElemLoop {
+        kind: VecElemKind,
+        dst: Val,
+        src_a: Val,
+        src_b: Val,
+        count: Val,
+        rhs_is_scalar: bool,
+    },
+    /// Guarded contiguous associative integer reduction loop over linear memory 0 (`memory32`):
+    /// returns `sum/xor` over `0..count` (`I32Dot` returns `sum(src_a[k] * src_b[k])`).
+    VecReduceLoop {
+        kind: VecReduceKind,
+        src_a: Val,
+        src_b: Val,
+        count: Val,
+    },
 
     V128Splat {
         kind: SimdSplatKind,
@@ -825,6 +956,8 @@ impl Op {
             | Op::MemByteBlur3Div { .. }
             | Op::F64x4BinMem { .. }
             | Op::F64AxpyLoop { .. }
+            | Op::VecElemLoop { .. }
+            | Op::VecReduceLoop { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
             | Op::ExnAlloc { .. }
@@ -1012,6 +1145,28 @@ impl Op {
                 f(src);
                 f(count);
                 f(scale);
+            }
+            Op::VecElemLoop {
+                dst,
+                src_a,
+                src_b,
+                count,
+                ..
+            } => {
+                f(dst);
+                f(src_a);
+                f(src_b);
+                f(count);
+            }
+            Op::VecReduceLoop {
+                src_a,
+                src_b,
+                count,
+                ..
+            } => {
+                f(src_a);
+                f(src_b);
+                f(count);
             }
             Op::Call { args, .. } | Op::ExnAlloc { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {

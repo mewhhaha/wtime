@@ -537,6 +537,11 @@ fn assert_oracle_matrix(
                     has_abm_bmi1: v3,
                     has_bmi2: v3,
                     has_avx2: v3,
+                    has_avx512: v3
+                        && std::is_x86_feature_detected!("avx512f")
+                        && std::is_x86_feature_detected!("avx512dq")
+                        && std::is_x86_feature_detected!("avx512bw")
+                        && std::is_x86_feature_detected!("avx512vl"),
                 },
                 jobs: 2,
                 deadline: None,

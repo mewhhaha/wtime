@@ -1057,10 +1057,14 @@ fn isa_profile_syntax_matches_pen_contract() {
     );
     assert_eq!(
         parse_x64_target_cpu_syntax("x86-64-v4").unwrap(),
-        Some("x64-v3")
+        Some("x64-v4")
     );
     assert_eq!(
         parse_x64_target_cpu_syntax("znver4").unwrap(),
+        Some("x64-v4")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("znver3").unwrap(),
         Some("x64-v3")
     );
     assert_eq!(
@@ -1069,7 +1073,7 @@ fn isa_profile_syntax_matches_pen_contract() {
     );
     assert_eq!(
         parse_x64_target_cpu_syntax("graniterapids").unwrap(),
-        Some("x64-v3")
+        Some("x64-v4")
     );
     assert!(parse_x64_target_cpu_syntax("znver").is_err());
     assert!(parse_x64_target_cpu_syntax("znver4a").is_err());
@@ -1085,10 +1089,18 @@ fn isa_profile_syntax_matches_pen_contract() {
         assert_eq!(tag, "x64-v2");
         assert!(!isa.has_abm_bmi1);
         assert!(!isa.has_bmi2);
-        let (tag3, isa3) = resolve_x64_isa("znver4").unwrap();
+        let (tag3, isa3) = resolve_x64_isa("znver3").unwrap();
         assert_eq!(tag3, "x64-v3");
         assert!(isa3.has_abm_bmi1);
         assert!(isa3.has_bmi2);
+        assert!(isa3.has_avx2);
+        assert!(!isa3.has_avx512);
+        let (tag4, isa4) = resolve_x64_isa("znver4").unwrap();
+        assert_eq!(tag4, "x64-v4");
+        assert!(isa4.has_abm_bmi1);
+        assert!(isa4.has_bmi2);
+        assert!(isa4.has_avx2);
+        assert!(isa4.has_avx512);
     }
     #[cfg(not(all(
         target_os = "linux",
@@ -1512,6 +1524,7 @@ fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
                 has_abm_bmi1: true,
                 has_bmi2: true,
                 has_avx2: true,
+                has_avx512: false,
             },
             jobs: 1,
             deadline: None,
@@ -1528,6 +1541,7 @@ fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
                 has_abm_bmi1: true,
                 has_bmi2: true,
                 has_avx2: true,
+                has_avx512: false,
             },
             jobs: 8,
             deadline: None,
@@ -2505,6 +2519,7 @@ fn stage3_undo_log_if_nesting_and_inc_cache_parity() {
             has_abm_bmi1: true,
             has_bmi2: true,
             has_avx2: true,
+            has_avx512: false,
         },
         jobs: 2,
         opt: true,
@@ -2831,6 +2846,7 @@ fn stage3_council_round1_regressions() {
                 has_abm_bmi1: true,
                 has_bmi2: true,
                 has_avx2: true,
+                has_avx512: false,
             },
             jobs: 2,
             opt: true,
@@ -5477,5 +5493,257 @@ fn x64_regalloc_live_range_splitting_and_address_remat() {
             std::str::from_utf8(&out2.stdout).unwrap(),
             format!("NEW_OK\nCALL 0 {expected_remat:016x} 0 0\n")
         );
+    }
+}
+
+#[test]
+fn x64_avx512_evex_and_general_counted_loop_autovec() {
+    // 1. Verify key EVEX encodings via byte patterns & optional llvm-objdump disassembly.
+    {
+        use super::asm::{Asm, Gp, Mem, Xmm};
+        let mut a = Asm::new();
+        a.vpternlogd_xxx(Xmm::Xmm0, Xmm::Xmm1, Xmm::Xmm2, 0xe4);
+        a.vbroadcastsd_zx(Xmm::Xmm0, Xmm::Xmm15);
+        a.vmulpd_zzm(Xmm::Xmm1, Xmm::Xmm0, Mem::base_disp(Gp::Rdx, 64));
+        a.vaddpd_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 64));
+        a.vmovupd_mz(Mem::base_disp(Gp::Rax, 64), Xmm::Xmm1);
+        a.vpaddd_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base_disp(Gp::Rax, 64));
+        a.vpmulld_zzm(Xmm::Xmm2, Xmm::Xmm2, Mem::base_disp(Gp::Rdx, 64));
+        a.vextracti64x4_yz(Xmm::Xmm1, Xmm::Xmm0, 1);
+        a.vzeroupper();
+        assert!(!a.code.is_empty());
+        // Compressed disp8*64: [rdx + 64] must encode disp8 = 1 (NOT 64)!
+        // Check vpternlogd xmm0, xmm1, xmm2, 0xe4 starts with EVEX 0x62 ... 0x25 ... 0xe4.
+        assert_eq!(a.code[0], 0x62);
+        assert_eq!(a.code[4], 0x25);
+        assert_eq!(a.code[6], 0xe4);
+
+        // If GNU `objdump` is present, verify exact EVEX disassembly & disp8*64 (`+ 0x40`)!
+        if let Ok(status) = std::process::Command::new("objdump")
+            .arg("--version")
+            .output()
+            && status.status.success()
+        {
+            let root = crate::build::create_fresh_test_root("wtime-aot-evex-disasm");
+            let bin = root.0.join("evex.bin");
+            std::fs::write(&bin, &a.code).unwrap();
+            let out = std::process::Command::new("objdump")
+                .args(["-D", "-b", "binary", "-m", "i386:x86-64", "-M", "intel"])
+                .arg(&bin)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "objdump failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let text = String::from_utf8(out.stdout).unwrap();
+            for needle in [
+                "vpternlogd",
+                "vbroadcastsd",
+                "vmulpd",
+                "vaddpd",
+                "vmovupd",
+                "vpaddd",
+                "vpmulld",
+                "vextracti64x4",
+                "0x40",
+            ] {
+                assert!(
+                    text.contains(needle),
+                    "expected `{needle}` in EVEX disassembly:\n{text}"
+                );
+            }
+            assert!(
+                !text.contains("(bad)") && !text.contains(".byte"),
+                "EVEX disassembly had undecoded bytes:\n{text}"
+            );
+        }
+    }
+
+    // 2. Build a Wasm module exercising BOTH `VecElemLoop` (i32 array-array add, f32 scalar mul)
+    //    AND `VecReduceLoop` (i32 dot product + i32 sum) with exact parity across x64-v2/v3/v4 and AArch64!
+    // Memory layout (1 page = 64 KiB):
+    //   a[0..n] at 0x0000 (i32)
+    //   b[0..n] at 0x1000 (i32)
+    //   c[0..n] at 0x2000 (i32)
+    // f0(n: i32) -> i32:
+    //   init a[i] = i*3 + 1, b[i] = i*5 + 2
+    //   loop1 (VecElemLoop I32Add): c[i] = a[i] + b[i]
+    //   loop2 (VecElemLoop I32Xor scalar): c[i] = c[i] ^ 0x55
+    //   loop3 (VecReduceLoop I32Dot): dot = sum(c[i] * b[i])
+    //   loop4 (VecReduceLoop I32Sum): s = sum(c[i])
+    //   return dot ^ s
+    let mut body = Vec::new();
+    // Init loop: for i in 0..n { a[i] = i*3+1; b[i] = i*5+2; }
+    body.extend_from_slice(&[
+        0x41, 0, 0x21, 1, // i = 0
+        0x02, 0x40, 0x03, 0x40, // block, loop
+        0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // br_if 1 (i >=u n)
+        // a[i] at 0 + (i << 2)
+        0x20, 1, 0x41, 2, 0x74, 0x20, 1, 0x41, 3, 0x6c, 0x41, 1, 0x6a, 0x36, 2, 0,
+        // b[i] at 0x1000 (4096 = 0x80 0x20 uleb) + (i << 2)
+        0x20, 1, 0x41, 2, 0x74, 0x20, 1, 0x41, 5, 0x6c, 0x41, 2, 0x6a, 0x36, 2, 0x80, 0x20, 0x20, 1,
+        0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Loop 1: c[i] = a[i] + b[i]  (offset c = 0x2000 = 8192 = 0x80 0x40 uleb)
+    body.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 1, 0x41,
+        2, 0x74, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x20,
+        0x6a, 0x36, 2, 0x80, 0x40, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Loop 2: c[i] = c[i] ^ 0x25 (scalar RHS)
+    body.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 1, 0x41,
+        2, 0x74, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x40, 0x41, 0x25, 0x73, 0x36, 2, 0x80,
+        0x40, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Loop 3: dot = sum(c[i] * b[i]) (local 2)
+    body.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 2, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x40, 0x20, 1, 0x41, 2, 0x74, 0x28, 2,
+        0x80, 0x20, 0x6c, 0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Loop 4: s = sum(c[i]) (local 3)
+    body.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x41, 0, 0x21, 3, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 3, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x40, 0x6a, 0x21, 3, 0x20, 1, 0x41, 1,
+        0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // return dot ^ s
+    body.extend_from_slice(&[0x20, 2, 0x20, 3, 0x73]);
+
+    let vec_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[("run", 0, 0), ("memory", 2, 0)]),
+        code_sec(&[enc_body(&[(3, 0x7f)], &body)]),
+    ]);
+
+    let val = wtime_validate::validate(&vec_wasm, &x64_validate_features(), &x64_validate_limits())
+        .unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+    let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, 0).unwrap();
+    let eff = super::opt::compute_module_effects(&[ir.clone()], &module, None).unwrap();
+    super::opt::optimize_func_stage2(&mut ir, &module, &eff, None).unwrap();
+    verify_ir(&ir, &module).unwrap();
+    let elem_cnt = ir
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i.op, Op::VecElemLoop { .. }))
+        .count();
+    let red_cnt = ir
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i.op, Op::VecReduceLoop { .. }))
+        .count();
+    assert!(
+        elem_cnt >= 2,
+        "expected >= 2 VecElemLoop ops (got {elem_cnt})"
+    );
+    assert!(
+        red_cnt >= 2,
+        "expected >= 2 VecReduceLoop ops (got {red_cnt})"
+    );
+
+    // Compile for AArch64 too (verifying NEON lowering!).
+    let _a64_elf = crate::aarch64::compile_wasm_to_aarch64(
+        &vec_wasm,
+        &crate::aarch64::A64CompileOptions::default(),
+    )
+    .unwrap();
+
+    // Expected helper (used on Linux x86_64 native oracle execution).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let expected_for = |n: u32| -> u32 {
+        let mut dot = 0u32;
+        let mut sum = 0u32;
+        for i in 0..n {
+            let a = i.wrapping_mul(3).wrapping_add(1);
+            let b = i.wrapping_mul(5).wrapping_add(2);
+            let c = a.wrapping_add(b) ^ 0x25;
+            dot = dot.wrapping_add(c.wrapping_mul(b));
+            sum = sum.wrapping_add(c);
+        }
+        dot ^ sum
+    };
+
+    // Execute natively across x64-v2 (SSE2), x64-v3 (AVX2), and x64-v4 (AVX-512 if supported)!
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-vec-m4");
+        let mut configs = vec![
+            ("v2", TargetIsa::default()),
+            (
+                "v3",
+                TargetIsa {
+                    has_abm_bmi1: true,
+                    has_bmi2: true,
+                    has_avx2: true,
+                    has_avx512: false,
+                },
+            ),
+        ];
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512dq")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx512vl")
+        {
+            configs.push((
+                "v4",
+                TargetIsa {
+                    has_abm_bmi1: true,
+                    has_bmi2: true,
+                    has_avx2: true,
+                    has_avx512: true,
+                },
+            ));
+        }
+        for (tag, isa) in configs {
+            let so = compile_wasm_to_x64_so(
+                &vec_wasm,
+                &X64CompileOptions {
+                    isa,
+                    verify: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let path = root.0.join(format!("vec_{tag}.so"));
+            std::fs::write(&path, so).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            // Test counts covering scalar fallback (0, 3), SSE2/AVX2/AVX-512 boundaries (4, 15, 16, 33, 73 = 0x49)!
+            let counts = [0u32, 3, 4, 15, 16, 33, 73];
+            let mut input = String::new();
+            let mut expected = String::from("NEW_OK\n");
+            for &n in &counts {
+                input.push_str(&format!("call run {n:x}\n"));
+                expected.push_str(&format!("CALL 0 {:016x} 0 0\n", expected_for(n)));
+            }
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "vec_{tag} failed");
+            assert_eq!(
+                std::str::from_utf8(&out.stdout).unwrap(),
+                expected,
+                "vec_{tag} parity mismatch"
+            );
+        }
     }
 }

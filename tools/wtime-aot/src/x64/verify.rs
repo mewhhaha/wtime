@@ -12,7 +12,10 @@ use std::collections::HashSet;
 
 use wtime_types::ValType;
 
-use super::ir::{CmpBranchKind, FloatBinOp, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange};
+use super::ir::{
+    CmpBranchKind, FloatBinOp, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange, VecElemKind,
+    VecReduceKind,
+};
 use super::module::{MAX_FRAME_BYTES, X64Module};
 use super::regalloc::{
     AllocConfig, AllocResult, HelperKind, Loc, MASK_GP_CALLER, MASK_RAX_RDX, MASK_RCX,
@@ -1566,6 +1569,38 @@ fn verify_inst_types(
             expect_ty(ir, bi, scale, Ty::F64, "F64AxpyLoop.scale")?;
             expect_no_res(ir, bi, res, "F64AxpyLoop")?;
         }
+        Op::VecElemLoop {
+            kind,
+            dst,
+            src_a,
+            src_b,
+            count,
+            rhs_is_scalar,
+        } => {
+            let _: VecElemKind = kind;
+            expect_ty(ir, bi, dst, Ty::I32, "VecElemLoop.dst")?;
+            expect_ty(ir, bi, src_a, Ty::I32, "VecElemLoop.src_a")?;
+            let b_ty = if rhs_is_scalar {
+                kind.elem_ty()
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, src_b, b_ty, "VecElemLoop.src_b")?;
+            expect_ty(ir, bi, count, Ty::I32, "VecElemLoop.count")?;
+            expect_no_res(ir, bi, res, "VecElemLoop")?;
+        }
+        Op::VecReduceLoop {
+            kind,
+            src_a,
+            src_b,
+            count,
+        } => {
+            let _: VecReduceKind = kind;
+            expect_ty(ir, bi, src_a, Ty::I32, "VecReduceLoop.src_a")?;
+            expect_ty(ir, bi, src_b, Ty::I32, "VecReduceLoop.src_b")?;
+            expect_ty(ir, bi, count, Ty::I32, "VecReduceLoop.count")?;
+            expect_res(ir, bi, res, kind.result_ty(), "VecReduceLoop")?;
+        }
         Op::F64x4BinMem {
             op,
             dst,
@@ -2617,7 +2652,13 @@ pub fn verify_alloc_with_config(
                     };
                     if is_pow2 { (0, 0) } else { (MASK_RAX_RDX, 0) }
                 }
-                Op::F64AxpyLoop { .. } => (MASK_RAX_RDX | MASK_RCX, (1 << 0) | (1 << 1) | (1 << 2)),
+                Op::F64AxpyLoop { .. } | Op::VecReduceLoop { .. } => {
+                    (MASK_RAX_RDX | MASK_RCX, (1 << 0) | (1 << 1) | (1 << 2))
+                }
+                Op::VecElemLoop { .. } => (
+                    MASK_RAX_RDX | MASK_RCX | (1 << 6),
+                    (1 << 0) | (1 << 1) | (1 << 2),
+                ),
                 _ => (0, 0),
             };
             let hit_gp = gp_clob & (tracker.gp_mask | tracker.remat_gp_mask);

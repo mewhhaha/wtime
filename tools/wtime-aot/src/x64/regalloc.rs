@@ -1107,10 +1107,17 @@ pub fn allocate_with_config_and_scratch(
                         });
                     }
                 }
-                Op::F64AxpyLoop { .. } => {
+                Op::F64AxpyLoop { .. } | Op::VecReduceLoop { .. } => {
                     clobbers.push(Clobber {
                         pos: pos_use,
                         gp_mask: MASK_RAX_RDX | MASK_RCX,
+                        xmm_mask: (1 << 0) | (1 << 1) | (1 << 2),
+                    });
+                }
+                Op::VecElemLoop { .. } => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: MASK_RAX_RDX | MASK_RCX | (1 << Gp::Rsi.id()),
                         xmm_mask: (1 << 0) | (1 << 1) | (1 << 2),
                     });
                 }

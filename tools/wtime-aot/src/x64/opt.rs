@@ -101,7 +101,7 @@ fn fx_set<K>() -> HashSet<K> {
 use super::ir::{
     Block, BlockId, BrTableData, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, Inst, IntBinOp,
     IrFunc, LoadKind, Op, OptIrScratch, SimdLaneKind, SimdSplatKind, StoreKind, Term, TruncOp, Ty,
-    Val, ValRange, optimize_ir_with_budget_and_scratch,
+    Val, ValRange, VecElemKind, VecReduceKind, optimize_ir_with_budget_and_scratch,
 };
 use super::module::{
     CompileBudget, MAX_BLOCKS_PER_FN, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64Module,
@@ -618,6 +618,28 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
             r(src);
             r(count);
             r(scale);
+        }
+        Op::VecElemLoop {
+            dst,
+            src_a,
+            src_b,
+            count,
+            ..
+        } => {
+            r(dst);
+            r(src_a);
+            r(src_b);
+            r(count);
+        }
+        Op::VecReduceLoop {
+            src_a,
+            src_b,
+            count,
+            ..
+        } => {
+            r(src_a);
+            r(src_b);
+            r(count);
         }
         Op::V128Ternary { a, b, c, .. } => {
             r(a);
@@ -2969,6 +2991,32 @@ fn clone_callee_into_caller(
                     scale: map_v(scale),
                     is_sub,
                 },
+                Op::VecElemLoop {
+                    kind,
+                    dst,
+                    src_a,
+                    src_b,
+                    count,
+                    rhs_is_scalar,
+                } => Op::VecElemLoop {
+                    kind,
+                    dst: map_v(dst),
+                    src_a: map_v(src_a),
+                    src_b: map_v(src_b),
+                    count: map_v(count),
+                    rhs_is_scalar,
+                },
+                Op::VecReduceLoop {
+                    kind,
+                    src_a,
+                    src_b,
+                    count,
+                } => Op::VecReduceLoop {
+                    kind,
+                    src_a: map_v(src_a),
+                    src_b: map_v(src_b),
+                    count: map_v(count),
+                },
                 Op::F64x4BinMem {
                     op,
                     dst,
@@ -4169,7 +4217,8 @@ pub fn try_compute_fn_own_effects(
                 | Op::MemFillConst { .. }
                 | Op::MemByteBlur3Div { .. }
                 | Op::F64x4BinMem { .. }
-                | Op::F64AxpyLoop { .. } => writes_mem = true,
+                | Op::F64AxpyLoop { .. }
+                | Op::VecElemLoop { .. } => writes_mem = true,
                 Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                     writes_mem = true;
                     grows_mem = any_mem_can_grow;
@@ -6211,7 +6260,8 @@ fn run_dom_gvn_and_bce_with_scratch(
                 | Op::V128StoreLaneMem { .. }
                 | Op::MemByteBlur3Div { .. }
                 | Op::F64x4BinMem { .. }
-                | Op::F64AxpyLoop { .. } => {
+                | Op::F64AxpyLoop { .. }
+                | Op::VecElemLoop { .. } => {
                     fn_writes_mem = true;
                     blk_writes_mem = true;
                 }
@@ -6952,7 +7002,8 @@ fn run_dom_gvn_and_bce_with_scratch(
                         | Op::V128StoreLaneMem { .. }
                         | Op::MemByteBlur3Div { .. }
                         | Op::F64x4BinMem { .. }
-                        | Op::F64AxpyLoop { .. } => {
+                        | Op::F64AxpyLoop { .. }
+                        | Op::VecElemLoop { .. } => {
                             st.clear_mem_facts();
                             if let Some(res) = inst.res {
                                 st.def_op[res.0 as usize] = Some(inst.op);
@@ -9013,6 +9064,28 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
             r(src);
             r(count);
             r(scale);
+        }
+        Op::VecElemLoop {
+            dst,
+            src_a,
+            src_b,
+            count,
+            ..
+        } => {
+            r(dst);
+            r(src_a);
+            r(src_b);
+            r(count);
+        }
+        Op::VecReduceLoop {
+            src_a,
+            src_b,
+            count,
+            ..
+        } => {
+            r(src_a);
+            r(src_b);
+            r(count);
         }
         Op::V128Ternary { a, b, c, .. } => {
             r(a);
@@ -11524,6 +11597,14 @@ pub fn optimize_func_stage2_with_options(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
+            if allow_bce && vectorize_general_counted_loops(ir, module) {
+                post_rot_changed = true;
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                    let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+            }
             if (op_flags & OP_FLAG_DIV_REM) != 0 && lower_loop_magic_div_i32(ir, &dom) {
                 post_rot_changed = true;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
@@ -12429,6 +12510,7 @@ fn forward_loop_carried_scaled_loads(ir: &mut IrFunc, dom: &CfgDom, module: &X64
                 | Op::MemByteBlur3Div { .. }
                 | Op::F64x4BinMem { .. }
                 | Op::F64AxpyLoop { .. }
+                | Op::VecElemLoop { .. }
                 | Op::Call { .. }
                 | Op::CallIndirect { .. }
         )
@@ -16333,6 +16415,14 @@ fn vectorize_f64_axpy_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                 raw_start64
             };
             let end64 = ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, start64, byte_len64));
+            if off != 0 {
+                let end_no_wrap = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, end64, u32_max64));
+                *guard_ok = ep(
+                    ir,
+                    Ty::I32,
+                    Op::I32Bin(IntBinOp::And, *guard_ok, end_no_wrap),
+                );
+            }
             (start64, end64)
         };
         let (dst_start64, dst_end64) = build_range64(ir, dst_form, &mut guard_ok);
@@ -16471,6 +16561,1300 @@ fn vectorize_f64_axpy_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
             }
             _ => unreachable!(),
         }
+        changed = true;
+    }
+
+    changed
+}
+
+/// General counted-loop auto-vectorizer over linear memory 0 (`memory32`):
+/// matches rotated single-block counted loops (both indexed `base + (i << shift)` and
+/// pointer-stepped `p += elem_bytes`) and rewrites them into preheader-guarded:
+/// - `Op::VecElemLoop`: `dst[k] = src_a[k] <op> src_b[k]` or `src_a[k] <op> scalar`
+///   across `i32`, `i64`, `f32`, `f64` (exact IEEE-754 lane parity and exact alias guards).
+/// - `Op::VecReduceLoop`: bit-exact associative integer reductions (`i32`/`i64` sum & xor,
+///   plus `i32` dot product `sum(a[k] * b[k])`).
+fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
+    if module.memory64 || module.memory.is_none() {
+        return false;
+    }
+    let orig_blocks = ir.blocks.len();
+    if orig_blocks < 2 {
+        return false;
+    }
+    let mut changed = false;
+
+    #[derive(Clone, Copy)]
+    enum PreEdge {
+        Jump,
+        ThenArm,
+        ElseArm,
+    }
+    #[derive(Clone, Copy)]
+    enum AddrForm {
+        Indexed {
+            base: Option<Val>,
+            iv_pos: usize,
+            off: u64,
+        },
+        StepPtr {
+            ptr_pos: usize,
+            off: u64,
+        },
+    }
+    #[derive(Clone, Copy)]
+    enum LimSpec {
+        Val(Val),
+        Const(i32),
+    }
+    #[derive(Clone, Copy)]
+    enum MatchPlan {
+        Elem {
+            kind: VecElemKind,
+            dst: AddrForm,
+            src_a: AddrForm,
+            src_b_addr: Option<AddrForm>,
+            src_b_scalar: Option<Val>,
+            src_b_const_i32: Option<i32>,
+            src_b_const_i64: Option<i64>,
+        },
+        Reduce {
+            kind: VecReduceKind,
+            acc_pos: usize,
+            src_a: AddrForm,
+            src_b: Option<AddrForm>,
+            acc_next: Val,
+        },
+    }
+    #[derive(Clone, Copy)]
+    enum ExitArgPlan {
+        External(Val),
+        EntryParam(usize),
+        FinalStep1(usize),
+        FinalStepElem(usize),
+        FinalReduce,
+    }
+
+    for bi in 1..orig_blocks {
+        if ir.blocks.len() + 4 > MAX_BLOCKS_PER_FN
+            || ir.val_tys.len() + 64 > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + 128 > MAX_VAL_POOL_PER_FN
+        {
+            break;
+        }
+        let bb = &ir.blocks[bi];
+        if !bb.is_loop_header || bb.params.is_empty() || bb.insts.len() < 3 || bb.insts.len() > 24 {
+            continue;
+        }
+        let Term::CmpBranch {
+            kind,
+            a,
+            b,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } = bb.term
+        else {
+            continue;
+        };
+        let bi_id = BlockId(bi as u32);
+        if then_bb != bi_id || else_bb == bi_id || then_args.len as usize != bb.params.len() {
+            continue;
+        }
+
+        // Find unique non-loop predecessor edge entering `bi`.
+        let mut pre_opt: Option<(usize, PreEdge, ValRange)> = None;
+        let mut multi_pre = false;
+        for (p_idx, pbb) in ir.blocks.iter().enumerate() {
+            if p_idx == bi {
+                continue;
+            }
+            let mut hit = 0usize;
+            pbb.term.for_each_succ(&ir.br_tables, |s| {
+                if s == bi_id {
+                    hit += 1;
+                }
+            });
+            if hit > 0 {
+                if hit > 1 || pre_opt.is_some() {
+                    multi_pre = true;
+                    break;
+                }
+                match pbb.term {
+                    Term::Jump { target, args }
+                        if target == bi_id && args.len as usize == bb.params.len() =>
+                    {
+                        pre_opt = Some((p_idx, PreEdge::Jump, args));
+                    }
+                    Term::BranchIf {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    }
+                    | Term::CmpBranch {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    } => {
+                        if then_bb == bi_id && then_args.len as usize == bb.params.len() {
+                            pre_opt = Some((p_idx, PreEdge::ThenArm, then_args));
+                        } else if else_bb == bi_id && else_args.len as usize == bb.params.len() {
+                            pre_opt = Some((p_idx, PreEdge::ElseArm, else_args));
+                        } else {
+                            multi_pre = true;
+                            break;
+                        }
+                    }
+                    _ => {
+                        multi_pre = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let Some((pre_idx, pre_edge, entry_args)) = pre_opt else {
+            continue;
+        };
+        if multi_pre {
+            continue;
+        }
+
+        // Collect values defined inside `bi` and reject any block whose internal defs escape directly.
+        let bb = &ir.blocks[bi];
+        let mut bi_defs: Vec<Val> = Vec::with_capacity(bb.params.len() + bb.insts.len());
+        bi_defs.extend_from_slice(&bb.params);
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                bi_defs.push(r);
+            }
+        }
+        let is_bi_def = |v: Val| bi_defs.contains(&v);
+        let mut escapes = false;
+        for (oi, obb) in ir.blocks.iter().enumerate() {
+            if oi == bi {
+                continue;
+            }
+            for inst in &obb.insts {
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    if is_bi_def(v) {
+                        escapes = true;
+                    }
+                });
+            }
+            obb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                if is_bi_def(v) {
+                    escapes = true;
+                }
+            });
+            if escapes {
+                break;
+            }
+        }
+        if escapes {
+            continue;
+        }
+
+        // Inspect side-effecting ops in `bi`: allow only 0 or 1 `Store`/`StoreScaled`, NO calls/traps/globals!
+        // Also track every `Load`/`LoadScaled` and every `BoundsCheck` so we can prove NO unmatched
+        // load or non-subsumed bounds check can be skipped!
+        let mut store_idx: Option<usize> = None;
+        let mut load_vals: Vec<Val> = Vec::new();
+        let mut bounds_checks: Vec<(Val, u64)> = Vec::new();
+        let mut has_bad_side_effect = false;
+        for (ii, inst) in bb.insts.iter().enumerate() {
+            match inst.op {
+                Op::Store {
+                    kind: StoreKind::I32 | StoreKind::I64 | StoreKind::F32 | StoreKind::F64,
+                    ..
+                }
+                | Op::StoreScaled {
+                    kind: StoreKind::I32 | StoreKind::I64 | StoreKind::F32 | StoreKind::F64,
+                    ..
+                } => {
+                    if store_idx.is_some() {
+                        has_bad_side_effect = true;
+                        break;
+                    }
+                    store_idx = Some(ii);
+                }
+                Op::Load { .. } | Op::LoadScaled { .. } => {
+                    if let Some(r) = inst.res {
+                        load_vals.push(r);
+                    } else {
+                        has_bad_side_effect = true;
+                        break;
+                    }
+                }
+                Op::BoundsCheck { addr, end_off, .. } => {
+                    bounds_checks.push((addr, end_off));
+                }
+                op if op.has_side_effect() => {
+                    has_bad_side_effect = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if has_bad_side_effect || load_vals.len() > 2 {
+            continue;
+        }
+
+        let find_inst = |v: Val| -> Option<Op> {
+            bb.insts
+                .iter()
+                .find_map(|ins| (ins.res == Some(v)).then_some(ins.op))
+        };
+
+        // Helper: classify step-1 and step-`elem_bytes` induction params.
+        let then_slice = ir.pool_slice(then_args);
+        let param_step = |pi: usize| -> Option<i32> {
+            let p = bb.params[pi];
+            let next = then_slice[pi];
+            if next == p {
+                return Some(0);
+            }
+            if ir.val_tys[p.0 as usize] != Ty::I32 {
+                return None;
+            }
+            match find_inst(next) {
+                Some(Op::I32BinImm(IntBinOp::Add, x, step))
+                    if x == p && (step == 1 || step == 4 || step == 8) =>
+                {
+                    Some(step)
+                }
+                _ => None,
+            }
+        };
+
+        let parse_addr = |addr_v: Val,
+                          offset: u64,
+                          scaled_bytes: Option<u8>,
+                          elem_shift: u8,
+                          elem_bytes: i32|
+         -> Option<AddrForm> {
+            if let Some(sc) = scaled_bytes {
+                if i32::from(sc) != elem_bytes {
+                    return None;
+                }
+                let pi = bb.params.iter().position(|&p| p == addr_v)?;
+                return (param_step(pi) == Some(1)).then_some(AddrForm::Indexed {
+                    base: None,
+                    iv_pos: pi,
+                    off: offset,
+                });
+            }
+            if let Some(pi) = bb.params.iter().position(|&p| p == addr_v)
+                && param_step(pi) == Some(elem_bytes)
+            {
+                return Some(AddrForm::StepPtr {
+                    ptr_pos: pi,
+                    off: offset,
+                });
+            }
+            let extract_scaled = |v: Val| -> Option<usize> {
+                match find_inst(v) {
+                    Some(Op::I32BinImm(IntBinOp::Shl, x, sh)) if sh == i32::from(elem_shift) => {
+                        let pi = bb.params.iter().position(|&p| p == x)?;
+                        (param_step(pi) == Some(1)).then_some(pi)
+                    }
+                    Some(Op::I32BinImm(IntBinOp::Mul, x, m)) if m == elem_bytes => {
+                        let pi = bb.params.iter().position(|&p| p == x)?;
+                        (param_step(pi) == Some(1)).then_some(pi)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(iv_pos) = extract_scaled(addr_v) {
+                return Some(AddrForm::Indexed {
+                    base: None,
+                    iv_pos,
+                    off: offset,
+                });
+            }
+            match find_inst(addr_v) {
+                Some(Op::I32Bin(IntBinOp::Add, x, y)) => {
+                    if let Some(iv_pos) = extract_scaled(y)
+                        && !is_bi_def(x)
+                    {
+                        return Some(AddrForm::Indexed {
+                            base: Some(x),
+                            iv_pos,
+                            off: offset,
+                        });
+                    }
+                    if let Some(iv_pos) = extract_scaled(x)
+                        && !is_bi_def(y)
+                    {
+                        return Some(AddrForm::Indexed {
+                            base: Some(y),
+                            iv_pos,
+                            off: offset,
+                        });
+                    }
+                    None
+                }
+                Some(Op::AddScaled {
+                    is64: false,
+                    base,
+                    idx,
+                    shift,
+                    disp,
+                }) if shift == elem_shift && disp >= 0 && !is_bi_def(base) => {
+                    let pi = bb.params.iter().position(|&p| p == idx)?;
+                    let off = offset.checked_add(disp as u64)?;
+                    (param_step(pi) == Some(1) && off <= u32::MAX as u64).then_some(
+                        AddrForm::Indexed {
+                            base: Some(base),
+                            iv_pos: pi,
+                            off,
+                        },
+                    )
+                }
+                _ => None,
+            }
+        };
+
+        type ParsedLoad = (Val, Option<(Val, u64)>, AddrForm);
+        let parse_load =
+            |v: Val, want: LoadKind, elem_shift: u8, elem_bytes: i32| -> Option<ParsedLoad> {
+                match find_inst(v) {
+                    Some(Op::Load {
+                        kind: lk,
+                        addr,
+                        offset,
+                        ..
+                    }) if lk == want && offset <= u32::MAX as u64 => {
+                        parse_addr(addr, offset, None, elem_shift, elem_bytes)
+                            .map(|f| (v, Some((addr, offset)), f))
+                    }
+                    Some(Op::LoadScaled {
+                        kind: lk,
+                        addr,
+                        scale,
+                        offset,
+                    }) if lk == want && offset <= u32::MAX as u64 => {
+                        parse_addr(addr, offset, Some(scale), elem_shift, elem_bytes)
+                            .map(|f| (v, None, f))
+                    }
+                    _ => None,
+                }
+            };
+
+        // Try matching either `VecElemLoop` (1 store) or `VecReduceLoop` (0 stores).
+        let (plan, elem_bytes, elem_shift) = if let Some(sii) = store_idx {
+            let (skind, dst_addr_v, dst_off, dst_sh, val_v) = match bb.insts[sii].op {
+                Op::Store {
+                    kind,
+                    addr,
+                    offset,
+                    val,
+                    ..
+                } => (kind, addr, offset, None, val),
+                Op::StoreScaled {
+                    kind,
+                    addr,
+                    scale,
+                    offset,
+                    val,
+                } => (kind, addr, offset, Some(scale), val),
+                _ => continue,
+            };
+            let (lkind, eb, esh) = match skind {
+                StoreKind::I32 => (LoadKind::I32, 4i32, 2u8),
+                StoreKind::I64 => (LoadKind::I64, 8i32, 3u8),
+                StoreKind::F32 => (LoadKind::F32, 4i32, 2u8),
+                StoreKind::F64 => (LoadKind::F64, 8i32, 3u8),
+                _ => continue,
+            };
+            let mut params_ok = true;
+            for pi in 0..bb.params.len() {
+                if !matches!(param_step(pi), Some(s) if s == 0 || s == 1 || s == eb) {
+                    params_ok = false;
+                    break;
+                }
+            }
+            if !params_ok {
+                continue;
+            }
+            let Some(dst_form) = (dst_off <= u32::MAX as u64)
+                .then(|| parse_addr(dst_addr_v, dst_off, dst_sh, esh, eb))
+                .flatten()
+            else {
+                continue;
+            };
+            let Some(val_op) = find_inst(val_v) else {
+                continue;
+            };
+            let dst_bc = dst_sh.is_none().then_some((dst_addr_v, dst_off));
+            let check_loads =
+                |va: Val, bca: Option<(Val, u64)>, vb: Option<(Val, Option<(Val, u64)>)>| -> bool {
+                    let vb_val = vb.map(|x| x.0);
+                    let bcb = vb.and_then(|x| x.1);
+                    let eb64 = eb as u64;
+                    load_vals.iter().all(|&lv| lv == va || vb_val == Some(lv))
+                        && bounds_checks.iter().all(|&(bc_addr, bc_end)| {
+                            [dst_bc, bca, bcb]
+                                .into_iter()
+                                .flatten()
+                                .any(|(a, o)| bc_addr == a && bc_end <= o.saturating_add(eb64))
+                        })
+                };
+            let matched_elem: Option<MatchPlan> = match (skind, val_op) {
+                (StoreKind::I32, Op::I32Bin(bop, x, y)) => {
+                    let vk = match bop {
+                        IntBinOp::Add => Some(VecElemKind::I32Add),
+                        IntBinOp::Sub => Some(VecElemKind::I32Sub),
+                        IntBinOp::Mul => Some(VecElemKind::I32Mul),
+                        IntBinOp::And => Some(VecElemKind::I32And),
+                        IntBinOp::Or => Some(VecElemKind::I32Or),
+                        IntBinOp::Xor => Some(VecElemKind::I32Xor),
+                        _ => None,
+                    };
+                    let comm = !matches!(bop, IntBinOp::Sub);
+                    vk.and_then(|kind| {
+                        let lx = parse_load(x, lkind, esh, eb);
+                        let ly = parse_load(y, lkind, esh, eb);
+                        match (lx, ly) {
+                            (Some((va, bca, fa)), Some((vb, bcb, fb)))
+                                if check_loads(va, bca, Some((vb, bcb))) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: Some(fb),
+                                    src_b_scalar: None,
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (Some((va, bca, fa)), None)
+                                if !is_bi_def(y) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(y),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (None, Some((va, bca, fa)))
+                                if comm && !is_bi_def(x) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(x),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            _ => None,
+                        }
+                    })
+                }
+                (StoreKind::I32, Op::I32BinImm(bop, x, imm)) => {
+                    let vk = match bop {
+                        IntBinOp::Add => Some(VecElemKind::I32Add),
+                        IntBinOp::Sub => Some(VecElemKind::I32Sub),
+                        IntBinOp::Mul => Some(VecElemKind::I32Mul),
+                        IntBinOp::And => Some(VecElemKind::I32And),
+                        IntBinOp::Or => Some(VecElemKind::I32Or),
+                        IntBinOp::Xor => Some(VecElemKind::I32Xor),
+                        _ => None,
+                    };
+                    vk.and_then(|kind| {
+                        let (va, bca, fa) = parse_load(x, lkind, esh, eb)?;
+                        check_loads(va, bca, None).then_some(MatchPlan::Elem {
+                            kind,
+                            dst: dst_form,
+                            src_a: fa,
+                            src_b_addr: None,
+                            src_b_scalar: None,
+                            src_b_const_i32: Some(imm),
+                            src_b_const_i64: None,
+                        })
+                    })
+                }
+                (StoreKind::I64, Op::I64Bin(bop, x, y)) => {
+                    let vk = match bop {
+                        IntBinOp::Add => Some(VecElemKind::I64Add),
+                        IntBinOp::Sub => Some(VecElemKind::I64Sub),
+                        IntBinOp::And => Some(VecElemKind::I64And),
+                        IntBinOp::Or => Some(VecElemKind::I64Or),
+                        IntBinOp::Xor => Some(VecElemKind::I64Xor),
+                        _ => None,
+                    };
+                    let comm = !matches!(bop, IntBinOp::Sub);
+                    vk.and_then(|kind| {
+                        let lx = parse_load(x, lkind, esh, eb);
+                        let ly = parse_load(y, lkind, esh, eb);
+                        match (lx, ly) {
+                            (Some((va, bca, fa)), Some((vb, bcb, fb)))
+                                if check_loads(va, bca, Some((vb, bcb))) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: Some(fb),
+                                    src_b_scalar: None,
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (Some((va, bca, fa)), None)
+                                if !is_bi_def(y) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(y),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (None, Some((va, bca, fa)))
+                                if comm && !is_bi_def(x) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(x),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            _ => None,
+                        }
+                    })
+                }
+                (StoreKind::I64, Op::I64BinImm(bop, x, imm)) => {
+                    let vk = match bop {
+                        IntBinOp::Add => Some(VecElemKind::I64Add),
+                        IntBinOp::Sub => Some(VecElemKind::I64Sub),
+                        IntBinOp::And => Some(VecElemKind::I64And),
+                        IntBinOp::Or => Some(VecElemKind::I64Or),
+                        IntBinOp::Xor => Some(VecElemKind::I64Xor),
+                        _ => None,
+                    };
+                    vk.and_then(|kind| {
+                        let (va, bca, fa) = parse_load(x, lkind, esh, eb)?;
+                        check_loads(va, bca, None).then_some(MatchPlan::Elem {
+                            kind,
+                            dst: dst_form,
+                            src_a: fa,
+                            src_b_addr: None,
+                            src_b_scalar: None,
+                            src_b_const_i32: None,
+                            src_b_const_i64: Some(i64::from(imm)),
+                        })
+                    })
+                }
+                (StoreKind::F32, Op::F32Bin(bop, x, y)) => {
+                    let vk = match bop {
+                        FloatBinOp::Add => Some(VecElemKind::F32Add),
+                        FloatBinOp::Sub => Some(VecElemKind::F32Sub),
+                        FloatBinOp::Mul => Some(VecElemKind::F32Mul),
+                        FloatBinOp::Div => Some(VecElemKind::F32Div),
+                        _ => None,
+                    };
+                    let comm = matches!(bop, FloatBinOp::Add | FloatBinOp::Mul);
+                    vk.and_then(|kind| {
+                        let lx = parse_load(x, lkind, esh, eb);
+                        let ly = parse_load(y, lkind, esh, eb);
+                        match (lx, ly) {
+                            (Some((va, bca, fa)), Some((vb, bcb, fb)))
+                                if check_loads(va, bca, Some((vb, bcb))) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: Some(fb),
+                                    src_b_scalar: None,
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (Some((va, bca, fa)), None)
+                                if !is_bi_def(y) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(y),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (None, Some((va, bca, fa)))
+                                if comm && !is_bi_def(x) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(x),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            _ => None,
+                        }
+                    })
+                }
+                (StoreKind::F64, Op::F64Bin(bop, x, y)) => {
+                    let vk = match bop {
+                        FloatBinOp::Add => Some(VecElemKind::F64Add),
+                        FloatBinOp::Sub => Some(VecElemKind::F64Sub),
+                        FloatBinOp::Mul => Some(VecElemKind::F64Mul),
+                        FloatBinOp::Div => Some(VecElemKind::F64Div),
+                        _ => None,
+                    };
+                    let comm = matches!(bop, FloatBinOp::Add | FloatBinOp::Mul);
+                    vk.and_then(|kind| {
+                        let lx = parse_load(x, lkind, esh, eb);
+                        let ly = parse_load(y, lkind, esh, eb);
+                        match (lx, ly) {
+                            (Some((va, bca, fa)), Some((vb, bcb, fb)))
+                                if check_loads(va, bca, Some((vb, bcb))) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: Some(fb),
+                                    src_b_scalar: None,
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (Some((va, bca, fa)), None)
+                                if !is_bi_def(y) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(y),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            (None, Some((va, bca, fa)))
+                                if comm && !is_bi_def(x) && check_loads(va, bca, None) =>
+                            {
+                                Some(MatchPlan::Elem {
+                                    kind,
+                                    dst: dst_form,
+                                    src_a: fa,
+                                    src_b_addr: None,
+                                    src_b_scalar: Some(x),
+                                    src_b_const_i32: None,
+                                    src_b_const_i64: None,
+                                })
+                            }
+                            _ => None,
+                        }
+                    })
+                }
+                _ => None,
+            };
+            let Some(p) = matched_elem else {
+                continue;
+            };
+            (p, eb, esh)
+        } else {
+            // 0 stores: try matching associative integer reduction (`I32Sum`, `I32Xor`, `I64Sum`, `I64Xor`, `I32Dot`).
+            let check_loads = |va: Val,
+                               bca: Option<(Val, u64)>,
+                               vb: Option<(Val, Option<(Val, u64)>)>,
+                               eb64: u64|
+             -> bool {
+                let vb_val = vb.map(|x| x.0);
+                let bcb = vb.and_then(|x| x.1);
+                load_vals.iter().all(|&lv| lv == va || vb_val == Some(lv))
+                    && bounds_checks.iter().all(|&(bc_addr, bc_end)| {
+                        [bca, bcb]
+                            .into_iter()
+                            .flatten()
+                            .any(|(a, o)| bc_addr == a && bc_end <= o.saturating_add(eb64))
+                    })
+            };
+            let mut acc_cand: Option<(usize, MatchPlan, i32, u8)> = None;
+            let mut non_iv_count = 0usize;
+            for (pi, (&p, &next)) in bb.params.iter().zip(then_slice.iter()).enumerate() {
+                if param_step(pi).is_some() {
+                    continue;
+                }
+                non_iv_count += 1;
+                if non_iv_count > 1 {
+                    break;
+                }
+                let Some(next_op) = find_inst(next) else {
+                    break;
+                };
+                let m = match (ir.val_tys[p.0 as usize], next_op) {
+                    (Ty::I32, Op::I32Bin(IntBinOp::Add, x, y)) if x == p || y == p => {
+                        let rhs = if x == p { y } else { x };
+                        if let Some((va, bca, fa)) = parse_load(rhs, LoadKind::I32, 2, 4)
+                            && check_loads(va, bca, None, 4)
+                        {
+                            Some((
+                                MatchPlan::Reduce {
+                                    kind: VecReduceKind::I32Sum,
+                                    acc_pos: pi,
+                                    src_a: fa,
+                                    src_b: None,
+                                    acc_next: next,
+                                },
+                                4,
+                                2,
+                            ))
+                        } else if let Some(Op::I32Bin(IntBinOp::Mul, ma, mb)) = find_inst(rhs)
+                            && let Some((va, bca, fa)) = parse_load(ma, LoadKind::I32, 2, 4)
+                            && let Some((vb, bcb, fb)) = parse_load(mb, LoadKind::I32, 2, 4)
+                            && check_loads(va, bca, Some((vb, bcb)), 4)
+                        {
+                            Some((
+                                MatchPlan::Reduce {
+                                    kind: VecReduceKind::I32Dot,
+                                    acc_pos: pi,
+                                    src_a: fa,
+                                    src_b: Some(fb),
+                                    acc_next: next,
+                                },
+                                4,
+                                2,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    (Ty::I32, Op::I32Bin(IntBinOp::Xor, x, y)) if x == p || y == p => {
+                        let rhs = if x == p { y } else { x };
+                        parse_load(rhs, LoadKind::I32, 2, 4)
+                            .filter(|(va, bca, _)| check_loads(*va, *bca, None, 4))
+                            .map(|(_, _, fa)| {
+                                (
+                                    MatchPlan::Reduce {
+                                        kind: VecReduceKind::I32Xor,
+                                        acc_pos: pi,
+                                        src_a: fa,
+                                        src_b: None,
+                                        acc_next: next,
+                                    },
+                                    4,
+                                    2,
+                                )
+                            })
+                    }
+                    (Ty::I64, Op::I64Bin(IntBinOp::Add, x, y)) if x == p || y == p => {
+                        let rhs = if x == p { y } else { x };
+                        parse_load(rhs, LoadKind::I64, 3, 8)
+                            .filter(|(va, bca, _)| check_loads(*va, *bca, None, 8))
+                            .map(|(_, _, fa)| {
+                                (
+                                    MatchPlan::Reduce {
+                                        kind: VecReduceKind::I64Sum,
+                                        acc_pos: pi,
+                                        src_a: fa,
+                                        src_b: None,
+                                        acc_next: next,
+                                    },
+                                    8,
+                                    3,
+                                )
+                            })
+                    }
+                    (Ty::I64, Op::I64Bin(IntBinOp::Xor, x, y)) if x == p || y == p => {
+                        let rhs = if x == p { y } else { x };
+                        parse_load(rhs, LoadKind::I64, 3, 8)
+                            .filter(|(va, bca, _)| check_loads(*va, *bca, None, 8))
+                            .map(|(_, _, fa)| {
+                                (
+                                    MatchPlan::Reduce {
+                                        kind: VecReduceKind::I64Xor,
+                                        acc_pos: pi,
+                                        src_a: fa,
+                                        src_b: None,
+                                        acc_next: next,
+                                    },
+                                    8,
+                                    3,
+                                )
+                            })
+                    }
+                    _ => None,
+                };
+                if let Some((mp, eb, esh)) = m {
+                    acc_cand = Some((pi, mp, eb, esh));
+                }
+            }
+            if non_iv_count != 1 {
+                continue;
+            }
+            let Some((acc_pi, mp, eb, esh)) = acc_cand else {
+                continue;
+            };
+            let mut all_ok = true;
+            for pi in 0..bb.params.len() {
+                if pi == acc_pi {
+                    continue;
+                }
+                if !matches!(param_step(pi), Some(s) if s == 0 || s == 1 || s == eb) {
+                    all_ok = false;
+                    break;
+                }
+            }
+            if !all_ok {
+                continue;
+            }
+            (mp, eb, esh)
+        };
+
+        // Match counted loop termination condition (`next_iv <u/<s/!= limit`).
+        let mut cmp_iv: Option<(usize, bool, bool, LimSpec)> = None;
+        for (pi, &next_v) in then_slice.iter().enumerate().take(bb.params.len()) {
+            let Some(st) = param_step(pi) else {
+                continue;
+            };
+            if st != 1 && st != elem_bytes {
+                continue;
+            }
+            let is_step_elem = st == elem_bytes;
+            let m = match kind {
+                CmpBranchKind::I32(CmpOp::LtU | CmpOp::Ne) if a == next_v && !is_bi_def(b) => {
+                    Some((false, LimSpec::Val(b)))
+                }
+                CmpBranchKind::I32(CmpOp::GtU | CmpOp::Ne) if b == next_v && !is_bi_def(a) => {
+                    Some((false, LimSpec::Val(a)))
+                }
+                CmpBranchKind::I32Imm(CmpOp::LtU | CmpOp::Ne, imm) if a == next_v => {
+                    Some((false, LimSpec::Const(imm)))
+                }
+                CmpBranchKind::I32(CmpOp::LtS) if a == next_v && !is_bi_def(b) => {
+                    Some((true, LimSpec::Val(b)))
+                }
+                CmpBranchKind::I32(CmpOp::GtS) if b == next_v && !is_bi_def(a) => {
+                    Some((true, LimSpec::Val(a)))
+                }
+                CmpBranchKind::I32Imm(CmpOp::LtS, imm) if a == next_v && imm > 0 => {
+                    Some((true, LimSpec::Const(imm)))
+                }
+                _ => None,
+            };
+            if let Some((is_signed_lt, lim_spec)) = m {
+                cmp_iv = Some((pi, is_step_elem, is_signed_lt, lim_spec));
+                break;
+            }
+        }
+        let Some((cmp_pi, cmp_is_step_elem, is_signed_lt, lim_spec)) = cmp_iv else {
+            continue;
+        };
+
+        // Verify all `else_args` can be synthesized after the vectorized loop.
+        let orig_else_args: Vec<Val> = ir.pool_slice(else_args).to_vec();
+        let entry_vals: Vec<Val> = ir.pool_slice(entry_args).to_vec();
+        let mut exit_plans: Vec<ExitArgPlan> = Vec::with_capacity(orig_else_args.len());
+        let mut exit_ok = true;
+        let reduce_acc_next = match plan {
+            MatchPlan::Reduce { acc_next, .. } => Some(acc_next),
+            MatchPlan::Elem { .. } => None,
+        };
+        for &ev in &orig_else_args {
+            if !is_bi_def(ev) {
+                exit_plans.push(ExitArgPlan::External(ev));
+            } else if reduce_acc_next == Some(ev) {
+                exit_plans.push(ExitArgPlan::FinalReduce);
+            } else if let Some(pi) = bb.params.iter().position(|&p| p == ev)
+                && param_step(pi) == Some(0)
+            {
+                exit_plans.push(ExitArgPlan::EntryParam(pi));
+            } else if let Some(pi) = then_slice.iter().position(|&ta| ta == ev) {
+                match param_step(pi) {
+                    Some(0) => exit_plans.push(ExitArgPlan::EntryParam(pi)),
+                    Some(1) => exit_plans.push(ExitArgPlan::FinalStep1(pi)),
+                    Some(s) if s == elem_bytes => exit_plans.push(ExitArgPlan::FinalStepElem(pi)),
+                    _ => {
+                        exit_ok = false;
+                        break;
+                    }
+                }
+            } else {
+                exit_ok = false;
+                break;
+            }
+        }
+        if !exit_ok {
+            continue;
+        }
+
+        // Build `guard_bb` -> (`fast_bb` -> `else_bb`) | `bi` (exact scalar fallback).
+        let guard_bb_id = BlockId(ir.blocks.len() as u32);
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: Vec::new(),
+            term: Term::Unreachable,
+            is_loop_header: false,
+            preds: 1,
+        });
+        let guard_idx = guard_bb_id.0 as usize;
+        let emit_pre = |ir: &mut IrFunc, ty: Ty, op: Op| -> Val {
+            let v = ir.push_val(ty);
+            ir.blocks[guard_idx].insts.push(Inst { res: Some(v), op });
+            v
+        };
+
+        let cmp_init = entry_vals[cmp_pi];
+        let lim_val = match lim_spec {
+            LimSpec::Val(v) => v,
+            LimSpec::Const(c) => emit_pre(ir, Ty::I32, Op::ConstI32(c)),
+        };
+        let mut guard_ok = emit_pre(ir, Ty::I32, Op::I32Cmp(CmpOp::LtU, cmp_init, lim_val));
+        if is_signed_lt {
+            let lim_nonneg = emit_pre(ir, Ty::I32, Op::I32CmpImm(CmpOp::LeU, lim_val, i32::MAX));
+            guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, lim_nonneg));
+        }
+        let diff = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::Sub, lim_val, cmp_init));
+        let count_v = if cmp_is_step_elem {
+            let rem = emit_pre(
+                ir,
+                Ty::I32,
+                Op::I32BinImm(IntBinOp::And, diff, elem_bytes - 1),
+            );
+            let aligned = emit_pre(ir, Ty::I32, Op::I32Eqz(rem));
+            guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, aligned));
+            emit_pre(
+                ir,
+                Ty::I32,
+                Op::I32BinImm(IntBinOp::ShrU, diff, i32::from(elem_shift)),
+            )
+        } else {
+            diff
+        };
+        let max_cnt = if elem_bytes == 4 {
+            0x3fff_ffffi32
+        } else {
+            0x1fff_ffffi32
+        };
+        let cnt_ge4 = emit_pre(ir, Ty::I32, Op::I32CmpImm(CmpOp::GeU, count_v, 4));
+        let cnt_le_max = emit_pre(ir, Ty::I32, Op::I32CmpImm(CmpOp::LeU, count_v, max_cnt));
+        guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, cnt_ge4));
+        guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, cnt_le_max));
+
+        let count64 = emit_pre(ir, Ty::I64, Op::I64ExtendI32U(count_v));
+        let byte_len64 = emit_pre(
+            ir,
+            Ty::I64,
+            Op::I64BinImm(IntBinOp::Shl, count64, i32::from(elem_shift)),
+        );
+        let u32_max64 = emit_pre(ir, Ty::I64, Op::ConstI64(u32::MAX as i64));
+
+        let build_range64 = |ir: &mut IrFunc, form: AddrForm, guard_ok: &mut Val| -> (Val, Val) {
+            let ep = |ir: &mut IrFunc, ty: Ty, op: Op| -> Val {
+                let v = ir.push_val(ty);
+                ir.blocks[guard_idx].insts.push(Inst { res: Some(v), op });
+                v
+            };
+            let (raw_start64, off) = match form {
+                AddrForm::Indexed { base, iv_pos, off } => {
+                    let iv0 = entry_vals[iv_pos];
+                    let iv0_64 = ep(ir, Ty::I64, Op::I64ExtendI32U(iv0));
+                    let iv_end64 = ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, iv0_64, count64));
+                    let scaled_end64 = ep(
+                        ir,
+                        Ty::I64,
+                        Op::I64BinImm(IntBinOp::Shl, iv_end64, i32::from(elem_shift)),
+                    );
+                    let scaled_start64 = ep(
+                        ir,
+                        Ty::I64,
+                        Op::I64BinImm(IntBinOp::Shl, iv0_64, i32::from(elem_shift)),
+                    );
+                    if let Some(bv) = base {
+                        let b64 = ep(ir, Ty::I64, Op::I64ExtendI32U(bv));
+                        let total_end64 =
+                            ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, b64, scaled_end64));
+                        let no_wrap =
+                            ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, total_end64, u32_max64));
+                        *guard_ok = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::And, *guard_ok, no_wrap));
+                        let s64 = ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, b64, scaled_start64));
+                        (s64, off)
+                    } else {
+                        let no_wrap =
+                            ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, scaled_end64, u32_max64));
+                        *guard_ok = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::And, *guard_ok, no_wrap));
+                        (scaled_start64, off)
+                    }
+                }
+                AddrForm::StepPtr { ptr_pos, off } => {
+                    let p0 = entry_vals[ptr_pos];
+                    let p0_64 = ep(ir, Ty::I64, Op::I64ExtendI32U(p0));
+                    let p_end64 = ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, p0_64, byte_len64));
+                    let no_wrap = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, p_end64, u32_max64));
+                    *guard_ok = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::And, *guard_ok, no_wrap));
+                    (p0_64, off)
+                }
+            };
+            let start64 = if off != 0 {
+                let off64 = ep(ir, Ty::I64, Op::ConstI64(off as i64));
+                let s = ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, raw_start64, off64));
+                let no_wrap = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, s, u32_max64));
+                *guard_ok = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::And, *guard_ok, no_wrap));
+                s
+            } else {
+                raw_start64
+            };
+            let end64 = ep(ir, Ty::I64, Op::I64Bin(IntBinOp::Add, start64, byte_len64));
+            if off != 0 {
+                let end_no_wrap = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, end64, u32_max64));
+                *guard_ok = ep(
+                    ir,
+                    Ty::I32,
+                    Op::I32Bin(IntBinOp::And, *guard_ok, end_no_wrap),
+                );
+            }
+            (start64, end64)
+        };
+
+        let mem_pages = emit_pre(ir, Ty::I32, Op::MemSize);
+        let mem_pages64 = emit_pre(ir, Ty::I64, Op::I64ExtendI32U(mem_pages));
+        let mem_bytes64 = emit_pre(ir, Ty::I64, Op::I64BinImm(IntBinOp::Shl, mem_pages64, 16));
+
+        let check_no_partial_overlap =
+            |ir: &mut IrFunc, ds: Val, de: Val, ss: Val, se: Val, guard_ok: &mut Val| {
+                let ep = |ir: &mut IrFunc, ty: Ty, op: Op| -> Val {
+                    let v = ir.push_val(ty);
+                    ir.blocks[guard_idx].insts.push(Inst { res: Some(v), op });
+                    v
+                };
+                let same = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::Eq, ds, ss));
+                let d_before = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, de, ss));
+                let s_before = ep(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, se, ds));
+                let o1 = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::Or, same, d_before));
+                let ok = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::Or, o1, s_before));
+                *guard_ok = ep(ir, Ty::I32, Op::I32Bin(IntBinOp::And, *guard_ok, ok));
+            };
+
+        let fast_bb_id = BlockId(ir.blocks.len() as u32);
+        let mut fast_insts: Vec<Inst> = Vec::new();
+        let emit_fast = |ir: &mut IrFunc, insts: &mut Vec<Inst>, ty: Ty, op: Op| -> Val {
+            let v = ir.push_val(ty);
+            insts.push(Inst { res: Some(v), op });
+            v
+        };
+
+        let final_reduce_val: Option<Val> = match plan {
+            MatchPlan::Elem {
+                kind,
+                dst,
+                src_a,
+                src_b_addr,
+                src_b_scalar,
+                src_b_const_i32,
+                src_b_const_i64,
+            } => {
+                let (ds, de) = build_range64(ir, dst, &mut guard_ok);
+                let (as_, ae) = build_range64(ir, src_a, &mut guard_ok);
+                let d_ib = emit_pre(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, de, mem_bytes64));
+                let a_ib = emit_pre(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, ae, mem_bytes64));
+                guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, d_ib));
+                guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, a_ib));
+                check_no_partial_overlap(ir, ds, de, as_, ae, &mut guard_ok);
+
+                let (src_b_val, rhs_is_scalar) = if let Some(bf) = src_b_addr {
+                    let (bs, be) = build_range64(ir, bf, &mut guard_ok);
+                    let b_ib = emit_pre(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, be, mem_bytes64));
+                    guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, b_ib));
+                    check_no_partial_overlap(ir, ds, de, bs, be, &mut guard_ok);
+                    let bu = emit_fast(ir, &mut fast_insts, Ty::I32, Op::I32WrapI64(bs));
+                    (bu, false)
+                } else if let Some(sv) = src_b_scalar {
+                    (sv, true)
+                } else if let Some(ci) = src_b_const_i32 {
+                    let cv = emit_fast(ir, &mut fast_insts, Ty::I32, Op::ConstI32(ci));
+                    (cv, true)
+                } else {
+                    let cv = emit_fast(
+                        ir,
+                        &mut fast_insts,
+                        Ty::I64,
+                        Op::ConstI64(src_b_const_i64.unwrap()),
+                    );
+                    (cv, true)
+                };
+                let dst_u32 = emit_fast(ir, &mut fast_insts, Ty::I32, Op::I32WrapI64(ds));
+                let src_a_u32 = emit_fast(ir, &mut fast_insts, Ty::I32, Op::I32WrapI64(as_));
+                fast_insts.push(Inst {
+                    res: None,
+                    op: Op::VecElemLoop {
+                        kind,
+                        dst: dst_u32,
+                        src_a: src_a_u32,
+                        src_b: src_b_val,
+                        count: count_v,
+                        rhs_is_scalar,
+                    },
+                });
+                None
+            }
+            MatchPlan::Reduce {
+                kind,
+                acc_pos,
+                src_a,
+                src_b,
+                ..
+            } => {
+                let (as_, ae) = build_range64(ir, src_a, &mut guard_ok);
+                let a_ib = emit_pre(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, ae, mem_bytes64));
+                guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, a_ib));
+                let src_a_u32 = emit_fast(ir, &mut fast_insts, Ty::I32, Op::I32WrapI64(as_));
+                let src_b_u32 = if let Some(bf) = src_b {
+                    let (bs, be) = build_range64(ir, bf, &mut guard_ok);
+                    let b_ib = emit_pre(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, be, mem_bytes64));
+                    guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, b_ib));
+                    emit_fast(ir, &mut fast_insts, Ty::I32, Op::I32WrapI64(bs))
+                } else {
+                    src_a_u32
+                };
+                let vred = emit_fast(
+                    ir,
+                    &mut fast_insts,
+                    kind.result_ty(),
+                    Op::VecReduceLoop {
+                        kind,
+                        src_a: src_a_u32,
+                        src_b: src_b_u32,
+                        count: count_v,
+                    },
+                );
+                let init_acc = entry_vals[acc_pos];
+                let comb_op = match kind {
+                    VecReduceKind::I32Sum | VecReduceKind::I32Dot => {
+                        Op::I32Bin(IntBinOp::Add, init_acc, vred)
+                    }
+                    VecReduceKind::I32Xor => Op::I32Bin(IntBinOp::Xor, init_acc, vred),
+                    VecReduceKind::I64Sum => Op::I64Bin(IntBinOp::Add, init_acc, vred),
+                    VecReduceKind::I64Xor => Op::I64Bin(IntBinOp::Xor, init_acc, vred),
+                };
+                let acc_done = emit_fast(ir, &mut fast_insts, kind.result_ty(), comb_op);
+                Some(acc_done)
+            }
+        };
+
+        let mut fast_exit_vals: Vec<Val> = Vec::with_capacity(exit_plans.len());
+        let mut byte_len32: Option<Val> = None;
+        for ep in exit_plans {
+            match ep {
+                ExitArgPlan::External(v) => fast_exit_vals.push(v),
+                ExitArgPlan::EntryParam(pi) => fast_exit_vals.push(entry_vals[pi]),
+                ExitArgPlan::FinalStep1(pi) => {
+                    let v = emit_fast(
+                        ir,
+                        &mut fast_insts,
+                        Ty::I32,
+                        Op::I32Bin(IntBinOp::Add, entry_vals[pi], count_v),
+                    );
+                    fast_exit_vals.push(v);
+                }
+                ExitArgPlan::FinalStepElem(pi) => {
+                    let bl = *byte_len32.get_or_insert_with(|| {
+                        emit_fast(
+                            ir,
+                            &mut fast_insts,
+                            Ty::I32,
+                            Op::I32BinImm(IntBinOp::Shl, count_v, i32::from(elem_shift)),
+                        )
+                    });
+                    let v = emit_fast(
+                        ir,
+                        &mut fast_insts,
+                        Ty::I32,
+                        Op::I32Bin(IntBinOp::Add, entry_vals[pi], bl),
+                    );
+                    fast_exit_vals.push(v);
+                }
+                ExitArgPlan::FinalReduce => fast_exit_vals.push(final_reduce_val.unwrap()),
+            }
+        }
+        let Ok(fast_else_args) = ir.push_pool(&fast_exit_vals) else {
+            ir.blocks.pop();
+            continue;
+        };
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: fast_insts,
+            term: Term::Jump {
+                target: else_bb,
+                args: fast_else_args,
+            },
+            is_loop_header: false,
+            preds: 1,
+        });
+        ir.blocks[else_bb.0 as usize].preds = ir.blocks[else_bb.0 as usize].preds.saturating_add(1);
+        ir.blocks[guard_idx].term = Term::BranchIf {
+            cond: guard_ok,
+            then_bb: fast_bb_id,
+            then_args: ValRange::EMPTY,
+            else_bb: bi_id,
+            else_args: entry_args,
+        };
+        match (&mut ir.blocks[pre_idx].term, pre_edge) {
+            (Term::Jump { target, args }, PreEdge::Jump) => {
+                *target = guard_bb_id;
+                *args = ValRange::EMPTY;
+            }
+            (
+                Term::BranchIf {
+                    then_bb, then_args, ..
+                }
+                | Term::CmpBranch {
+                    then_bb, then_args, ..
+                },
+                PreEdge::ThenArm,
+            ) => {
+                *then_bb = guard_bb_id;
+                *then_args = ValRange::EMPTY;
+            }
+            (
+                Term::BranchIf {
+                    else_bb: eb,
+                    else_args: ea,
+                    ..
+                }
+                | Term::CmpBranch {
+                    else_bb: eb,
+                    else_args: ea,
+                    ..
+                },
+                PreEdge::ElseArm,
+            ) => {
+                *eb = guard_bb_id;
+                *ea = ValRange::EMPTY;
+            }
+            _ => unreachable!(),
+        }
+        ir.blocks[bi].preds = 2;
         changed = true;
     }
 
@@ -17300,6 +18684,8 @@ fn op_touches_linear_mem(op: &Op) -> bool {
             | Op::MemByteBlur3Div { .. }
             | Op::F64x4BinMem { .. }
             | Op::F64AxpyLoop { .. }
+            | Op::VecElemLoop { .. }
+            | Op::VecReduceLoop { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
             | Op::Trap(_)

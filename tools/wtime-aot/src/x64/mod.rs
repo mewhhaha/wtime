@@ -493,6 +493,7 @@ impl Default for X64CompileOptions {
                 has_abm_bmi1: false,
                 has_bmi2: false,
                 has_avx2: false,
+                has_avx512: false,
             },
             jobs: 0,
             deadline: None,
@@ -512,16 +513,23 @@ pub fn parse_x64_target_cpu_syntax(target_cpu: &str) -> Result<Option<&'static s
     match target_cpu {
         "native" => Ok(None),
         "x86-64-v2" | "generic" => Ok(Some("x64-v2")),
-        "x86-64-v3" | "x86-64-v4" | "haswell" | "broadwell" | "skylake" | "skylake-avx512"
-        | "cascadelake" | "cooperlake" | "cannonlake" | "icelake-client" | "icelake-server"
-        | "tigerlake" | "rocketlake" | "alderlake" | "raptorlake" | "sapphirerapids"
-        | "emeraldrapids" | "graniterapids" => Ok(Some("x64-v3")),
+        "x86-64-v3" | "haswell" | "broadwell" | "skylake" | "alderlake" | "raptorlake" => {
+            Ok(Some("x64-v3"))
+        }
+        "x86-64-v4" | "skylake-avx512" | "cascadelake" | "cooperlake" | "cannonlake"
+        | "icelake-client" | "icelake-server" | "tigerlake" | "rocketlake" | "sapphirerapids"
+        | "emeraldrapids" | "graniterapids" => Ok(Some("x64-v4")),
         other
             if other
                 .strip_prefix("znver")
                 .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())) =>
         {
-            Ok(Some("x64-v3"))
+            let ver = other["znver".len()..].parse::<u32>().unwrap_or(0);
+            if ver >= 4 {
+                Ok(Some("x64-v4"))
+            } else {
+                Ok(Some("x64-v3"))
+            }
         }
         other => Err(format!(
             "unsupported --target-cpu {other:?} for --backend x64 (expected native, x86-64-v2, generic, x86-64-v3, x86-64-v4, znver<N>, or haswell+)"
@@ -529,7 +537,7 @@ pub fn parse_x64_target_cpu_syntax(target_cpu: &str) -> Result<Option<&'static s
     }
 }
 
-/// Resolves `--target-cpu` to the canonical internal ISA profile tag (`"x64-v2"` or `"x64-v3"`)
+/// Resolves `--target-cpu` to the canonical internal ISA profile tag (`"x64-v2"`, `"x64-v3"`, or `"x64-v4"`)
 /// and `TargetIsa`, enforcing Linux x86-64 LP64 host support after syntax validation.
 pub fn resolve_x64_isa(target_cpu: &str) -> Result<(&'static str, TargetIsa), String> {
     let explicit = parse_x64_target_cpu_syntax(target_cpu)?;
@@ -556,18 +564,28 @@ pub fn resolve_x64_isa(target_cpu: &str) -> Result<(&'static str, TargetIsa), St
                     && std::is_x86_feature_detected!("bmi2")
                     && std::is_x86_feature_detected!("avx2")
                 {
-                    "x64-v3"
+                    if std::is_x86_feature_detected!("avx512f")
+                        && std::is_x86_feature_detected!("avx512dq")
+                        && std::is_x86_feature_detected!("avx512bw")
+                        && std::is_x86_feature_detected!("avx512vl")
+                    {
+                        "x64-v4"
+                    } else {
+                        "x64-v3"
+                    }
                 } else {
                     "x64-v2"
                 }
             }
         };
+        let is_v3_plus = tag == "x64-v3" || tag == "x64-v4";
         Ok((
             tag,
             TargetIsa {
-                has_abm_bmi1: tag == "x64-v3",
-                has_bmi2: tag == "x64-v3",
-                has_avx2: tag == "x64-v3",
+                has_abm_bmi1: is_v3_plus,
+                has_bmi2: is_v3_plus,
+                has_avx2: is_v3_plus,
+                has_avx512: tag == "x64-v4",
             },
         ))
     }

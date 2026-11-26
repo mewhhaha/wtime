@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::ir::{
     CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, StoreKind, Term,
-    Ty, Val, ValRange,
+    Ty, Val, ValRange, VecElemKind, VecReduceKind,
 };
 use super::module::{
     CompileBudget, MAX_BLOCKS_PER_FN, MAX_FN_CODE_BYTES, MAX_FN_LOCAL_RODATA_BYTES,
@@ -533,6 +533,9 @@ pub struct TargetIsa {
     /// Emit AVX2 256-bit VEX sequences (`vmovdqu ymm`, `vpbroadcastb ymm`, `vpsadbw ymm`) + `vzeroupper`
     /// when true, gated by CPUID leaf 1 OSXSAVE/AVX, leaf 7 AVX2, and `xgetbv(0) & 6 == 6`.
     pub has_avx2: bool,
+    /// Emit AVX-512F/DQ/BW/VL 512-bit ZMM + 128-bit EVEX (`vpternlogd`) sequences + `vzeroupper`
+    /// when true, gated by CPUID leaf 7 AVX512{F,DQ,BW,VL} and `xgetbv(0) & 0xe6 == 0xe6`.
+    pub has_avx512: bool,
 }
 
 /// Intra-block live integer `RFLAGS` state preserved across flag-clean instructions (`mov`, `cmovcc`).
@@ -594,70 +597,78 @@ impl<'a> Lower<'a> {
         if let Loc::Remat(RematConst::I64(c)) = self.loc(v) {
             return (c as u64) <= u32::MAX as u64;
         }
-        let table = self.val_upper32_zero.get_or_insert_with(|| {
-            let mut flags = vec![false; self.ir.val_tys.len()];
-            for bb in &self.ir.blocks {
-                for inst in &bb.insts {
-                    let Some(res) = inst.res else {
-                        continue;
-                    };
-                    let z = match inst.op {
-                        Op::ConstI32(_)
-                        | Op::I32Eqz(_)
-                        | Op::I64Eqz(_)
-                        | Op::I32Clz(_)
-                        | Op::I32Ctz(_)
-                        | Op::I32Popcnt(_)
-                        | Op::I64Clz(_)
-                        | Op::I64Ctz(_)
-                        | Op::I64Popcnt(_)
-                        | Op::I32WrapI64(_)
-                        | Op::I64ExtendI32U(_)
-                        | Op::I32Extend8S(_)
-                        | Op::I32Extend16S(_)
-                        | Op::I32Bin(..)
-                        | Op::I32BinImm(..)
-                        | Op::AddScaled { is64: false, .. }
-                        | Op::I32Cmp(..)
-                        | Op::I32CmpImm(..)
-                        | Op::I64Cmp(..)
-                        | Op::I64CmpImm(..)
-                        | Op::F32Cmp(..)
-                        | Op::F64Cmp(..)
-                        | Op::I32ReinterpretF32(_)
-                        | Op::MemByteSum { .. }
-                        | Op::V128ToI32 { .. } => true,
-                        Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
-                        Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
-                        Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
-                        Op::Load { kind, .. } | Op::LoadScaled { kind, .. } => matches!(
-                            kind,
-                            LoadKind::I32
-                                | LoadKind::I32Load8S
-                                | LoadKind::I32Load8U
-                                | LoadKind::I32Load16S
-                                | LoadKind::I32Load16U
-                                | LoadKind::I64Load8U
-                                | LoadKind::I64Load16U
-                                | LoadKind::I64Load32U
-                        ),
-                        Op::V128ExtractLane { kind, .. } => matches!(
-                            kind,
-                            super::ir::SimdLaneKind::I8x16S
-                                | super::ir::SimdLaneKind::I8x16U
-                                | super::ir::SimdLaneKind::I16x8S
-                                | super::ir::SimdLaneKind::I16x8U
-                                | super::ir::SimdLaneKind::I32x4
-                        ),
-                        _ => false,
-                    };
-                    if z {
-                        flags[res.0 as usize] = true;
+        let table =
+            self.val_upper32_zero.get_or_insert_with(|| {
+                let mut flags = vec![false; self.ir.val_tys.len()];
+                for bb in &self.ir.blocks {
+                    for inst in &bb.insts {
+                        let Some(res) = inst.res else {
+                            continue;
+                        };
+                        let z = match inst.op {
+                            Op::ConstI32(_)
+                            | Op::I32Eqz(_)
+                            | Op::I64Eqz(_)
+                            | Op::I32Clz(_)
+                            | Op::I32Ctz(_)
+                            | Op::I32Popcnt(_)
+                            | Op::I64Clz(_)
+                            | Op::I64Ctz(_)
+                            | Op::I64Popcnt(_)
+                            | Op::I32WrapI64(_)
+                            | Op::I64ExtendI32U(_)
+                            | Op::I32Extend8S(_)
+                            | Op::I32Extend16S(_)
+                            | Op::I32Bin(..)
+                            | Op::I32BinImm(..)
+                            | Op::AddScaled { is64: false, .. }
+                            | Op::I32Cmp(..)
+                            | Op::I32CmpImm(..)
+                            | Op::I64Cmp(..)
+                            | Op::I64CmpImm(..)
+                            | Op::F32Cmp(..)
+                            | Op::F64Cmp(..)
+                            | Op::I32ReinterpretF32(_)
+                            | Op::MemByteSum { .. }
+                            | Op::VecReduceLoop {
+                                kind:
+                                    VecReduceKind::I32Sum
+                                    | VecReduceKind::I32Xor
+                                    | VecReduceKind::I32Dot,
+                                ..
+                            }
+                            | Op::V128ToI32 { .. } => true,
+                            Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
+                            Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
+                            Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
+                            Op::Load { kind, .. } | Op::LoadScaled { kind, .. } => matches!(
+                                kind,
+                                LoadKind::I32
+                                    | LoadKind::I32Load8S
+                                    | LoadKind::I32Load8U
+                                    | LoadKind::I32Load16S
+                                    | LoadKind::I32Load16U
+                                    | LoadKind::I64Load8U
+                                    | LoadKind::I64Load16U
+                                    | LoadKind::I64Load32U
+                            ),
+                            Op::V128ExtractLane { kind, .. } => matches!(
+                                kind,
+                                super::ir::SimdLaneKind::I8x16S
+                                    | super::ir::SimdLaneKind::I8x16U
+                                    | super::ir::SimdLaneKind::I16x8S
+                                    | super::ir::SimdLaneKind::I16x8U
+                                    | super::ir::SimdLaneKind::I32x4
+                            ),
+                            _ => false,
+                        };
+                        if z {
+                            flags[res.0 as usize] = true;
+                        }
                     }
                 }
-            }
-            flags
-        });
+                flags
+            });
         table.get(v.0 as usize).copied().unwrap_or(false)
     }
     fn is_nonzero_non_nan_fp_const(&mut self, v: Val) -> bool {
@@ -4875,6 +4886,15 @@ impl<'a> Lower<'a> {
                         self.asm
                             .movdqu_mx(Mem::indexed(Gp::R14, dr, 1, l - 16), SCRATCH_FP2);
                     }
+                } else if self.isa.has_avx512 && len == 64 {
+                    // Single 64-byte AVX-512 load + store (inherently overlap-safe!).
+                    let sr = self.gp_read(src, SCRATCH_GP1);
+                    let dr = self.gp_read(dst, SCRATCH_GP2);
+                    self.asm
+                        .vmovdqu64_zm(SCRATCH_FP1, Mem::indexed(Gp::R14, sr, 1, 0));
+                    self.asm
+                        .vmovdqu64_mz(Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_FP1);
+                    self.asm.vzeroupper();
                 } else if self.isa.has_avx2 && len <= 64 {
                     // Overlap-safe branchless 33..=64 bytes: load BOTH 32-byte halves before storing!
                     let sr = self.gp_read(src, SCRATCH_GP1);
@@ -5019,7 +5039,35 @@ impl<'a> Lower<'a> {
                     self.emit_bounds_check(dr, u64::from(len));
                 }
                 let val_is_zero = matches!(self.loc(val), Loc::Remat(RematConst::I32(0)));
-                if len >= 32 && self.isa.has_avx2 {
+                if len >= 64 && self.isa.has_avx512 {
+                    if val_is_zero {
+                        self.asm.vpxord_zzz(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP1);
+                    } else {
+                        let vr = self.gp_read(val, SCRATCH_GP1);
+                        self.asm.movd_xr(SCRATCH_FP1, vr);
+                        self.asm.vpbroadcastb_zx(SCRATCH_FP1, SCRATCH_FP1);
+                    }
+                    let dr = if spectre_clamped {
+                        self.asm.mov_rm(
+                            true,
+                            SCRATCH_GP2,
+                            Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP),
+                        );
+                        SCRATCH_GP2
+                    } else {
+                        self.gp_read(dst, SCRATCH_GP2)
+                    };
+                    let l = len as i32;
+                    let mut off = 0i32;
+                    while off + 64 < l {
+                        self.asm
+                            .vmovdqu64_mz(Mem::indexed(Gp::R14, dr, 1, off), SCRATCH_FP1);
+                        off += 64;
+                    }
+                    self.asm
+                        .vmovdqu64_mz(Mem::indexed(Gp::R14, dr, 1, l - 64), SCRATCH_FP1);
+                    self.asm.vzeroupper();
+                } else if len >= 32 && self.isa.has_avx2 {
                     if val_is_zero {
                         self.asm.vpxor_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP1);
                     } else {
@@ -5168,7 +5216,69 @@ impl<'a> Lower<'a> {
                 self.asm
                     .movdqu_mx(Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128), Xmm::Xmm0);
 
-                if self.isa.has_avx2 {
+                if self.isa.has_avx512 {
+                    self.asm.vpxord_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
+                    self.asm.vpxord_zzz(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP1);
+                    let lbl_loop128 = self.asm.new_label();
+                    let lbl_after128 = self.asm.new_label();
+                    let lbl_after64 = self.asm.new_label();
+                    let lbl_after32 = self.asm.new_label();
+                    let lbl_after16 = self.asm.new_label();
+
+                    // 128-byte unrolled AVX-512 main loop (`cur <= end - 128`).
+                    self.asm.sub_ri(true, SCRATCH_GP2, 128);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::A, lbl_after128);
+                    self.asm.mark_align32(lbl_loop128);
+                    self.asm.bind(lbl_loop128);
+                    self.asm
+                        .vpsadbw_zzm(SCRATCH_FP2, Xmm::Xmm0, Mem::base(SCRATCH_GP1));
+                    self.asm.vpaddq_zzz(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+                    self.asm
+                        .vpsadbw_zzm(SCRATCH_FP2, Xmm::Xmm0, Mem::base_disp(SCRATCH_GP1, 64));
+                    self.asm.vpaddq_zzz(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+                    self.asm.add_ri(true, SCRATCH_GP1, 128);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::Be, lbl_loop128);
+
+                    self.asm.bind(lbl_after128);
+                    // Optional 64-byte chunk (`cur <= end - 64`).
+                    self.asm.add_ri(true, SCRATCH_GP2, 64);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::A, lbl_after64);
+                    self.asm
+                        .vpsadbw_zzm(SCRATCH_FP2, Xmm::Xmm0, Mem::base(SCRATCH_GP1));
+                    self.asm.vpaddq_zzz(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+                    self.asm.add_ri(true, SCRATCH_GP1, 64);
+
+                    self.asm.bind(lbl_after64);
+                    self.asm.vextracti64x4_yz(SCRATCH_FP2, SCRATCH_FP1, 1);
+                    self.asm.vpaddq_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+
+                    // Optional 32-byte chunk (`cur <= end - 32`).
+                    self.asm.add_ri(true, SCRATCH_GP2, 32);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::A, lbl_after32);
+                    self.asm
+                        .vpsadbw_yym(SCRATCH_FP2, Xmm::Xmm0, Mem::base(SCRATCH_GP1));
+                    self.asm.vpaddq_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+                    self.asm.add_ri(true, SCRATCH_GP1, 32);
+
+                    self.asm.bind(lbl_after32);
+                    self.asm.vextracti128_xy(SCRATCH_FP2, SCRATCH_FP1, 1);
+                    self.asm.vzeroupper();
+                    self.asm.paddq(SCRATCH_FP1, SCRATCH_FP2);
+
+                    // Optional 16-byte chunk (`cur <= end - 16`).
+                    self.asm.add_ri(true, SCRATCH_GP2, 16);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::A, lbl_after16);
+                    self.asm.movdqu_xm(SCRATCH_FP2, Mem::base(SCRATCH_GP1));
+                    self.asm.psadbw(SCRATCH_FP2, Xmm::Xmm0);
+                    self.asm.paddq(SCRATCH_FP1, SCRATCH_FP2);
+
+                    self.asm.bind(lbl_after16);
+                } else if self.isa.has_avx2 {
                     self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
                     self.asm.vpxor_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP1);
                     let lbl_loop64 = self.asm.new_label();
@@ -5397,7 +5507,97 @@ impl<'a> Lower<'a> {
                 self.asm.add_rr(true, Gp::Rax, Gp::R14);
                 self.asm.add_rr(true, Gp::Rdx, Gp::R14);
 
-                if self.isa.has_avx2 {
+                if self.isa.has_avx512 {
+                    // 2× unrolled 512-bit AVX-512 main loop (16× f64 = 128 B/iter) + 8 + 4 + scalar tail.
+                    self.asm.vbroadcastsd_zx(Xmm::Xmm0, SCRATCH_FP2);
+                    let lbl_vec16 = self.asm.new_label();
+                    let lbl_vec8 = self.asm.new_label();
+                    let lbl_vec4 = self.asm.new_label();
+                    let lbl_tail = self.asm.new_label();
+
+                    self.asm.cmp_ri(true, Gp::Rcx, 16);
+                    self.asm.jcc(Cond::B, lbl_vec8);
+
+                    self.asm.mark_align32(lbl_vec16);
+                    self.asm.bind(lbl_vec16);
+                    self.asm
+                        .vmulpd_zzm(Xmm::Xmm1, Xmm::Xmm0, Mem::base(Gp::Rdx));
+                    self.asm
+                        .vmulpd_zzm(Xmm::Xmm2, Xmm::Xmm0, Mem::base_disp(Gp::Rdx, 64));
+                    if !is_sub {
+                        self.asm
+                            .vaddpd_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rax));
+                        self.asm
+                            .vaddpd_zzm(Xmm::Xmm2, Xmm::Xmm2, Mem::base_disp(Gp::Rax, 64));
+                    } else {
+                        self.asm.vmovupd_zm(SCRATCH_FP1, Mem::base(Gp::Rax));
+                        self.asm.vsubpd_zzz(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                        self.asm
+                            .vmovupd_zm(SCRATCH_FP1, Mem::base_disp(Gp::Rax, 64));
+                        self.asm.vsubpd_zzz(Xmm::Xmm2, SCRATCH_FP1, Xmm::Xmm2);
+                    }
+                    self.asm.vmovupd_mz(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.vmovupd_mz(Mem::base_disp(Gp::Rax, 64), Xmm::Xmm2);
+                    self.asm.add_ri(true, Gp::Rdx, 128);
+                    self.asm.add_ri(true, Gp::Rax, 128);
+                    self.asm.sub_ri(true, Gp::Rcx, 16);
+                    self.asm.cmp_ri(true, Gp::Rcx, 16);
+                    self.asm.jcc(Cond::Ae, lbl_vec16);
+
+                    self.asm.bind(lbl_vec8);
+                    self.asm.cmp_ri(true, Gp::Rcx, 8);
+                    self.asm.jcc(Cond::B, lbl_vec4);
+                    self.asm
+                        .vmulpd_zzm(Xmm::Xmm1, Xmm::Xmm0, Mem::base(Gp::Rdx));
+                    if !is_sub {
+                        self.asm
+                            .vaddpd_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rax));
+                    } else {
+                        self.asm.vmovupd_zm(SCRATCH_FP1, Mem::base(Gp::Rax));
+                        self.asm.vsubpd_zzz(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.vmovupd_mz(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 64);
+                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.sub_ri(true, Gp::Rcx, 8);
+
+                    self.asm.bind(lbl_vec4);
+                    self.asm.cmp_ri(true, Gp::Rcx, 4);
+                    self.asm.jcc(Cond::B, lbl_tail);
+                    self.asm
+                        .vmulpd_yym(Xmm::Xmm1, Xmm::Xmm0, Mem::base(Gp::Rdx));
+                    if !is_sub {
+                        self.asm
+                            .vaddpd_yym(Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rax));
+                    } else {
+                        self.asm.vmovupd_ym(SCRATCH_FP1, Mem::base(Gp::Rax));
+                        self.asm.vsubpd_yyy(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.vmovupd_my(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 32);
+                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.sub_ri(true, Gp::Rcx, 4);
+
+                    self.asm.bind(lbl_tail);
+                    self.asm.vzeroupper();
+                    self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                    self.asm.jcc(Cond::E, lbl_done);
+                    let lbl_sc = self.asm.new_label();
+                    self.asm.bind(lbl_sc);
+                    self.asm.movsd_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    self.asm.vmulsd_xxx(Xmm::Xmm1, Xmm::Xmm1, SCRATCH_FP2);
+                    self.asm.movsd_xm(SCRATCH_FP1, Mem::base(Gp::Rax));
+                    if !is_sub {
+                        self.asm.vaddsd_xxx(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    } else {
+                        self.asm.vsubsd_xxx(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.movsd_mx(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 8);
+                    self.asm.add_ri(true, Gp::Rax, 8);
+                    self.asm.sub_ri(true, Gp::Rcx, 1);
+                    self.asm.jcc(Cond::Ne, lbl_sc);
+                } else if self.isa.has_avx2 {
                     self.asm.vbroadcastsd_yx(Xmm::Xmm0, SCRATCH_FP2);
                     let lbl_vec8 = self.asm.new_label();
                     let lbl_vec4 = self.asm.new_label();
@@ -5508,6 +5708,875 @@ impl<'a> Lower<'a> {
                     self.asm.movsd_mx(Mem::base(Gp::Rax), SCRATCH_FP1);
                 }
                 self.asm.bind(lbl_done);
+            }
+            Op::VecElemLoop {
+                kind,
+                dst,
+                src_a,
+                src_b,
+                count,
+                rhs_is_scalar,
+            } => {
+                // Load scalar RHS into Xmm0 FIRST (if scalar), then load pointer/count operands into
+                // Rax=dst, Rdx=src_a, Rsi=src_b (if array), Rcx=count via alias-safe parallel moves.
+                let is8 = kind.elem_bytes() == 8;
+                if rhs_is_scalar {
+                    if kind.elem_ty().is_fp() {
+                        let rr = self.fp_read(src_b, Xmm::Xmm0);
+                        if rr != Xmm::Xmm0 {
+                            self.asm.movaps_rr(Xmm::Xmm0, rr);
+                        }
+                    } else {
+                        let gr = self.gp_read(src_b, SCRATCH_GP1);
+                        if is8 {
+                            self.asm.movq_xr(Xmm::Xmm0, gr);
+                        } else {
+                            self.asm.movd_xr(Xmm::Xmm0, gr);
+                        }
+                    }
+                    let moves = [
+                        (MoveLoc::Gp(Gp::Rax), MoveLoc::from(self.loc(dst)), Ty::I32),
+                        (
+                            MoveLoc::Gp(Gp::Rdx),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Gp::Rcx),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                } else {
+                    let moves = [
+                        (MoveLoc::Gp(Gp::Rax), MoveLoc::from(self.loc(dst)), Ty::I32),
+                        (
+                            MoveLoc::Gp(Gp::Rdx),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Gp::Rsi),
+                            MoveLoc::from(self.loc(src_b)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Gp::Rcx),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                }
+                let lbl_done = self.asm.new_label();
+                self.asm.mov_rr(false, Gp::Rcx, Gp::Rcx);
+                self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                self.asm.jcc(Cond::E, lbl_done);
+                self.asm.mov_rr(false, Gp::Rax, Gp::Rax);
+                self.asm.add_rr(true, Gp::Rax, Gp::R14);
+                self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                self.asm.add_rr(true, Gp::Rdx, Gp::R14);
+                if !rhs_is_scalar {
+                    self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
+                    self.asm.add_rr(true, Gp::Rsi, Gp::R14);
+                }
+
+                let emit_zmm_load = |asm: &mut Asm, d: Xmm, mem: Mem| match kind {
+                    VecElemKind::F32Add
+                    | VecElemKind::F32Sub
+                    | VecElemKind::F32Mul
+                    | VecElemKind::F32Div => asm.vmovups_zm(d, mem),
+                    VecElemKind::F64Add
+                    | VecElemKind::F64Sub
+                    | VecElemKind::F64Mul
+                    | VecElemKind::F64Div => asm.vmovupd_zm(d, mem),
+                    VecElemKind::I64Add
+                    | VecElemKind::I64Sub
+                    | VecElemKind::I64And
+                    | VecElemKind::I64Or
+                    | VecElemKind::I64Xor => asm.vmovdqu64_zm(d, mem),
+                    _ => asm.vmovdqu32_zm(d, mem),
+                };
+                let emit_zmm_store = |asm: &mut Asm, mem: Mem, s: Xmm| match kind {
+                    VecElemKind::F32Add
+                    | VecElemKind::F32Sub
+                    | VecElemKind::F32Mul
+                    | VecElemKind::F32Div => asm.vmovups_mz(mem, s),
+                    VecElemKind::F64Add
+                    | VecElemKind::F64Sub
+                    | VecElemKind::F64Mul
+                    | VecElemKind::F64Div => asm.vmovupd_mz(mem, s),
+                    VecElemKind::I64Add
+                    | VecElemKind::I64Sub
+                    | VecElemKind::I64And
+                    | VecElemKind::I64Or
+                    | VecElemKind::I64Xor => asm.vmovdqu64_mz(mem, s),
+                    _ => asm.vmovdqu32_mz(mem, s),
+                };
+                let emit_zmm_op_rr = |asm: &mut Asm, d: Xmm, a: Xmm, b: Xmm| match kind {
+                    VecElemKind::I32Add => asm.vpaddd_zzz(d, a, b),
+                    VecElemKind::I32Sub => asm.vpsubd_zzz(d, a, b),
+                    VecElemKind::I32Mul => asm.vpmulld_zzz(d, a, b),
+                    VecElemKind::I32And => asm.vpandd_zzz(d, a, b),
+                    VecElemKind::I32Or => asm.vpord_zzz(d, a, b),
+                    VecElemKind::I32Xor => asm.vpxord_zzz(d, a, b),
+                    VecElemKind::I64Add => asm.vpaddq_zzz(d, a, b),
+                    VecElemKind::I64Sub => asm.vpsubq_zzz(d, a, b),
+                    VecElemKind::I64And => asm.vpandq_zzz(d, a, b),
+                    VecElemKind::I64Or => asm.vporq_zzz(d, a, b),
+                    VecElemKind::I64Xor => asm.vpxorq_zzz(d, a, b),
+                    VecElemKind::F32Add => asm.vaddps_zzz(d, a, b),
+                    VecElemKind::F32Sub => asm.vsubps_zzz(d, a, b),
+                    VecElemKind::F32Mul => asm.vmulps_zzz(d, a, b),
+                    VecElemKind::F32Div => asm.vdivps_zzz(d, a, b),
+                    VecElemKind::F64Add => asm.vaddpd_zzz(d, a, b),
+                    VecElemKind::F64Sub => asm.vsubpd_zzz(d, a, b),
+                    VecElemKind::F64Mul => asm.vmulpd_zzz(d, a, b),
+                    VecElemKind::F64Div => asm.vdivpd_zzz(d, a, b),
+                };
+                let emit_zmm_op_rm = |asm: &mut Asm, d: Xmm, a: Xmm, mem: Mem| match kind {
+                    VecElemKind::I32Add => asm.vpaddd_zzm(d, a, mem),
+                    VecElemKind::I32Sub => asm.vpsubd_zzm(d, a, mem),
+                    VecElemKind::I32Mul => asm.vpmulld_zzm(d, a, mem),
+                    VecElemKind::I32And => asm.vpandd_zzm(d, a, mem),
+                    VecElemKind::I32Or => asm.vpord_zzm(d, a, mem),
+                    VecElemKind::I32Xor => asm.vpxord_zzm(d, a, mem),
+                    VecElemKind::I64Add => asm.vpaddq_zzm(d, a, mem),
+                    VecElemKind::I64Sub => asm.vpsubq_zzm(d, a, mem),
+                    VecElemKind::I64And => asm.vpandq_zzm(d, a, mem),
+                    VecElemKind::I64Or => asm.vporq_zzm(d, a, mem),
+                    VecElemKind::I64Xor => asm.vpxorq_zzm(d, a, mem),
+                    VecElemKind::F32Add => asm.vaddps_zzm(d, a, mem),
+                    VecElemKind::F32Sub => asm.vsubps_zzm(d, a, mem),
+                    VecElemKind::F32Mul => asm.vmulps_zzm(d, a, mem),
+                    VecElemKind::F32Div => asm.vdivps_zzm(d, a, mem),
+                    VecElemKind::F64Add => asm.vaddpd_zzm(d, a, mem),
+                    VecElemKind::F64Sub => asm.vsubpd_zzm(d, a, mem),
+                    VecElemKind::F64Mul => asm.vmulpd_zzm(d, a, mem),
+                    VecElemKind::F64Div => asm.vdivpd_zzm(d, a, mem),
+                };
+                let emit_ymm_load = |asm: &mut Asm, d: Xmm, mem: Mem| match kind {
+                    VecElemKind::F32Add
+                    | VecElemKind::F32Sub
+                    | VecElemKind::F32Mul
+                    | VecElemKind::F32Div => asm.vmovups_ym(d, mem),
+                    VecElemKind::F64Add
+                    | VecElemKind::F64Sub
+                    | VecElemKind::F64Mul
+                    | VecElemKind::F64Div => asm.vmovupd_ym(d, mem),
+                    _ => asm.vmovdqu_ym(d, mem),
+                };
+                let emit_ymm_store = |asm: &mut Asm, mem: Mem, s: Xmm| match kind {
+                    VecElemKind::F32Add
+                    | VecElemKind::F32Sub
+                    | VecElemKind::F32Mul
+                    | VecElemKind::F32Div => asm.vmovups_my(mem, s),
+                    VecElemKind::F64Add
+                    | VecElemKind::F64Sub
+                    | VecElemKind::F64Mul
+                    | VecElemKind::F64Div => asm.vmovupd_my(mem, s),
+                    _ => asm.vmovdqu_my(mem, s),
+                };
+                let emit_ymm_op_rr = |asm: &mut Asm, d: Xmm, a: Xmm, b: Xmm| match kind {
+                    VecElemKind::I32Add => asm.vpaddd_yyy(d, a, b),
+                    VecElemKind::I32Sub => asm.vpsubd_yyy(d, a, b),
+                    VecElemKind::I32Mul => asm.vpmulld_yyy(d, a, b),
+                    VecElemKind::I32And | VecElemKind::I64And => asm.vpand_yyy(d, a, b),
+                    VecElemKind::I32Or | VecElemKind::I64Or => asm.vpor_yyy(d, a, b),
+                    VecElemKind::I32Xor | VecElemKind::I64Xor => asm.vpxor_yyy(d, a, b),
+                    VecElemKind::I64Add => asm.vpaddq_yyy(d, a, b),
+                    VecElemKind::I64Sub => asm.vpsubq_yyy(d, a, b),
+                    VecElemKind::F32Add => asm.vaddps_yyy(d, a, b),
+                    VecElemKind::F32Sub => asm.vsubps_yyy(d, a, b),
+                    VecElemKind::F32Mul => asm.vmulps_yyy(d, a, b),
+                    VecElemKind::F32Div => asm.vdivps_yyy(d, a, b),
+                    VecElemKind::F64Add => asm.vaddpd_yyy(d, a, b),
+                    VecElemKind::F64Sub => asm.vsubpd_yyy(d, a, b),
+                    VecElemKind::F64Mul => asm.vmulpd_yyy(d, a, b),
+                    VecElemKind::F64Div => asm.vdivpd_yyy(d, a, b),
+                };
+                let emit_ymm_op_rm = |asm: &mut Asm, d: Xmm, a: Xmm, mem: Mem| match kind {
+                    VecElemKind::I32Add => asm.vpaddd_yym(d, a, mem),
+                    VecElemKind::I32Sub => asm.vpsubd_yym(d, a, mem),
+                    VecElemKind::I32Mul => asm.vpmulld_yym(d, a, mem),
+                    VecElemKind::I32And | VecElemKind::I64And => asm.vpand_yym(d, a, mem),
+                    VecElemKind::I32Or | VecElemKind::I64Or => asm.vpor_yym(d, a, mem),
+                    VecElemKind::I32Xor | VecElemKind::I64Xor => asm.vpxor_yym(d, a, mem),
+                    VecElemKind::I64Add => asm.vpaddq_yym(d, a, mem),
+                    VecElemKind::I64Sub => asm.vpsubq_yym(d, a, mem),
+                    VecElemKind::F32Add => asm.vaddps_yym(d, a, mem),
+                    VecElemKind::F32Sub => asm.vsubps_yym(d, a, mem),
+                    VecElemKind::F32Mul => asm.vmulps_yym(d, a, mem),
+                    VecElemKind::F32Div => asm.vdivps_yym(d, a, mem),
+                    VecElemKind::F64Add => asm.vaddpd_yym(d, a, mem),
+                    VecElemKind::F64Sub => asm.vsubpd_yym(d, a, mem),
+                    VecElemKind::F64Mul => asm.vmulpd_yym(d, a, mem),
+                    VecElemKind::F64Div => asm.vdivpd_yym(d, a, mem),
+                };
+                let emit_xmm_op_rr = |asm: &mut Asm, d: Xmm, b: Xmm| match kind {
+                    VecElemKind::I32Add => asm.paddd(d, b),
+                    VecElemKind::I32Sub => asm.psubd(d, b),
+                    VecElemKind::I32Mul => asm.pmulld(d, b),
+                    VecElemKind::I32And | VecElemKind::I64And => asm.pand(d, b),
+                    VecElemKind::I32Or | VecElemKind::I64Or => asm.por(d, b),
+                    VecElemKind::I32Xor | VecElemKind::I64Xor => asm.pxor(d, b),
+                    VecElemKind::I64Add => asm.paddq(d, b),
+                    VecElemKind::I64Sub => asm.psubq(d, b),
+                    VecElemKind::F32Add => asm.addps(d, b),
+                    VecElemKind::F32Sub => asm.subps(d, b),
+                    VecElemKind::F32Mul => asm.mulps(d, b),
+                    VecElemKind::F32Div => asm.divps(d, b),
+                    VecElemKind::F64Add => asm.addpd(d, b),
+                    VecElemKind::F64Sub => asm.subpd(d, b),
+                    VecElemKind::F64Mul => asm.mulpd(d, b),
+                    VecElemKind::F64Div => asm.divpd(d, b),
+                };
+
+                let lanes_zmm: i32 = if is8 { 8 } else { 16 };
+                let lanes_ymm: i32 = if is8 { 4 } else { 8 };
+                let lanes_xmm: i32 = if is8 { 2 } else { 4 };
+
+                if self.isa.has_avx512 {
+                    if rhs_is_scalar {
+                        match kind.elem_ty() {
+                            Ty::I32 => self.asm.vpbroadcastd_zx(Xmm::Xmm0, Xmm::Xmm0),
+                            Ty::I64 => self.asm.vpbroadcastq_zx(Xmm::Xmm0, Xmm::Xmm0),
+                            Ty::F32 => self.asm.vbroadcastss_zx(Xmm::Xmm0, Xmm::Xmm0),
+                            Ty::F64 => self.asm.vbroadcastsd_zx(Xmm::Xmm0, Xmm::Xmm0),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let lbl_z2 = self.asm.new_label();
+                    let lbl_z1 = self.asm.new_label();
+                    let lbl_y1 = self.asm.new_label();
+                    let lbl_tail = self.asm.new_label();
+
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm * 2);
+                    self.asm.jcc(Cond::B, lbl_z1);
+                    self.asm.mark_align32(lbl_z2);
+                    self.asm.bind(lbl_z2);
+                    emit_zmm_load(&mut self.asm, Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    emit_zmm_load(&mut self.asm, Xmm::Xmm2, Mem::base_disp(Gp::Rdx, 64));
+                    if rhs_is_scalar {
+                        emit_zmm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm0);
+                        emit_zmm_op_rr(&mut self.asm, Xmm::Xmm2, Xmm::Xmm2, Xmm::Xmm0);
+                    } else {
+                        emit_zmm_op_rm(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rsi));
+                        emit_zmm_op_rm(
+                            &mut self.asm,
+                            Xmm::Xmm2,
+                            Xmm::Xmm2,
+                            Mem::base_disp(Gp::Rsi, 64),
+                        );
+                        self.asm.add_ri(true, Gp::Rsi, 128);
+                    }
+                    emit_zmm_store(&mut self.asm, Mem::base(Gp::Rax), Xmm::Xmm1);
+                    emit_zmm_store(&mut self.asm, Mem::base_disp(Gp::Rax, 64), Xmm::Xmm2);
+                    self.asm.add_ri(true, Gp::Rdx, 128);
+                    self.asm.add_ri(true, Gp::Rax, 128);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_zmm * 2);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm * 2);
+                    self.asm.jcc(Cond::Ae, lbl_z2);
+
+                    self.asm.bind(lbl_z1);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm);
+                    self.asm.jcc(Cond::B, lbl_y1);
+                    emit_zmm_load(&mut self.asm, Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    if rhs_is_scalar {
+                        emit_zmm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm0);
+                    } else {
+                        emit_zmm_op_rm(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rsi));
+                        self.asm.add_ri(true, Gp::Rsi, 64);
+                    }
+                    emit_zmm_store(&mut self.asm, Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 64);
+                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_zmm);
+
+                    self.asm.bind(lbl_y1);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm);
+                    self.asm.jcc(Cond::B, lbl_tail);
+                    emit_ymm_load(&mut self.asm, Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    if rhs_is_scalar {
+                        emit_ymm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm0);
+                    } else {
+                        emit_ymm_op_rm(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rsi));
+                        self.asm.add_ri(true, Gp::Rsi, 32);
+                    }
+                    emit_ymm_store(&mut self.asm, Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 32);
+                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_ymm);
+
+                    self.asm.bind(lbl_tail);
+                    self.asm.vzeroupper();
+                } else if self.isa.has_avx2 {
+                    if rhs_is_scalar {
+                        match kind.elem_ty() {
+                            Ty::I32 => self.asm.vpbroadcastd_yx(Xmm::Xmm0, Xmm::Xmm0),
+                            Ty::I64 => self.asm.vpbroadcastq_yx(Xmm::Xmm0, Xmm::Xmm0),
+                            Ty::F32 => self.asm.vbroadcastss_yx(Xmm::Xmm0, Xmm::Xmm0),
+                            Ty::F64 => self.asm.vbroadcastsd_yx(Xmm::Xmm0, Xmm::Xmm0),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let lbl_y2 = self.asm.new_label();
+                    let lbl_y1 = self.asm.new_label();
+                    let lbl_tail = self.asm.new_label();
+
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm * 2);
+                    self.asm.jcc(Cond::B, lbl_y1);
+                    self.asm.mark_align32(lbl_y2);
+                    self.asm.bind(lbl_y2);
+                    emit_ymm_load(&mut self.asm, Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    emit_ymm_load(&mut self.asm, Xmm::Xmm2, Mem::base_disp(Gp::Rdx, 32));
+                    if rhs_is_scalar {
+                        emit_ymm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm0);
+                        emit_ymm_op_rr(&mut self.asm, Xmm::Xmm2, Xmm::Xmm2, Xmm::Xmm0);
+                    } else {
+                        emit_ymm_op_rm(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rsi));
+                        emit_ymm_op_rm(
+                            &mut self.asm,
+                            Xmm::Xmm2,
+                            Xmm::Xmm2,
+                            Mem::base_disp(Gp::Rsi, 32),
+                        );
+                        self.asm.add_ri(true, Gp::Rsi, 64);
+                    }
+                    emit_ymm_store(&mut self.asm, Mem::base(Gp::Rax), Xmm::Xmm1);
+                    emit_ymm_store(&mut self.asm, Mem::base_disp(Gp::Rax, 32), Xmm::Xmm2);
+                    self.asm.add_ri(true, Gp::Rdx, 64);
+                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_ymm * 2);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm * 2);
+                    self.asm.jcc(Cond::Ae, lbl_y2);
+
+                    self.asm.bind(lbl_y1);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm);
+                    self.asm.jcc(Cond::B, lbl_tail);
+                    emit_ymm_load(&mut self.asm, Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    if rhs_is_scalar {
+                        emit_ymm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm0);
+                    } else {
+                        emit_ymm_op_rm(&mut self.asm, Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rsi));
+                        self.asm.add_ri(true, Gp::Rsi, 32);
+                    }
+                    emit_ymm_store(&mut self.asm, Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 32);
+                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_ymm);
+
+                    self.asm.bind(lbl_tail);
+                    self.asm.vzeroupper();
+                } else {
+                    if rhs_is_scalar {
+                        if is8 {
+                            self.asm.punpcklqdq(Xmm::Xmm0, Xmm::Xmm0);
+                        } else {
+                            self.asm.pshufd(Xmm::Xmm0, Xmm::Xmm0, 0x00);
+                        }
+                    }
+                    let lbl_x1 = self.asm.new_label();
+                    let lbl_tail = self.asm.new_label();
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_xmm);
+                    self.asm.jcc(Cond::B, lbl_tail);
+                    self.asm.mark_align16(lbl_x1);
+                    self.asm.bind(lbl_x1);
+                    self.asm.movdqu_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    if rhs_is_scalar {
+                        emit_xmm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm0);
+                    } else {
+                        self.asm.movdqu_xm(Xmm::Xmm2, Mem::base(Gp::Rsi));
+                        emit_xmm_op_rr(&mut self.asm, Xmm::Xmm1, Xmm::Xmm2);
+                        self.asm.add_ri(true, Gp::Rsi, 16);
+                    }
+                    self.asm.movdqu_mx(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 16);
+                    self.asm.add_ri(true, Gp::Rax, 16);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_xmm);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_xmm);
+                    self.asm.jcc(Cond::Ae, lbl_x1);
+                    self.asm.bind(lbl_tail);
+                }
+
+                // Exact scalar tail for remaining `Rcx` elements (`0..lanes-1`).
+                self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                self.asm.jcc(Cond::E, lbl_done);
+                if rhs_is_scalar && !kind.elem_ty().is_fp() {
+                    if is8 {
+                        self.asm.movq_rx(SCRATCH_GP2, Xmm::Xmm0);
+                    } else {
+                        self.asm.movd_rx(SCRATCH_GP2, Xmm::Xmm0);
+                    }
+                }
+                let lbl_sc = self.asm.new_label();
+                self.asm.bind(lbl_sc);
+                match kind {
+                    VecElemKind::I32Add
+                    | VecElemKind::I32Sub
+                    | VecElemKind::I32Mul
+                    | VecElemKind::I32And
+                    | VecElemKind::I32Or
+                    | VecElemKind::I32Xor
+                    | VecElemKind::I64Add
+                    | VecElemKind::I64Sub
+                    | VecElemKind::I64And
+                    | VecElemKind::I64Or
+                    | VecElemKind::I64Xor => {
+                        self.asm.mov_rm(is8, SCRATCH_GP1, Mem::base(Gp::Rdx));
+                        let rhs_r = if rhs_is_scalar {
+                            SCRATCH_GP2
+                        } else {
+                            self.asm.mov_rm(is8, SCRATCH_GP2, Mem::base(Gp::Rsi));
+                            self.asm.add_ri(true, Gp::Rsi, if is8 { 8 } else { 4 });
+                            SCRATCH_GP2
+                        };
+                        match kind {
+                            VecElemKind::I32Add | VecElemKind::I64Add => {
+                                self.asm.add_rr(is8, SCRATCH_GP1, rhs_r)
+                            }
+                            VecElemKind::I32Sub | VecElemKind::I64Sub => {
+                                self.asm.sub_rr(is8, SCRATCH_GP1, rhs_r)
+                            }
+                            VecElemKind::I32Mul => self.asm.imul_rr(false, SCRATCH_GP1, rhs_r),
+                            VecElemKind::I32And | VecElemKind::I64And => {
+                                self.asm.and_rr(is8, SCRATCH_GP1, rhs_r)
+                            }
+                            VecElemKind::I32Or | VecElemKind::I64Or => {
+                                self.asm.or_rr(is8, SCRATCH_GP1, rhs_r)
+                            }
+                            VecElemKind::I32Xor | VecElemKind::I64Xor => {
+                                self.asm.xor_rr(is8, SCRATCH_GP1, rhs_r)
+                            }
+                            _ => unreachable!(),
+                        }
+                        self.asm.mov_mr(is8, Mem::base(Gp::Rax), SCRATCH_GP1);
+                    }
+                    VecElemKind::F32Add
+                    | VecElemKind::F32Sub
+                    | VecElemKind::F32Mul
+                    | VecElemKind::F32Div => {
+                        self.asm.movss_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                        let rhs_x = if rhs_is_scalar {
+                            Xmm::Xmm0
+                        } else {
+                            self.asm.movss_xm(Xmm::Xmm2, Mem::base(Gp::Rsi));
+                            self.asm.add_ri(true, Gp::Rsi, 4);
+                            Xmm::Xmm2
+                        };
+                        match kind {
+                            VecElemKind::F32Add => self.asm.addss(Xmm::Xmm1, rhs_x),
+                            VecElemKind::F32Sub => self.asm.subss(Xmm::Xmm1, rhs_x),
+                            VecElemKind::F32Mul => self.asm.mulss(Xmm::Xmm1, rhs_x),
+                            VecElemKind::F32Div => self.asm.divss(Xmm::Xmm1, rhs_x),
+                            _ => unreachable!(),
+                        }
+                        self.asm.movss_mx(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    }
+                    VecElemKind::F64Add
+                    | VecElemKind::F64Sub
+                    | VecElemKind::F64Mul
+                    | VecElemKind::F64Div => {
+                        self.asm.movsd_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                        let rhs_x = if rhs_is_scalar {
+                            Xmm::Xmm0
+                        } else {
+                            self.asm.movsd_xm(Xmm::Xmm2, Mem::base(Gp::Rsi));
+                            self.asm.add_ri(true, Gp::Rsi, 8);
+                            Xmm::Xmm2
+                        };
+                        match kind {
+                            VecElemKind::F64Add => self.asm.addsd(Xmm::Xmm1, rhs_x),
+                            VecElemKind::F64Sub => self.asm.subsd(Xmm::Xmm1, rhs_x),
+                            VecElemKind::F64Mul => self.asm.mulsd(Xmm::Xmm1, rhs_x),
+                            VecElemKind::F64Div => self.asm.divsd(Xmm::Xmm1, rhs_x),
+                            _ => unreachable!(),
+                        }
+                        self.asm.movsd_mx(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    }
+                }
+                self.asm.add_ri(true, Gp::Rdx, if is8 { 8 } else { 4 });
+                self.asm.add_ri(true, Gp::Rax, if is8 { 8 } else { 4 });
+                self.asm.sub_ri(true, Gp::Rcx, 1);
+                self.asm.jcc(Cond::Ne, lbl_sc);
+                self.asm.bind(lbl_done);
+            }
+            Op::VecReduceLoop {
+                kind,
+                src_a,
+                src_b,
+                count,
+            } => {
+                let r = res.unwrap();
+                let is8 = kind.elem_bytes() == 8;
+                let is_dot = matches!(kind, VecReduceKind::I32Dot);
+                let is_xor = matches!(kind, VecReduceKind::I32Xor | VecReduceKind::I64Xor);
+                if is_dot {
+                    let moves = [
+                        (
+                            MoveLoc::Gp(Gp::Rax),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Gp::Rdx),
+                            MoveLoc::from(self.loc(src_b)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Gp::Rcx),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                } else {
+                    let moves = [
+                        (
+                            MoveLoc::Gp(Gp::Rax),
+                            MoveLoc::from(self.loc(src_a)),
+                            Ty::I32,
+                        ),
+                        (
+                            MoveLoc::Gp(Gp::Rcx),
+                            MoveLoc::from(self.loc(count)),
+                            Ty::I32,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                }
+                let lbl_zero = self.asm.new_label();
+                let lbl_done = self.asm.new_label();
+                self.asm.mov_rr(false, Gp::Rcx, Gp::Rcx);
+                self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                self.asm.jcc(Cond::E, lbl_zero);
+                self.asm.mov_rr(false, Gp::Rax, Gp::Rax);
+                self.asm.add_rr(true, Gp::Rax, Gp::R14);
+                if is_dot {
+                    self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                    self.asm.add_rr(true, Gp::Rdx, Gp::R14);
+                }
+
+                let lanes_zmm: i32 = if is8 { 8 } else { 16 };
+                let lanes_ymm: i32 = if is8 { 4 } else { 8 };
+                let lanes_xmm: i32 = if is8 { 2 } else { 4 };
+
+                if self.isa.has_avx512 {
+                    self.asm.vpxord_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
+                    self.asm.vpxord_zzz(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm1);
+                    let lbl_z2 = self.asm.new_label();
+                    let lbl_z1 = self.asm.new_label();
+                    let lbl_y1 = self.asm.new_label();
+                    let lbl_red = self.asm.new_label();
+
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm * 2);
+                    self.asm.jcc(Cond::B, lbl_z1);
+                    self.asm.mark_align32(lbl_z2);
+                    self.asm.bind(lbl_z2);
+                    match kind {
+                        VecReduceKind::I32Sum => {
+                            self.asm
+                                .vpaddd_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpaddd_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 64));
+                        }
+                        VecReduceKind::I32Xor => {
+                            self.asm
+                                .vpxord_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpxord_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 64));
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm
+                                .vpaddq_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpaddq_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 64));
+                        }
+                        VecReduceKind::I64Xor => {
+                            self.asm
+                                .vpxorq_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpxorq_zzm(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 64));
+                        }
+                        VecReduceKind::I32Dot => {
+                            self.asm.vmovdqu32_zm(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpmulld_zzm(Xmm::Xmm2, Xmm::Xmm2, Mem::base(Gp::Rdx));
+                            self.asm.vpaddd_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm
+                                .vmovdqu32_zm(Xmm::Xmm2, Mem::base_disp(Gp::Rax, 64));
+                            self.asm
+                                .vpmulld_zzm(Xmm::Xmm2, Xmm::Xmm2, Mem::base_disp(Gp::Rdx, 64));
+                            self.asm.vpaddd_zzz(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm2);
+                            self.asm.add_ri(true, Gp::Rdx, 128);
+                        }
+                    }
+                    self.asm.add_ri(true, Gp::Rax, 128);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_zmm * 2);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm * 2);
+                    self.asm.jcc(Cond::Ae, lbl_z2);
+
+                    self.asm.bind(lbl_z1);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm);
+                    self.asm.jcc(Cond::B, lbl_y1);
+                    match kind {
+                        VecReduceKind::I32Sum => {
+                            self.asm
+                                .vpaddd_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I32Xor => {
+                            self.asm
+                                .vpxord_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm
+                                .vpaddq_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I64Xor => {
+                            self.asm
+                                .vpxorq_zzm(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I32Dot => {
+                            self.asm.vmovdqu32_zm(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpmulld_zzm(Xmm::Xmm2, Xmm::Xmm2, Mem::base(Gp::Rdx));
+                            self.asm.vpaddd_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm.add_ri(true, Gp::Rdx, 64);
+                        }
+                    }
+                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_zmm);
+
+                    self.asm.bind(lbl_y1);
+                    // Merge ZMM1 into ZMM0, then fold upper 256 bits -> YMM0.
+                    match kind {
+                        VecReduceKind::I32Sum | VecReduceKind::I32Dot => {
+                            self.asm.vpaddd_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I32Xor => {
+                            self.asm.vpxord_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm.vpaddq_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I64Xor => {
+                            self.asm.vpxorq_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                    }
+                    self.asm.vextracti64x4_yz(Xmm::Xmm1, Xmm::Xmm0, 1);
+                    match kind {
+                        VecReduceKind::I32Sum | VecReduceKind::I32Dot => {
+                            self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
+                            self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                    }
+                    // Optional 32B YMM chunk.
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm);
+                    self.asm.jcc(Cond::B, lbl_red);
+                    match kind {
+                        VecReduceKind::I32Sum => {
+                            self.asm
+                                .vpaddd_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
+                            self.asm.vpxor_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm
+                                .vpaddq_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I32Dot => {
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpmulld_yym(Xmm::Xmm2, Xmm::Xmm2, Mem::base(Gp::Rdx));
+                            self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm.add_ri(true, Gp::Rdx, 32);
+                        }
+                    }
+                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_ymm);
+
+                    self.asm.bind(lbl_red);
+                    self.asm.vextracti128_xy(Xmm::Xmm1, Xmm::Xmm0, 1);
+                    self.asm.vzeroupper();
+                    if is_xor {
+                        self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
+                    } else if is8 {
+                        self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
+                    } else {
+                        self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
+                    }
+                } else if self.isa.has_avx2 {
+                    self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
+                    self.asm.vpxor_yyy(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm1);
+                    let lbl_y2 = self.asm.new_label();
+                    let lbl_y1 = self.asm.new_label();
+                    let lbl_red = self.asm.new_label();
+
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm * 2);
+                    self.asm.jcc(Cond::B, lbl_y1);
+                    self.asm.mark_align32(lbl_y2);
+                    self.asm.bind(lbl_y2);
+                    match kind {
+                        VecReduceKind::I32Sum => {
+                            self.asm
+                                .vpaddd_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpaddd_yym(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 32));
+                        }
+                        VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
+                            self.asm.vpxor_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpxor_yym(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 32));
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm
+                                .vpaddq_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpaddq_yym(Xmm::Xmm1, Xmm::Xmm1, Mem::base_disp(Gp::Rax, 32));
+                        }
+                        VecReduceKind::I32Dot => {
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpmulld_yym(Xmm::Xmm2, Xmm::Xmm2, Mem::base(Gp::Rdx));
+                            self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base_disp(Gp::Rax, 32));
+                            self.asm
+                                .vpmulld_yym(Xmm::Xmm2, Xmm::Xmm2, Mem::base_disp(Gp::Rdx, 32));
+                            self.asm.vpaddd_yyy(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm2);
+                            self.asm.add_ri(true, Gp::Rdx, 64);
+                        }
+                    }
+                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_ymm * 2);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm * 2);
+                    self.asm.jcc(Cond::Ae, lbl_y2);
+
+                    self.asm.bind(lbl_y1);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm);
+                    self.asm.jcc(Cond::B, lbl_red);
+                    match kind {
+                        VecReduceKind::I32Sum => {
+                            self.asm
+                                .vpaddd_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
+                            self.asm.vpxor_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm
+                                .vpaddq_yym(Xmm::Xmm0, Xmm::Xmm0, Mem::base(Gp::Rax));
+                        }
+                        VecReduceKind::I32Dot => {
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            self.asm
+                                .vpmulld_yym(Xmm::Xmm2, Xmm::Xmm2, Mem::base(Gp::Rdx));
+                            self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm.add_ri(true, Gp::Rdx, 32);
+                        }
+                    }
+                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_ymm);
+
+                    self.asm.bind(lbl_red);
+                    match kind {
+                        VecReduceKind::I32Sum | VecReduceKind::I32Dot => {
+                            self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
+                            self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                        VecReduceKind::I64Sum => {
+                            self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
+                        }
+                    }
+                    self.asm.vextracti128_xy(Xmm::Xmm1, Xmm::Xmm0, 1);
+                    self.asm.vzeroupper();
+                    if is_xor {
+                        self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
+                    } else if is8 {
+                        self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
+                    } else {
+                        self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
+                    }
+                } else {
+                    self.asm.pxor(Xmm::Xmm0, Xmm::Xmm0);
+                    let lbl_x1 = self.asm.new_label();
+                    let lbl_red = self.asm.new_label();
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_xmm);
+                    self.asm.jcc(Cond::B, lbl_red);
+                    self.asm.mark_align16(lbl_x1);
+                    self.asm.bind(lbl_x1);
+                    self.asm.movdqu_xm(Xmm::Xmm1, Mem::base(Gp::Rax));
+                    if is_dot {
+                        self.asm.movdqu_xm(Xmm::Xmm2, Mem::base(Gp::Rdx));
+                        self.asm.pmulld(Xmm::Xmm1, Xmm::Xmm2);
+                        self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
+                        self.asm.add_ri(true, Gp::Rdx, 16);
+                    } else if is_xor {
+                        self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
+                    } else if is8 {
+                        self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
+                    } else {
+                        self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
+                    }
+                    self.asm.add_ri(true, Gp::Rax, 16);
+                    self.asm.sub_ri(true, Gp::Rcx, lanes_xmm);
+                    self.asm.cmp_ri(true, Gp::Rcx, lanes_xmm);
+                    self.asm.jcc(Cond::Ae, lbl_x1);
+                    self.asm.bind(lbl_red);
+                }
+
+                // Horizontally reduce 128-bit `Xmm0` -> `SCRATCH_GP1`, then fold remaining scalar tail.
+                self.asm.pshufd(Xmm::Xmm1, Xmm::Xmm0, 0xee);
+                if is_xor {
+                    self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
+                } else if is8 {
+                    self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
+                } else {
+                    self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
+                }
+                if !is8 {
+                    self.asm.pshufd(Xmm::Xmm1, Xmm::Xmm0, 0x55);
+                    if is_xor {
+                        self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
+                    } else {
+                        self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
+                    }
+                    self.asm.movd_rx(SCRATCH_GP1, Xmm::Xmm0);
+                } else {
+                    self.asm.movq_rx(SCRATCH_GP1, Xmm::Xmm0);
+                }
+
+                self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                self.asm.jcc(Cond::E, lbl_done);
+                let lbl_sc = self.asm.new_label();
+                self.asm.bind(lbl_sc);
+                self.asm.mov_rm(is8, SCRATCH_GP2, Mem::base(Gp::Rax));
+                if is_dot {
+                    self.asm.imul_rm(false, SCRATCH_GP2, Mem::base(Gp::Rdx));
+                    self.asm.add_rr(false, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.add_ri(true, Gp::Rdx, 4);
+                } else if is_xor {
+                    self.asm.xor_rr(is8, SCRATCH_GP1, SCRATCH_GP2);
+                } else {
+                    self.asm.add_rr(is8, SCRATCH_GP1, SCRATCH_GP2);
+                }
+                self.asm.add_ri(true, Gp::Rax, if is8 { 8 } else { 4 });
+                self.asm.sub_ri(true, Gp::Rcx, 1);
+                self.asm.jcc(Cond::Ne, lbl_sc);
+                self.asm.jmp(lbl_done);
+
+                self.asm.bind(lbl_zero);
+                self.asm.xor_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                self.asm.bind(lbl_done);
+                self.gp_commit(r, SCRATCH_GP1);
             }
             Op::F64x4BinMem {
                 op,
@@ -5783,6 +6852,25 @@ impl<'a> Lower<'a> {
             }
             Op::V128Ternary { op: _, a, b, c } => {
                 let r = res.unwrap();
+                if self.isa.has_avx512
+                    && let Loc::Xmm(cx) = self.loc(c)
+                {
+                    let ar = self.fp_read(a, SCRATCH_FP1);
+                    let br = self.fp_read(b, SCRATCH_FP2);
+                    let d = self.fp_write_reg(r);
+                    if d == ar {
+                        self.asm.vpternlogd_xxx(d, br, cx, 0xe4);
+                    } else if d == br {
+                        self.asm.vpternlogd_xxx(d, ar, cx, 0xd8);
+                    } else if d == cx {
+                        self.asm.vpternlogd_xxx(d, ar, br, 0xca);
+                    } else {
+                        self.asm.movaps_rr(d, ar);
+                        self.asm.vpternlogd_xxx(d, br, cx, 0xe4);
+                    }
+                    self.fp_commit(r, d);
+                    return Ok(());
+                }
                 let c_in_tmp = if let Loc::Xmm(cx) = self.loc(c) {
                     let _ = cx;
                     false
