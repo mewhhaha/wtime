@@ -433,7 +433,7 @@ fn lower_one(module: &Module, body: usize, pc: usize, i: &Instruction) -> Option
         (0x02..=0x04, immediate) => {
             let (params, results) = arity(immediate, module);
             let (params, results) = arity16(params, results)?;
-            let (end, other) = module.data.control.get(body, pc)?;
+            let (end, other) = module.data.control_get(body, pc)?;
             let end = u32::try_from(end).ok()?;
             match i.opcode {
                 0x02 => Op::Block {

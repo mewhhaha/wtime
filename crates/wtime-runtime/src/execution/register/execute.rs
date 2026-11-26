@@ -719,8 +719,7 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
             let (params, results) = arity(&instruction.immediate, module);
             let (end, _) = module
                 .data
-                .control
-                .get(frame.function.body, pc)
+                .control_get(frame.function.body, pc)
                 .ok_or_else(|| trap("register control metadata"))?;
             let height = frame
                 .base

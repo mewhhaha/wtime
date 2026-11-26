@@ -150,7 +150,7 @@ fn p131_compare(bytes: &[u8], body: usize, args: &[Value]) -> P131Counts {
         match source.opcode {
             2 | 3 => {
                 let (params, returns) = crate::execution::arity(&source.immediate, &module);
-                let (end, _) = module.data.control.get(body, pc).unwrap();
+                let (end, _) = module.data.control_get(body, pc).unwrap();
                 labels.push((
                     pc + 1,
                     end,

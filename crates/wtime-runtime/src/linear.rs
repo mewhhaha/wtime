@@ -24,9 +24,9 @@ const PAGE_BITS: u32 = 16;
 const PAGE: usize = 1 << PAGE_BITS;
 const MASK: usize = PAGE - 1;
 
-/// Maximum unshared linear memory length (16 MiB) eligible for contiguous dense backing.
+/// Maximum unshared linear memory length (64 MiB) eligible for contiguous dense backing.
 /// Larger memories (e.g. sparse 4 GiB / `memory64` arenas) stay 64 KiB page-sparse.
-pub(crate) const DENSE_MAX_BYTES: usize = 16 << 20;
+pub(crate) const DENSE_MAX_BYTES: usize = 64 << 20;
 
 /// The host could not allocate storage for the memory.
 #[derive(Debug, PartialEq, Eq)]

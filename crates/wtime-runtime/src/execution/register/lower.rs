@@ -467,8 +467,7 @@ impl LoweredFunction {
                         let base = tail(&stack, &params)?;
                         let (end, otherwise) = module
                             .data
-                            .control
-                            .get(body, pc)
+                            .control_get(body, pc)
                             .ok_or(Declined::Metadata)?;
                         if end <= pc
                             || end >= code.len()

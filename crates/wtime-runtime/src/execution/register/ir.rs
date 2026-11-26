@@ -711,8 +711,7 @@ impl RegisterFunction {
                     2..=4 => {
                         let (end, other) = module
                             .data
-                            .control
-                            .get(admission.body, pc)
+                            .control_get(admission.body, pc)
                             .ok_or(Declined::Metadata)?;
                         let end = u32::try_from(end).map_err(|_| Declined::Budget)?;
                         labels.push(Label {

@@ -64,6 +64,7 @@ enum FastType {
     F32,
     F64,
     V128,
+    Ref,
 }
 
 impl FastType {
@@ -75,13 +76,22 @@ impl FastType {
             ValType::F32 => Self::F32,
             ValType::F64 => Self::F64,
             ValType::V128 => Self::V128,
-            _ => return None,
+            ValType::Ref(_) => Self::Ref,
         })
     }
 
     #[inline(always)]
     fn slots(self) -> u16 {
-        if matches!(self, Self::V128) { 2 } else { 1 }
+        match self {
+            Self::V128 => 2,
+            Self::Ref => 0,
+            _ => 1,
+        }
+    }
+
+    #[inline(always)]
+    fn ref_slots(self) -> u16 {
+        u16::from(matches!(self, Self::Ref))
     }
 }
 
@@ -98,6 +108,8 @@ struct CallSite {
     func_idx: u32,
     arg_base: u16,
     arg_slots: u16,
+    arg_ref_base: u16,
+    arg_ref_slots: u16,
     logical_arg_start: u16,
     meta_at_call: u32,
     meta_after_call: u32,
@@ -110,6 +122,8 @@ struct CallIndirectSite {
     index_reg: u16,
     arg_base: u16,
     arg_slots: u16,
+    arg_ref_base: u16,
+    arg_ref_slots: u16,
     logical_arg_start: u16,
     table_is_64: bool,
     meta_at_call: u32,
@@ -465,6 +479,13 @@ enum RegOp {
         src: u16,
         cidx: u32,
     },
+    /// Fused `dst = acc + (a * b)` with exact two-rounding IEEE-754 Wasm semantics.
+    F64MulAdd {
+        dst: u16,
+        acc: u16,
+        a: u16,
+        b: u16,
+    },
 
     // ---- Generic scalar unary/binary (including trapping div/rem/trunc) ----
     Unary {
@@ -549,6 +570,37 @@ enum RegOp {
         offset: u32,
         src_off: u8,
     },
+    /// Fused `dst = mem0[(a + b) + offset]` (i64/f64, memory32).
+    LoadI64AddAddr {
+        dst: u16,
+        a: u16,
+        b: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `dst = mem0[(idx << 2) + offset]` (i32/f32, memory32).
+    LoadI32Shl2 {
+        dst: u16,
+        idx: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `dst = mem0[(base + (idx << 2)) + offset]` (i32/f32, memory32).
+    LoadI32Shl2Add {
+        dst: u16,
+        base: u16,
+        idx: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `dst = mem0[(base + (idx << 3)) + offset]` (i64/f64, memory32).
+    LoadI64Shl3Add {
+        dst: u16,
+        base: u16,
+        idx: u16,
+        offset: u32,
+        src_off: u8,
+    },
     /// Fused `dst = mem0[(a + b) + offset] as u8` (memory32).
     LoadU8AddAddr {
         dst: u16,
@@ -618,6 +670,29 @@ enum RegOp {
         addr: u16,
         val: u16,
         imm: u32,
+        src_off: u8,
+    },
+    /// Fused `mem0[(idx << 2) + offset] = val as u32` (memory32).
+    StoreI32Shl2 {
+        idx: u16,
+        val: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `mem0[(base + (idx << 2)) + offset] = val as u32` (memory32).
+    StoreI32Shl2Add {
+        base: u16,
+        idx: u16,
+        val: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `mem0[(base + (idx << 3)) + offset] = val as u64` (memory32).
+    StoreI64Shl3Add {
+        base: u16,
+        idx: u16,
+        val: u16,
+        offset: u32,
         src_off: u8,
     },
     /// General scalar load/store (any opcode `0x28..=0x3e`, any memory, full `u64` offset).
@@ -823,9 +898,69 @@ enum RegOp {
         b: u16,
         c: u16,
     },
+    // ---- Reference operations (parallel `ref_bank: Vec<RefValue>`) ----
+    MovRef {
+        dst: u16,
+        src: u16,
+    },
+    MoveRefRange {
+        dst_base: u16,
+        src_base: u16,
+        count: u16,
+    },
+    RefNull {
+        dst: u16,
+        heap_idx: u32,
+    },
+    RefIsNull {
+        dst: u16,
+        src: u16,
+    },
+    RefFunc {
+        dst: u16,
+        func_idx: u32,
+    },
+    RefEq {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    RefAsNonNull {
+        dst: u16,
+        src: u16,
+        src_off: u8,
+    },
+    SelectRef {
+        dst: u16,
+        a: u16,
+        b: u16,
+        cond: u16,
+    },
+    GlobalGetRef {
+        dst: u16,
+        global: u32,
+    },
+    GlobalSetRef {
+        src: u16,
+        global: u32,
+    },
+    TableGet {
+        dst: u16,
+        idx: u16,
+        table: u32,
+        src_off: u8,
+    },
+    TableSet {
+        idx: u16,
+        val: u16,
+        table: u32,
+        src_off: u8,
+    },
     Return {
         base: u16,
         count: u16,
+        ref_base: u16,
+        ref_count: u16,
     },
     TrapUnreachable {
         src_off: u8,
@@ -836,13 +971,17 @@ enum RegOp {
     },
 }
 
-/// Lazily compiled untyped-`u64` register function owned by a `Module`.
+const _: () = assert!(std::mem::size_of::<RegOp>() <= 12);
+
+/// Lazily compiled untyped-`u64` + parallel `RefValue` register function owned by a `Module`.
 #[derive(Debug)]
 pub(crate) struct FastFunction {
     ops: Box<[RegOp]>,
     consts: Box<[u64]>,
     v128_consts: Box<[[u64; 2]]>,
     simd_masks: Box<[[u8; 16]]>,
+    ref_heaps: Box<[crate::HeapType]>,
+    local_ref_heaps: Box<[crate::HeapType]>,
     mem_args: Box<[MemGenArg]>,
     simd_mem_args: Box<[SimdMemArg]>,
     bulk_args: Box<[BulkMemArg]>,
@@ -857,13 +996,21 @@ pub(crate) struct FastFunction {
     result_types: Box<[FastType]>,
     /// Logical Wasm local count (`params + locals`) for `active_local_slots` resource accounting.
     num_locals: u16,
+    /// Number of Wasm function parameters (`<= num_locals`).
+    num_params: u16,
     /// Physical `u64` register slots occupied by locals (`sum(ty.slots())`).
     local_reg_slots: u16,
+    /// Physical `RefValue` slots occupied by reference locals (`sum(ty.ref_slots())`).
+    local_ref_slots: u16,
     slots: u16,
+    ref_slots: u16,
     stack_peak: usize,
     max_nesting: usize,
     mem0_is_64: bool,
     fuel_blocks: bool,
+    /// True when the entire body is a straight-line, trap-free, scalar leaf (`slots <= 16`,
+    /// `ref_slots == 0`, no calls/loops/memory/globals/bails) eligible for zero-frame entry.
+    pure_leaf: bool,
 }
 
 /// Outcome of running a function on the fast register tier.
@@ -883,6 +1030,17 @@ enum VVal {
     Imm32(u32),
     Imm64(u64),
     ImmV128(u32),
+    /// Lazy `(local[src] as u32) << shift` (`src < local_reg_slots`, `shift` in `1..=3`).
+    ShlImm {
+        src: u16,
+        shift: u8,
+    },
+    /// Lazy `(local[base] as u32).wrapping_add((local[idx] as u32) << shift)` (both `< local_reg_slots`).
+    AddShl {
+        base: u16,
+        idx: u16,
+        shift: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -899,11 +1057,14 @@ struct CompileLabel {
     loop_: bool,
     base_height: usize,
     base_slot: u16,
+    base_ref_slot: u16,
     prefix: Vec<FastType>,
     params: Vec<FastType>,
     results: Vec<FastType>,
     param_slots: u16,
+    param_ref_slots: u16,
     result_slots: u16,
+    result_ref_slots: u16,
     parent_dead: bool,
 }
 
@@ -985,6 +1146,7 @@ fn block_sig(module: &Module, imm: &Immediate) -> Option<(Vec<FastType>, Vec<Fas
                 -3 => FastType::F32,
                 -4 => FastType::F64,
                 -5 => FastType::V128,
+                -24..=-11 => FastType::Ref,
                 _ => return None,
             };
             Some((Vec::new(), vec![ty]))
@@ -1167,6 +1329,19 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
                 return false;
             };
             declared_global_type(module, gi).is_some_and(|t| FastType::from_val(t).is_some())
+        }
+        0x25 | 0x26 => {
+            let Immediate::Index(ti) = insn.immediate else {
+                return false;
+            };
+            declared_table(module, ti).is_some()
+        }
+        0xd0 | 0xd1 | 0xd3 | 0xd4 => true,
+        0xd2 => {
+            let Immediate::Index(fi) = insn.immediate else {
+                return false;
+            };
+            declared_func_type(module, fi).is_some()
         }
         0x28..=0x3e => {
             let Immediate::MemArg { memory, .. } = insn.immediate else {
@@ -1364,9 +1539,10 @@ fn fold_i32_bin(op: u16, a: u32, b: u32) -> Option<u32> {
     })
 }
 
-/// Lazily compiles `body` of `module` to an untyped-`u64` 3-address `FastFunction`.
-/// Supports scalar (`i32`, `i64`, `f32`, `f64`) and native SIMD (`v128`, 2 `u64` slots per value).
-/// Returns `None` if the function uses reference locals/params/results or exceeds per-body limits.
+/// Lazily compiles `body` of `module` to an untyped-`u64` + parallel `RefValue` 3-address `FastFunction`.
+/// Supports scalar (`i32`, `i64`, `f32`, `f64`), native SIMD (`v128`, 2 `u64` slots per value),
+/// and reference values (`funcref`/`externref`/`anyref`/GC refs in a parallel `RefValue` bank).
+/// Returns `None` if the function exceeds per-body limits.
 pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunction>> {
     let decoded = module.data.inner.decoded();
     let code = decoded.code.get(body)?;
@@ -1382,25 +1558,43 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
 
     let mut local_types = Vec::with_capacity(num_locals);
     let mut local_slots = Vec::with_capacity(num_locals);
+    let mut local_ref_heaps: Vec<crate::HeapType> = Vec::new();
     let mut local_reg_slots_usize = 0usize;
-    for &t in ft.params.iter().chain(&code.locals) {
+    let mut local_ref_slots_usize = 0usize;
+    for (idx, &t) in ft.params.iter().chain(&code.locals).enumerate() {
         let fty = FastType::from_val(t)?;
-        local_slots.push(u16::try_from(local_reg_slots_usize).ok()?);
-        local_reg_slots_usize = local_reg_slots_usize.checked_add(fty.slots() as usize)?;
+        if fty == FastType::Ref {
+            local_slots.push(u16::try_from(local_ref_slots_usize).ok()?);
+            local_ref_slots_usize = local_ref_slots_usize.checked_add(1)?;
+            if idx >= num_params
+                && let ValType::Ref(rt) = t
+            {
+                local_ref_heaps.push(rt.heap);
+            }
+        } else {
+            local_slots.push(u16::try_from(local_reg_slots_usize).ok()?);
+            local_reg_slots_usize = local_reg_slots_usize.checked_add(fty.slots() as usize)?;
+        }
         local_types.push(fty);
     }
-    if local_reg_slots_usize.checked_add(bounds.stack_peak)? > MAX_FN_SLOTS {
+    if local_reg_slots_usize.checked_add(bounds.stack_peak)? > MAX_FN_SLOTS
+        || local_ref_slots_usize.checked_add(bounds.stack_peak)? > MAX_FN_SLOTS
+    {
         return None;
     }
     let mut result_types = Vec::with_capacity(ft.results.len());
     let mut result_reg_slots_usize = 0usize;
+    let mut result_ref_slots_usize = 0usize;
     for &t in &ft.results {
         let fty = FastType::from_val(t)?;
         result_reg_slots_usize = result_reg_slots_usize.checked_add(fty.slots() as usize)?;
+        result_ref_slots_usize = result_ref_slots_usize.checked_add(fty.ref_slots() as usize)?;
         result_types.push(fty);
     }
     let result_reg_slots = u16::try_from(result_reg_slots_usize).ok()?;
+    let result_ref_slots = u16::try_from(result_ref_slots_usize).ok()?;
     let local_reg_slots = u16::try_from(local_reg_slots_usize).ok()?;
+    let local_ref_slots = u16::try_from(local_ref_slots_usize).ok()?;
 
     // Check block signatures and compute basic-block starts.
     let fuel_blocks = module.data.register_fast_fuel;
@@ -1418,7 +1612,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             0x02..=0x04 => {
                 // Unsupported block signatures decline the whole function cleanly.
                 block_sig(module, &insn.immediate)?;
-                let (end, other) = module.data.control.get(body, pc)?;
+                let (end, other) = module.data.control_get(body, pc)?;
                 if end >= n {
                     return None;
                 }
@@ -1467,6 +1661,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     let mut consts: Vec<u64> = Vec::new();
     let mut v128_consts: Vec<[u64; 2]> = Vec::new();
     let mut simd_masks: Vec<[u8; 16]> = Vec::new();
+    let mut ref_heaps: Vec<crate::HeapType> = Vec::new();
     let mut mem_args: Vec<MemGenArg> = Vec::new();
     let mut simd_mem_args: Vec<SimdMemArg> = Vec::new();
     let mut bulk_args: Vec<BulkMemArg> = Vec::new();
@@ -1488,6 +1683,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     let mut table_patches: Vec<(usize, usize)> = Vec::new();
 
     let mut max_slots: usize = local_reg_slots_usize + bounds.stack_peak;
+    let mut max_ref_slots: usize = local_ref_slots_usize;
     let mut vstack: Vec<VSlot> = Vec::new();
     vstack.try_reserve_exact(bounds.stack_peak).ok()?;
     let mut labels: Vec<CompileLabel> = Vec::new();
@@ -1502,8 +1698,18 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
 
     let slot_top = |vstack: &[VSlot]| -> u16 {
         vstack
-            .last()
+            .iter()
+            .rev()
+            .find(|s| s.ty != FastType::Ref)
             .map_or(local_reg_slots, |s| s.slot_off + s.ty.slots())
+    };
+
+    let ref_top = |vstack: &[VSlot]| -> u16 {
+        vstack
+            .iter()
+            .rev()
+            .find(|s| s.ty == FastType::Ref)
+            .map_or(local_ref_slots, |s| s.slot_off + 1)
     };
 
     let copy_prefix = |vstack: &[VSlot],
@@ -1591,25 +1797,60 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         *cur_block_ops = 0;
     };
 
-    let flush_local = |local_slot: u16, vstack: &mut [VSlot], ops: &mut Vec<RegOp>| {
-        for slot in vstack.iter_mut() {
-            if slot.src == VVal::Local(local_slot) {
-                let dst = slot.slot_off;
-                if slot.ty == FastType::V128 {
-                    ops.push(RegOp::MovV128 {
-                        dst,
-                        src: local_slot,
-                    });
-                } else {
-                    ops.push(RegOp::Mov {
-                        dst,
-                        src: local_slot,
-                    });
+    let flush_local =
+        |local_slot: u16, is_ref: bool, vstack: &mut [VSlot], ops: &mut Vec<RegOp>| {
+            for slot in vstack.iter_mut() {
+                if (slot.ty == FastType::Ref) != is_ref {
+                    continue;
                 }
-                slot.src = VVal::Slot(dst);
+                let dst = slot.slot_off;
+                match slot.src {
+                    VVal::Local(s) if s == local_slot => {
+                        if is_ref {
+                            ops.push(RegOp::MovRef {
+                                dst,
+                                src: local_slot,
+                            });
+                        } else if slot.ty == FastType::V128 {
+                            ops.push(RegOp::MovV128 {
+                                dst,
+                                src: local_slot,
+                            });
+                        } else {
+                            ops.push(RegOp::Mov {
+                                dst,
+                                src: local_slot,
+                            });
+                        }
+                        slot.src = VVal::Slot(dst);
+                    }
+                    VVal::ShlImm { src, shift } if !is_ref && src == local_slot => {
+                        ops.push(RegOp::I32ShlImm {
+                            dst,
+                            src,
+                            shift: u32::from(shift),
+                        });
+                        slot.src = VVal::Slot(dst);
+                    }
+                    VVal::AddShl { base, idx, shift }
+                        if !is_ref && (base == local_slot || idx == local_slot) =>
+                    {
+                        ops.push(RegOp::I32ShlImm {
+                            dst,
+                            src: idx,
+                            shift: u32::from(shift),
+                        });
+                        ops.push(RegOp::I32Add {
+                            dst,
+                            a: base,
+                            b: dst,
+                        });
+                        slot.src = VVal::Slot(dst);
+                    }
+                    _ => {}
+                }
             }
-        }
-    };
+        };
 
     let flush_all = |vstack: &mut [VSlot], ops: &mut Vec<RegOp>, consts: &mut Vec<u64>| {
         for slot in vstack.iter_mut() {
@@ -1617,7 +1858,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             match slot.src {
                 VVal::Slot(s) if s == dst => {}
                 VVal::Slot(s) | VVal::Local(s) => {
-                    if slot.ty == FastType::V128 {
+                    if slot.ty == FastType::Ref {
+                        ops.push(RegOp::MovRef { dst, src: s });
+                    } else if slot.ty == FastType::V128 {
                         ops.push(RegOp::MovV128 { dst, src: s });
                     } else {
                         ops.push(RegOp::Mov { dst, src: s });
@@ -1635,6 +1878,27 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 }
                 VVal::ImmV128(idx) => {
                     ops.push(RegOp::ConstV128 { dst, idx });
+                    slot.src = VVal::Slot(dst);
+                }
+                VVal::ShlImm { src, shift } => {
+                    ops.push(RegOp::I32ShlImm {
+                        dst,
+                        src,
+                        shift: u32::from(shift),
+                    });
+                    slot.src = VVal::Slot(dst);
+                }
+                VVal::AddShl { base, idx, shift } => {
+                    ops.push(RegOp::I32ShlImm {
+                        dst,
+                        src: idx,
+                        shift: u32::from(shift),
+                    });
+                    ops.push(RegOp::I32Add {
+                        dst,
+                        a: base,
+                        b: dst,
+                    });
                     slot.src = VVal::Slot(dst);
                 }
             }
@@ -1665,12 +1929,37 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 ops.push(RegOp::ConstV128 { dst: tmp_slot, idx });
                 tmp_slot
             }
+            VVal::ShlImm { src, shift } => {
+                *max_slots = (*max_slots).max(tmp_slot as usize + 1);
+                ops.push(RegOp::I32ShlImm {
+                    dst: tmp_slot,
+                    src,
+                    shift: u32::from(shift),
+                });
+                tmp_slot
+            }
+            VVal::AddShl { base, idx, shift } => {
+                *max_slots = (*max_slots).max(tmp_slot as usize + 1);
+                ops.push(RegOp::I32ShlImm {
+                    dst: tmp_slot,
+                    src: idx,
+                    shift: u32::from(shift),
+                });
+                ops.push(RegOp::I32Add {
+                    dst: tmp_slot,
+                    a: base,
+                    b: tmp_slot,
+                });
+                tmp_slot
+            }
         }
     };
 
     let mut pc = 0usize;
     while pc < n {
-        if slot_top(&vstack) as usize + 8 > MAX_FN_SLOTS {
+        if slot_top(&vstack) as usize + 8 > MAX_FN_SLOTS
+            || ref_top(&vstack) as usize + 8 > MAX_FN_SLOTS
+        {
             return None;
         }
         let insn = &code.instructions[pc];
@@ -1681,8 +1970,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 0x02..=0x04 => {
                     let (params, results) = block_sig(module, &insn.immediate)?;
                     let param_slots = params.iter().map(|t| t.slots()).sum();
+                    let param_ref_slots = params.iter().map(|t| t.ref_slots()).sum();
                     let result_slots = results.iter().map(|t| t.slots()).sum();
-                    let (end, other) = module.data.control.get(body, pc)?;
+                    let result_ref_slots = results.iter().map(|t| t.ref_slots()).sum();
+                    let (end, other) = module.data.control_get(body, pc)?;
                     labels.try_reserve(1).ok()?;
                     labels.push(CompileLabel {
                         start: pc + 1,
@@ -1691,11 +1982,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         loop_: insn.opcode == 0x03,
                         base_height: 0,
                         base_slot: local_reg_slots,
+                        base_ref_slot: local_ref_slots,
                         prefix: Vec::new(),
                         params,
                         results,
                         param_slots,
+                        param_ref_slots,
                         result_slots,
+                        result_ref_slots,
                         parent_dead: true,
                     });
                 }
@@ -1706,15 +2000,19 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         dead = false;
                         vstack.clear();
                         let mut off = local_reg_slots;
+                        let mut roff = local_ref_slots;
                         for &ty in top.prefix.iter().chain(&top.params) {
+                            let s = if ty == FastType::Ref { roff } else { off };
                             vstack.push(VSlot {
-                                src: VVal::Slot(off),
-                                slot_off: off,
+                                src: VVal::Slot(s),
+                                slot_off: s,
                                 ty,
                             });
                             off += ty.slots();
+                            roff += ty.ref_slots();
                         }
                         max_slots = max_slots.max(off as usize);
+                        max_ref_slots = max_ref_slots.max(roff as usize);
                     }
                 }
                 0x0b => {
@@ -1723,15 +2021,19 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             dead = false;
                             vstack.clear();
                             let mut off = local_reg_slots;
+                            let mut roff = local_ref_slots;
                             for &ty in label.prefix.iter().chain(&label.results) {
+                                let s = if ty == FastType::Ref { roff } else { off };
                                 vstack.push(VSlot {
-                                    src: VVal::Slot(off),
-                                    slot_off: off,
+                                    src: VVal::Slot(s),
+                                    slot_off: s,
                                     ty,
                                 });
                                 off += ty.slots();
+                                roff += ty.ref_slots();
                             }
                             max_slots = max_slots.max(off as usize);
+                            max_ref_slots = max_ref_slots.max(roff as usize);
                             if is_block_start[pc] {
                                 pc_to_ip[pc] = ops.len() as u32;
                                 if fuel_blocks {
@@ -1861,18 +2163,26 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     ops: &mut Vec<RegOp>,
                                     res_ty: FastType|
          -> (u16, usize, bool) {
+            let is_ref = res_ty == FastType::Ref;
             if pc + 1 < n && !is_block_start[pc + 1] && cur_block_ops < MAX_BLOCK_OPS {
                 let next = &code.instructions[pc + 1];
                 if let Immediate::Index(l) = next.immediate
                     && (next.opcode == 0x21 || next.opcode == 0x22)
                 {
                     let l_slot = local_slots[l as usize];
-                    flush_local(l_slot, vstack, ops);
+                    flush_local(l_slot, is_ref, vstack, ops);
                     return (l_slot, 1, next.opcode == 0x22);
                 }
             }
-            let _ = res_ty;
-            (slot_top(vstack), 0, false)
+            (
+                if is_ref {
+                    ref_top(vstack)
+                } else {
+                    slot_top(vstack)
+                },
+                0,
+                false,
+            )
         };
 
         let finish_dst = |dst: u16,
@@ -1881,19 +2191,29 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                           res_ty: FastType,
                           vstack: &mut Vec<VSlot>,
                           max_slots: &mut usize,
+                          max_ref_slots: &mut usize,
                           cur_block_ops: &mut usize,
                           pc: &mut usize| {
+            let is_ref = res_ty == FastType::Ref;
             if consumed_next > 0 {
                 *cur_block_ops += consumed_next;
                 *pc += consumed_next;
                 if is_tee {
-                    let slot_off = slot_top(vstack);
+                    let slot_off = if is_ref {
+                        ref_top(vstack)
+                    } else {
+                        slot_top(vstack)
+                    };
                     vstack.push(VSlot {
                         src: VVal::Local(dst),
                         slot_off,
                         ty: res_ty,
                     });
-                    *max_slots = (*max_slots).max(slot_off as usize + res_ty.slots() as usize);
+                    if is_ref {
+                        *max_ref_slots = (*max_ref_slots).max(slot_off as usize + 1);
+                    } else {
+                        *max_slots = (*max_slots).max(slot_off as usize + res_ty.slots() as usize);
+                    }
                 }
             } else {
                 vstack.push(VSlot {
@@ -1901,7 +2221,11 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     slot_off: dst,
                     ty: res_ty,
                 });
-                *max_slots = (*max_slots).max(dst as usize + res_ty.slots() as usize);
+                if is_ref {
+                    *max_ref_slots = (*max_ref_slots).max(dst as usize + 1);
+                } else {
+                    *max_slots = (*max_slots).max(dst as usize + res_ty.slots() as usize);
+                }
             }
         };
 
@@ -1926,17 +2250,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 // block / loop
                 let (params, results) = block_sig(module, &insn.immediate)?;
                 let param_slots = params.iter().map(|t| t.slots()).sum();
+                let param_ref_slots = params.iter().map(|t| t.ref_slots()).sum();
                 let result_slots = results.iter().map(|t| t.slots()).sum();
-                let (end, other) = module.data.control.get(body, pc)?;
+                let result_ref_slots = results.iter().map(|t| t.ref_slots()).sum();
+                let (end, other) = module.data.control_get(body, pc)?;
                 if insn.opcode == 0x03 {
                     flush_all(&mut vstack, &mut ops, &mut consts);
                 }
                 let base_height = vstack.len().checked_sub(params.len())?;
-                let base_slot = if base_height < vstack.len() {
-                    vstack[base_height].slot_off
-                } else {
-                    slot_top(&vstack)
-                };
+                let base_slot = slot_top(&vstack[..base_height]);
+                let base_ref_slot = ref_top(&vstack[..base_height]);
                 let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
                 labels.try_reserve(1).ok()?;
                 labels.push(CompileLabel {
@@ -1946,11 +2269,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     loop_: insn.opcode == 0x03,
                     base_height,
                     base_slot,
+                    base_ref_slot,
                     prefix,
                     params,
                     results,
                     param_slots,
+                    param_ref_slots,
                     result_slots,
+                    result_ref_slots,
                     parent_dead: false,
                 });
                 if insn.opcode == 0x03 {
@@ -1969,8 +2295,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let cond_slot = vstack.pop()?;
                 let (params, results) = block_sig(module, &insn.immediate)?;
                 let param_slots = params.iter().map(|t| t.slots()).sum();
+                let param_ref_slots = params.iter().map(|t| t.ref_slots()).sum();
                 let result_slots = results.iter().map(|t| t.slots()).sum();
-                let (end, other) = module.data.control.get(body, pc)?;
+                let result_ref_slots = results.iter().map(|t| t.ref_slots()).sum();
+                let (end, other) = module.data.control_get(body, pc)?;
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let cond_reg = mat(
                     cond_slot.src,
@@ -1980,11 +2308,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut consts,
                 );
                 let base_height = vstack.len().checked_sub(params.len())?;
-                let base_slot = if base_height < vstack.len() {
-                    vstack[base_height].slot_off
-                } else {
-                    slot_top(&vstack)
-                };
+                let base_slot = slot_top(&vstack[..base_height]);
+                let base_ref_slot = ref_top(&vstack[..base_height]);
                 let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
                 labels.try_reserve(1).ok()?;
                 labels.push(CompileLabel {
@@ -1994,11 +2319,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     loop_: false,
                     base_height,
                     base_slot,
+                    base_ref_slot,
                     prefix,
                     params,
                     results,
                     param_slots,
+                    param_ref_slots,
                     result_slots,
+                    result_ref_slots,
                     parent_dead: false,
                 });
                 let false_pc = other.map_or(end, |e| e + 1);
@@ -2034,15 +2362,19 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 );
                 vstack.clear();
                 let mut off = local_reg_slots;
+                let mut roff = local_ref_slots;
                 for &ty in top.prefix.iter().chain(&top.params) {
+                    let s = if ty == FastType::Ref { roff } else { off };
                     vstack.push(VSlot {
-                        src: VVal::Slot(off),
-                        slot_off: off,
+                        src: VVal::Slot(s),
+                        slot_off: s,
                         ty,
                     });
                     off += ty.slots();
+                    roff += ty.ref_slots();
                 }
                 max_slots = max_slots.max(off as usize);
+                max_ref_slots = max_ref_slots.max(roff as usize);
             }
             0x0b => {
                 // end
@@ -2052,14 +2384,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     flush_all(&mut vstack, &mut ops, &mut consts);
                     let count = result_types.len();
                     let start = vstack.len().checked_sub(count)?;
-                    let base = if count > 0 {
-                        vstack[start].slot_off
-                    } else {
-                        local_reg_slots
-                    };
+                    let base = slot_top(&vstack[..start]);
+                    let ref_base = ref_top(&vstack[..start]);
                     ops.push(RegOp::Return {
                         base,
                         count: result_reg_slots,
+                        ref_base,
+                        ref_count: result_ref_slots,
                     });
                     close_block(
                         &mut in_block,
@@ -2081,14 +2412,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 if depth == labels.len() {
                     let count = result_types.len();
                     let start = vstack.len().checked_sub(count)?;
-                    let base = if count > 0 {
-                        vstack[start].slot_off
-                    } else {
-                        local_reg_slots
-                    };
+                    let base = slot_top(&vstack[..start]);
+                    let ref_base = ref_top(&vstack[..start]);
                     ops.push(RegOp::Return {
                         base,
                         count: result_reg_slots,
+                        ref_base,
+                        ref_count: result_ref_slots,
                     });
                 } else {
                     let idx = labels.len().checked_sub(depth + 1)?;
@@ -2098,24 +2428,37 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     } else {
                         label.end + 1
                     };
-                    let (arity, arity_slots) = if label.loop_ {
-                        (label.params.len(), label.param_slots)
+                    let (arity, arity_slots, arity_ref_slots) = if label.loop_ {
+                        (label.params.len(), label.param_slots, label.param_ref_slots)
                     } else {
-                        (label.results.len(), label.result_slots)
+                        (
+                            label.results.len(),
+                            label.result_slots,
+                            label.result_ref_slots,
+                        )
                     };
                     let src_start = vstack.len().checked_sub(arity)?;
-                    let src_base = if arity > 0 {
-                        vstack[src_start].slot_off
-                    } else {
-                        slot_top(&vstack)
-                    };
+                    let src_base = slot_top(&vstack[..src_start]);
+                    let src_ref_base = ref_top(&vstack[..src_start]);
                     let dst_base = label.base_slot;
-                    if arity_slots > 0 && src_base != dst_base {
-                        ops.push(RegOp::MoveRange {
-                            dst_base,
-                            src_base,
-                            count: arity_slots,
-                        });
+                    let dst_ref_base = label.base_ref_slot;
+                    let move_reg = arity_slots > 0 && src_base != dst_base;
+                    let move_ref = arity_ref_slots > 0 && src_ref_base != dst_ref_base;
+                    if move_reg || move_ref {
+                        if move_reg {
+                            ops.push(RegOp::MoveRange {
+                                dst_base,
+                                src_base,
+                                count: arity_slots,
+                            });
+                        }
+                        if move_ref {
+                            ops.push(RegOp::MoveRefRange {
+                                dst_base: dst_ref_base,
+                                src_base: src_ref_base,
+                                count: arity_ref_slots,
+                            });
+                        }
                         let jmp_ip = ops.len();
                         ops.push(RegOp::Jump { target: 0 });
                         branch_patches.push((jmp_ip, target_pc));
@@ -2166,11 +2509,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 if depth == labels.len() {
                     let count = result_types.len();
                     let start = vstack.len().checked_sub(count)?;
-                    let base = if count > 0 {
-                        vstack[start].slot_off
-                    } else {
-                        local_reg_slots
-                    };
+                    let base = slot_top(&vstack[..start]);
+                    let ref_base = ref_top(&vstack[..start]);
                     let skip_ip = ops.len();
                     ops.push(RegOp::BrIfZero {
                         cond: cond_reg,
@@ -2179,6 +2519,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     ops.push(RegOp::Return {
                         base,
                         count: result_reg_slots,
+                        ref_base,
+                        ref_count: result_ref_slots,
                     });
                 } else {
                     let idx = labels.len().checked_sub(depth + 1)?;
@@ -2188,29 +2530,43 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     } else {
                         label.end + 1
                     };
-                    let (arity, arity_slots) = if label.loop_ {
-                        (label.params.len(), label.param_slots)
+                    let (arity, arity_slots, arity_ref_slots) = if label.loop_ {
+                        (label.params.len(), label.param_slots, label.param_ref_slots)
                     } else {
-                        (label.results.len(), label.result_slots)
+                        (
+                            label.results.len(),
+                            label.result_slots,
+                            label.result_ref_slots,
+                        )
                     };
                     let src_start = vstack.len().checked_sub(arity)?;
-                    let src_base = if arity > 0 {
-                        vstack[src_start].slot_off
-                    } else {
-                        slot_top(&vstack)
-                    };
+                    let src_base = slot_top(&vstack[..src_start]);
+                    let src_ref_base = ref_top(&vstack[..src_start]);
                     let dst_base = label.base_slot;
-                    if arity_slots > 0 && src_base != dst_base {
+                    let dst_ref_base = label.base_ref_slot;
+                    let move_reg = arity_slots > 0 && src_base != dst_base;
+                    let move_ref = arity_ref_slots > 0 && src_ref_base != dst_ref_base;
+                    if move_reg || move_ref {
                         let skip_ip = ops.len();
+                        let skip_count = 1 + usize::from(move_reg) + usize::from(move_ref) + 1;
                         ops.push(RegOp::BrIfZero {
                             cond: cond_reg,
-                            target: (skip_ip + 3) as u32,
+                            target: (skip_ip + skip_count) as u32,
                         });
-                        ops.push(RegOp::MoveRange {
-                            dst_base,
-                            src_base,
-                            count: arity_slots,
-                        });
+                        if move_reg {
+                            ops.push(RegOp::MoveRange {
+                                dst_base,
+                                src_base,
+                                count: arity_slots,
+                            });
+                        }
+                        if move_ref {
+                            ops.push(RegOp::MoveRefRange {
+                                dst_base: dst_ref_base,
+                                src_base: src_ref_base,
+                                count: arity_ref_slots,
+                            });
+                        }
                         let jmp_ip = ops.len();
                         ops.push(RegOp::Jump { target: 0 });
                         branch_patches.push((jmp_ip, target_pc));
@@ -2265,15 +2621,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     if depth == labels.len() {
                         let count = result_types.len();
                         let start = vstack.len().checked_sub(count)?;
-                        let base = if count > 0 {
-                            vstack[start].slot_off
-                        } else {
-                            local_reg_slots
-                        };
+                        let base = slot_top(&vstack[..start]);
+                        let ref_base = ref_top(&vstack[..start]);
                         let tramp_ip = ops.len() as u32;
                         ops.push(RegOp::Return {
                             base,
                             count: result_reg_slots,
+                            ref_base,
+                            ref_count: result_ref_slots,
                         });
                         table_targets.push(tramp_ip);
                     } else {
@@ -2284,25 +2639,38 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         } else {
                             label.end + 1
                         };
-                        let (arity, arity_slots) = if label.loop_ {
-                            (label.params.len(), label.param_slots)
+                        let (arity, arity_slots, arity_ref_slots) = if label.loop_ {
+                            (label.params.len(), label.param_slots, label.param_ref_slots)
                         } else {
-                            (label.results.len(), label.result_slots)
+                            (
+                                label.results.len(),
+                                label.result_slots,
+                                label.result_ref_slots,
+                            )
                         };
                         let src_start = vstack.len().checked_sub(arity)?;
-                        let src_base = if arity > 0 {
-                            vstack[src_start].slot_off
-                        } else {
-                            slot_top(&vstack)
-                        };
+                        let src_base = slot_top(&vstack[..src_start]);
+                        let src_ref_base = ref_top(&vstack[..src_start]);
                         let dst_base = label.base_slot;
-                        if arity_slots > 0 && src_base != dst_base {
+                        let dst_ref_base = label.base_ref_slot;
+                        let move_reg = arity_slots > 0 && src_base != dst_base;
+                        let move_ref = arity_ref_slots > 0 && src_ref_base != dst_ref_base;
+                        if move_reg || move_ref {
                             let tramp_ip = ops.len() as u32;
-                            ops.push(RegOp::MoveRange {
-                                dst_base,
-                                src_base,
-                                count: arity_slots,
-                            });
+                            if move_reg {
+                                ops.push(RegOp::MoveRange {
+                                    dst_base,
+                                    src_base,
+                                    count: arity_slots,
+                                });
+                            }
+                            if move_ref {
+                                ops.push(RegOp::MoveRefRange {
+                                    dst_base: dst_ref_base,
+                                    src_base: src_ref_base,
+                                    count: arity_ref_slots,
+                                });
+                            }
                             let jmp_ip = ops.len();
                             ops.push(RegOp::Jump { target: 0 });
                             branch_patches.push((jmp_ip, target_pc));
@@ -2323,14 +2691,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let count = result_types.len();
                 let start = vstack.len().checked_sub(count)?;
-                let base = if count > 0 {
-                    vstack[start].slot_off
-                } else {
-                    local_reg_slots
-                };
+                let base = slot_top(&vstack[..start]);
+                let ref_base = ref_top(&vstack[..start]);
                 ops.push(RegOp::Return {
                     base,
                     count: result_reg_slots,
+                    ref_base,
+                    ref_count: result_ref_slots,
                 });
                 close_block(
                     &mut in_block,
@@ -2349,13 +2716,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 };
                 let callee_ft = declared_func_type(module, fi)?;
                 let arg_count = callee_ft.params.len();
-                let arg_slots: u16 = callee_ft
-                    .params
-                    .iter()
-                    .map(|&t| FastType::from_val(t).map(FastType::slots))
-                    .collect::<Option<Vec<_>>>()?
-                    .into_iter()
-                    .sum();
+                let mut arg_slots = 0u16;
+                let mut arg_ref_slots = 0u16;
+                for &t in &callee_ft.params {
+                    let fty = FastType::from_val(t)?;
+                    arg_slots = arg_slots.checked_add(fty.slots())?;
+                    arg_ref_slots = arg_ref_slots.checked_add(fty.ref_slots())?;
+                }
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let meta_at_call = push_meta(
                     pc,
@@ -2366,11 +2733,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut static_labels,
                 )?;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
-                let arg_base = if arg_count > 0 {
-                    vstack[arg_start].slot_off
-                } else {
-                    slot_top(&vstack)
-                };
+                let arg_base = slot_top(&vstack[..arg_start]);
+                let arg_ref_base = ref_top(&vstack[..arg_start]);
                 vstack.truncate(arg_start);
                 let meta_after_call = push_meta(
                     pc + 1,
@@ -2385,22 +2749,28 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     func_idx: fi,
                     arg_base,
                     arg_slots,
+                    arg_ref_base,
+                    arg_ref_slots,
                     logical_arg_start: arg_start as u16,
                     meta_at_call,
                     meta_after_call,
                 });
                 ops.push(RegOp::Call { call_idx, src_off });
                 let mut off = arg_base;
+                let mut roff = arg_ref_base;
                 for &rt in &callee_ft.results {
                     let ty = FastType::from_val(rt)?;
+                    let s = if ty == FastType::Ref { roff } else { off };
                     vstack.push(VSlot {
-                        src: VVal::Slot(off),
-                        slot_off: off,
+                        src: VVal::Slot(s),
+                        slot_off: s,
                         ty,
                     });
                     off += ty.slots();
+                    roff += ty.ref_slots();
                 }
                 max_slots = max_slots.max(off as usize);
+                max_ref_slots = max_ref_slots.max(roff as usize);
                 close_block(
                     &mut in_block,
                     &mut cur_block_ip,
@@ -2418,13 +2788,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let callee_ft = decoded.types.get(type_idx as usize)?;
                 let table_is_64 = declared_table(module, table_idx)?.index_type == IndexType::I64;
                 let arg_count = callee_ft.params.len();
-                let arg_slots: u16 = callee_ft
-                    .params
-                    .iter()
-                    .map(|&t| FastType::from_val(t).map(FastType::slots))
-                    .collect::<Option<Vec<_>>>()?
-                    .into_iter()
-                    .sum();
+                let mut arg_slots = 0u16;
+                let mut arg_ref_slots = 0u16;
+                for &t in &callee_ft.params {
+                    let fty = FastType::from_val(t)?;
+                    arg_slots = arg_slots.checked_add(fty.slots())?;
+                    arg_ref_slots = arg_ref_slots.checked_add(fty.ref_slots())?;
+                }
                 // Flush before popping the table index so `meta_at_call` preserves
                 // `[args..., table_index]` on the canonical stack if this call bails!
                 flush_all(&mut vstack, &mut ops, &mut consts);
@@ -2439,11 +2809,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let idx_slot = vstack.pop()?;
                 let index_reg = idx_slot.slot_off;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
-                let arg_base = if arg_count > 0 {
-                    vstack[arg_start].slot_off
-                } else {
-                    slot_top(&vstack)
-                };
+                let arg_base = slot_top(&vstack[..arg_start]);
+                let arg_ref_base = ref_top(&vstack[..arg_start]);
                 vstack.truncate(arg_start);
                 let meta_after_call = push_meta(
                     pc + 1,
@@ -2460,6 +2827,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     index_reg,
                     arg_base,
                     arg_slots,
+                    arg_ref_base,
+                    arg_ref_slots,
                     logical_arg_start: arg_start as u16,
                     table_is_64,
                     meta_at_call,
@@ -2467,16 +2836,20 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 });
                 ops.push(RegOp::CallIndirect { call_idx, src_off });
                 let mut off = arg_base;
+                let mut roff = arg_ref_base;
                 for &rt in &callee_ft.results {
                     let ty = FastType::from_val(rt)?;
+                    let s = if ty == FastType::Ref { roff } else { off };
                     vstack.push(VSlot {
-                        src: VVal::Slot(off),
-                        slot_off: off,
+                        src: VVal::Slot(s),
+                        slot_off: s,
                         ty,
                     });
                     off += ty.slots();
+                    roff += ty.ref_slots();
                 }
                 max_slots = max_slots.max(off as usize);
+                max_ref_slots = max_ref_slots.max(roff as usize);
                 close_block(
                     &mut in_block,
                     &mut cur_block_ip,
@@ -2493,13 +2866,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 };
                 let callee_ft = declared_func_type(module, fi)?;
                 let arg_count = callee_ft.params.len();
-                let arg_slots: u16 = callee_ft
-                    .params
-                    .iter()
-                    .map(|&t| FastType::from_val(t).map(FastType::slots))
-                    .collect::<Option<Vec<_>>>()?
-                    .into_iter()
-                    .sum();
+                let mut arg_slots = 0u16;
+                let mut arg_ref_slots = 0u16;
+                for &t in &callee_ft.params {
+                    let fty = FastType::from_val(t)?;
+                    arg_slots = arg_slots.checked_add(fty.slots())?;
+                    arg_ref_slots = arg_ref_slots.checked_add(fty.ref_slots())?;
+                }
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let meta_at_call = push_meta(
                     pc,
@@ -2510,16 +2883,15 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut static_labels,
                 )?;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
-                let arg_base = if arg_count > 0 {
-                    vstack[arg_start].slot_off
-                } else {
-                    slot_top(&vstack)
-                };
+                let arg_base = slot_top(&vstack[..arg_start]);
+                let arg_ref_base = ref_top(&vstack[..arg_start]);
                 let call_idx = call_sites.len() as u32;
                 call_sites.push(CallSite {
                     func_idx: fi,
                     arg_base,
                     arg_slots,
+                    arg_ref_base,
+                    arg_ref_slots,
                     logical_arg_start: arg_start as u16,
                     meta_at_call,
                     meta_after_call: BLOCK_META_NONE,
@@ -2543,13 +2915,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let callee_ft = decoded.types.get(type_idx as usize)?;
                 let table_is_64 = declared_table(module, table_idx)?.index_type == IndexType::I64;
                 let arg_count = callee_ft.params.len();
-                let arg_slots: u16 = callee_ft
-                    .params
-                    .iter()
-                    .map(|&t| FastType::from_val(t).map(FastType::slots))
-                    .collect::<Option<Vec<_>>>()?
-                    .into_iter()
-                    .sum();
+                let mut arg_slots = 0u16;
+                let mut arg_ref_slots = 0u16;
+                for &t in &callee_ft.params {
+                    let fty = FastType::from_val(t)?;
+                    arg_slots = arg_slots.checked_add(fty.slots())?;
+                    arg_ref_slots = arg_ref_slots.checked_add(fty.ref_slots())?;
+                }
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let meta_at_call = push_meta(
                     pc,
@@ -2562,11 +2934,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let idx_slot = vstack.pop()?;
                 let index_reg = idx_slot.slot_off;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
-                let arg_base = if arg_count > 0 {
-                    vstack[arg_start].slot_off
-                } else {
-                    slot_top(&vstack)
-                };
+                let arg_base = slot_top(&vstack[..arg_start]);
+                let arg_ref_base = ref_top(&vstack[..arg_start]);
                 let call_idx = call_indirect_sites.len() as u32;
                 call_indirect_sites.push(CallIndirectSite {
                     type_idx,
@@ -2574,6 +2943,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     index_reg,
                     arg_base,
                     arg_slots,
+                    arg_ref_base,
+                    arg_ref_slots,
                     logical_arg_start: arg_start as u16,
                     table_is_64,
                     meta_at_call,
@@ -2595,37 +2966,53 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 vstack.pop()?;
             }
             0x1b | 0x1c => {
-                // select (scalar or v128)
+                // select (scalar, v128, or ref)
                 let cond_v = vstack.pop()?;
                 let b_v = vstack.pop()?;
                 let a_v = vstack.pop()?;
                 let base_tmp = slot_top(&vstack);
-                let w = a_v.ty.slots();
-                let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
-                let rb = mat(b_v.src, base_tmp + w, &mut max_slots, &mut ops, &mut consts);
-                let rc = mat(
-                    cond_v.src,
-                    base_tmp + 2 * w,
-                    &mut max_slots,
-                    &mut ops,
-                    &mut consts,
-                );
                 let (dst, consumed, is_tee) =
                     try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, a_v.ty);
-                if a_v.ty == FastType::V128 {
-                    ops.push(RegOp::SelectV128 {
+                if a_v.ty == FastType::Ref {
+                    let (VVal::Slot(ra) | VVal::Local(ra)) = a_v.src else {
+                        return None;
+                    };
+                    let (VVal::Slot(rb) | VVal::Local(rb)) = b_v.src else {
+                        return None;
+                    };
+                    let rc = mat(cond_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                    ops.push(RegOp::SelectRef {
                         dst,
                         a: ra,
                         b: rb,
                         cond: rc,
                     });
                 } else {
-                    ops.push(RegOp::Select {
-                        dst,
-                        a: ra,
-                        b: rb,
-                        cond: rc,
-                    });
+                    let w = a_v.ty.slots();
+                    let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                    let rb = mat(b_v.src, base_tmp + w, &mut max_slots, &mut ops, &mut consts);
+                    let rc = mat(
+                        cond_v.src,
+                        base_tmp + 2 * w,
+                        &mut max_slots,
+                        &mut ops,
+                        &mut consts,
+                    );
+                    if a_v.ty == FastType::V128 {
+                        ops.push(RegOp::SelectV128 {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            cond: rc,
+                        });
+                    } else {
+                        ops.push(RegOp::Select {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            cond: rc,
+                        });
+                    }
                 }
                 finish_dst(
                     dst,
@@ -2634,6 +3021,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     a_v.ty,
                     &mut vstack,
                     &mut max_slots,
+                    &mut max_ref_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -2646,13 +3034,21 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let l = l as usize;
                 let ty = *local_types.get(l)?;
                 let l_slot = *local_slots.get(l)?;
-                let slot_off = slot_top(&vstack);
+                let slot_off = if ty == FastType::Ref {
+                    ref_top(&vstack)
+                } else {
+                    slot_top(&vstack)
+                };
                 vstack.push(VSlot {
                     src: VVal::Local(l_slot),
                     slot_off,
                     ty,
                 });
-                max_slots = max_slots.max(slot_off as usize + ty.slots() as usize);
+                if ty == FastType::Ref {
+                    max_ref_slots = max_ref_slots.max(slot_off as usize + 1);
+                } else {
+                    max_slots = max_slots.max(slot_off as usize + ty.slots() as usize);
+                }
             }
             0x21 | 0x22 => {
                 // local.set / local.tee
@@ -2661,11 +3057,17 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 };
                 let l_slot = *local_slots.get(l as usize)?;
                 let val = vstack.pop()?;
-                flush_local(l_slot, &mut vstack, &mut ops);
+                let is_ref = val.ty == FastType::Ref;
+                flush_local(l_slot, is_ref, &mut vstack, &mut ops);
                 match val.src {
                     VVal::Local(s) if s == l_slot => {}
                     VVal::Slot(s) | VVal::Local(s) => {
-                        if val.ty == FastType::V128 {
+                        if is_ref {
+                            ops.push(RegOp::MovRef {
+                                dst: l_slot,
+                                src: s,
+                            });
+                        } else if val.ty == FastType::V128 {
                             ops.push(RegOp::MovV128 {
                                 dst: l_slot,
                                 src: s,
@@ -2688,15 +3090,44 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     VVal::ImmV128(idx) => {
                         ops.push(RegOp::ConstV128 { dst: l_slot, idx });
                     }
+                    VVal::ShlImm { src, shift } => {
+                        ops.push(RegOp::I32ShlImm {
+                            dst: l_slot,
+                            src,
+                            shift: u32::from(shift),
+                        });
+                    }
+                    VVal::AddShl { base, idx, shift } => {
+                        let tmp = slot_top(&vstack);
+                        max_slots = max_slots.max(tmp as usize + 1);
+                        ops.push(RegOp::I32ShlImm {
+                            dst: tmp,
+                            src: idx,
+                            shift: u32::from(shift),
+                        });
+                        ops.push(RegOp::I32Add {
+                            dst: l_slot,
+                            a: base,
+                            b: tmp,
+                        });
+                    }
                 }
                 if insn.opcode == 0x22 {
-                    let slot_off = slot_top(&vstack);
+                    let slot_off = if is_ref {
+                        ref_top(&vstack)
+                    } else {
+                        slot_top(&vstack)
+                    };
                     vstack.push(VSlot {
                         src: VVal::Local(l_slot),
                         slot_off,
                         ty: val.ty,
                     });
-                    max_slots = max_slots.max(slot_off as usize + val.ty.slots() as usize);
+                    if is_ref {
+                        max_ref_slots = max_ref_slots.max(slot_off as usize + 1);
+                    } else {
+                        max_slots = max_slots.max(slot_off as usize + val.ty.slots() as usize);
+                    }
                 }
             }
             0x23 => {
@@ -2707,7 +3138,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let ty = FastType::from_val(declared_global_type(module, gi)?)?;
                 let (dst, consumed, is_tee) =
                     try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
-                if ty == FastType::V128 {
+                if ty == FastType::Ref {
+                    ops.push(RegOp::GlobalGetRef { dst, global: gi });
+                } else if ty == FastType::V128 {
                     ops.push(RegOp::GlobalGetV128 { dst, global: gi });
                 } else {
                     ops.push(RegOp::GlobalGet { dst, global: gi });
@@ -2719,6 +3152,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     ty,
                     &mut vstack,
                     &mut max_slots,
+                    &mut max_ref_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -2729,18 +3163,196 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     return None;
                 };
                 let val = vstack.pop()?;
-                let src = mat(
-                    val.src,
+                if val.ty == FastType::Ref {
+                    let (VVal::Slot(src) | VVal::Local(src)) = val.src else {
+                        return None;
+                    };
+                    ops.push(RegOp::GlobalSetRef { src, global: gi });
+                } else {
+                    let src = mat(
+                        val.src,
+                        slot_top(&vstack),
+                        &mut max_slots,
+                        &mut ops,
+                        &mut consts,
+                    );
+                    if val.ty == FastType::V128 {
+                        ops.push(RegOp::GlobalSetV128 { src, global: gi });
+                    } else {
+                        ops.push(RegOp::GlobalSet { src, global: gi });
+                    }
+                }
+            }
+            0x25 => {
+                // table.get
+                let Immediate::Index(table) = insn.immediate else {
+                    return None;
+                };
+                let idx_v = vstack.pop()?;
+                let r_idx = mat(
+                    idx_v.src,
                     slot_top(&vstack),
                     &mut max_slots,
                     &mut ops,
                     &mut consts,
                 );
-                if val.ty == FastType::V128 {
-                    ops.push(RegOp::GlobalSetV128 { src, global: gi });
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, FastType::Ref);
+                ops.push(RegOp::TableGet {
+                    dst,
+                    idx: r_idx,
+                    table,
+                    src_off,
+                });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    FastType::Ref,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut max_ref_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
+            }
+            0x26 => {
+                // table.set
+                let Immediate::Index(table) = insn.immediate else {
+                    return None;
+                };
+                let val_v = vstack.pop()?;
+                let idx_v = vstack.pop()?;
+                let (VVal::Slot(r_val) | VVal::Local(r_val)) = val_v.src else {
+                    return None;
+                };
+                let r_idx = mat(
+                    idx_v.src,
+                    slot_top(&vstack),
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                ops.push(RegOp::TableSet {
+                    idx: r_idx,
+                    val: r_val,
+                    table,
+                    src_off,
+                });
+            }
+            0xd0 => {
+                // ref.null heap
+                let Immediate::Heap(heap) = insn.immediate else {
+                    return None;
+                };
+                let heap_idx = if let Some(pos) = ref_heaps.iter().position(|&h| h == heap) {
+                    pos as u32
                 } else {
-                    ops.push(RegOp::GlobalSet { src, global: gi });
-                }
+                    let idx = u32::try_from(ref_heaps.len()).ok()?;
+                    ref_heaps.push(heap);
+                    idx
+                };
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, FastType::Ref);
+                ops.push(RegOp::RefNull { dst, heap_idx });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    FastType::Ref,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut max_ref_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
+            }
+            0xd1 => {
+                // ref.is_null
+                let val_v = vstack.pop()?;
+                let (VVal::Slot(src) | VVal::Local(src)) = val_v.src else {
+                    return None;
+                };
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, FastType::I32);
+                ops.push(RegOp::RefIsNull { dst, src });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    FastType::I32,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut max_ref_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
+            }
+            0xd2 => {
+                // ref.func idx
+                let Immediate::Index(func_idx) = insn.immediate else {
+                    return None;
+                };
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, FastType::Ref);
+                ops.push(RegOp::RefFunc { dst, func_idx });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    FastType::Ref,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut max_ref_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
+            }
+            0xd3 => {
+                // ref.eq
+                let b_v = vstack.pop()?;
+                let a_v = vstack.pop()?;
+                let (VVal::Slot(ra) | VVal::Local(ra)) = a_v.src else {
+                    return None;
+                };
+                let (VVal::Slot(rb) | VVal::Local(rb)) = b_v.src else {
+                    return None;
+                };
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, FastType::I32);
+                ops.push(RegOp::RefEq { dst, a: ra, b: rb });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    FastType::I32,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut max_ref_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
+            }
+            0xd4 => {
+                // ref.as_non_null
+                let val_v = vstack.pop()?;
+                let (VVal::Slot(src) | VVal::Local(src)) = val_v.src else {
+                    return None;
+                };
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, FastType::Ref);
+                ops.push(RegOp::RefAsNonNull { dst, src, src_off });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    FastType::Ref,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut max_ref_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
             }
             0x28..=0x3e => {
                 // scalar memory load / store
@@ -2752,83 +3364,403 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     let val_v = vstack.pop()?;
                     let addr_v = vstack.pop()?;
                     let base_tmp = slot_top(&vstack);
-                    // Peephole: fuse preceding `I32AddImm { dst: tmp, src: base, imm }` into
-                    // `StoreI32AddImm` / `StoreI32_8AddImm` when `offset == 0` and memory32.
-                    let fused_add_imm = if memory == 0
-                        && mem0_unshared
-                        && !mem0_is_64
-                        && offset == 0
-                        && matches!(insn.opcode, 0x36 | 0x38 | 0x3a)
-                        && let VVal::Slot(r_addr) = addr_v.src
-                        && r_addr >= local_reg_slots
-                        && val_v.src != VVal::Slot(r_addr)
-                        && ops.len() > cur_block_start_ip
-                        && let Some(RegOp::I32AddImm { dst, src, imm }) = ops.last().copied()
-                        && dst == r_addr
-                    {
-                        ops.pop();
-                        Some((src, imm as u32))
+                    let fast_mem32 = memory == 0 && mem0_unshared && !mem0_is_64;
+                    let off32_opt = u32::try_from(offset).ok();
+                    // Fast path for lazy `VVal::AddShl` / `VVal::ShlImm` scaled store addresses!
+                    let fused_scaled_store = if fast_mem32 && let Some(off32) = off32_opt {
+                        match (insn.opcode, addr_v.src) {
+                            (0x36 | 0x38, VVal::ShlImm { src: idx, shift: 2 }) => {
+                                let r_val =
+                                    mat(val_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                                ops.push(RegOp::StoreI32Shl2 {
+                                    idx,
+                                    val: r_val,
+                                    offset: off32,
+                                    src_off,
+                                });
+                                true
+                            }
+                            (
+                                0x36 | 0x38,
+                                VVal::AddShl {
+                                    base,
+                                    idx,
+                                    shift: 2,
+                                },
+                            ) => {
+                                let r_val =
+                                    mat(val_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                                ops.push(RegOp::StoreI32Shl2Add {
+                                    base,
+                                    idx,
+                                    val: r_val,
+                                    offset: off32,
+                                    src_off,
+                                });
+                                true
+                            }
+                            (
+                                0x37 | 0x39,
+                                VVal::AddShl {
+                                    base,
+                                    idx,
+                                    shift: 3,
+                                },
+                            ) => {
+                                let r_val =
+                                    mat(val_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                                ops.push(RegOp::StoreI64Shl3Add {
+                                    base,
+                                    idx,
+                                    val: r_val,
+                                    offset: off32,
+                                    src_off,
+                                });
+                                true
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+                    if fused_scaled_store {
+                        // already emitted
+                    } else {
+                        // Peephole: fuse preceding `I32AddImm` or `I32ShlImm(shift=2)` on addr slot.
+                        let fused_shl2_op = if fast_mem32
+                            && let Some(off32) = off32_opt
+                            && matches!(insn.opcode, 0x36 | 0x38)
+                            && let VVal::Slot(r_addr) = addr_v.src
+                            && r_addr >= local_reg_slots
+                            && val_v.src != VVal::Slot(r_addr)
+                            && ops.len() > cur_block_start_ip
+                            && let Some(RegOp::I32ShlImm { dst, src, shift: 2 }) =
+                                ops.last().copied()
+                            && dst == r_addr
+                        {
+                            ops.pop();
+                            Some((src, off32))
+                        } else {
+                            None
+                        };
+                        let fused_add_imm = if fused_shl2_op.is_none()
+                            && fast_mem32
+                            && offset == 0
+                            && matches!(insn.opcode, 0x36 | 0x38 | 0x3a)
+                            && let VVal::Slot(r_addr) = addr_v.src
+                            && r_addr >= local_reg_slots
+                            && val_v.src != VVal::Slot(r_addr)
+                            && ops.len() > cur_block_start_ip
+                            && let Some(RegOp::I32AddImm { dst, src, imm }) = ops.last().copied()
+                            && dst == r_addr
+                        {
+                            ops.pop();
+                            Some((src, imm as u32))
+                        } else {
+                            None
+                        };
+                        if let Some((idx, off32)) = fused_shl2_op {
+                            let r_val = mat(
+                                val_v.src,
+                                base_tmp + 1,
+                                &mut max_slots,
+                                &mut ops,
+                                &mut consts,
+                            );
+                            ops.push(RegOp::StoreI32Shl2 {
+                                idx,
+                                val: r_val,
+                                offset: off32,
+                                src_off,
+                            });
+                        } else if let Some((base_reg, imm)) = fused_add_imm {
+                            let r_val = mat(
+                                val_v.src,
+                                base_tmp + 1,
+                                &mut max_slots,
+                                &mut ops,
+                                &mut consts,
+                            );
+                            match insn.opcode {
+                                0x36 | 0x38 => ops.push(RegOp::StoreI32AddImm {
+                                    addr: base_reg,
+                                    val: r_val,
+                                    imm,
+                                    src_off,
+                                }),
+                                _ => ops.push(RegOp::StoreI32_8AddImm {
+                                    addr: base_reg,
+                                    val: r_val,
+                                    imm,
+                                    src_off,
+                                }),
+                            }
+                        } else {
+                            let r_addr =
+                                mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                            let r_val = mat(
+                                val_v.src,
+                                base_tmp + 1,
+                                &mut max_slots,
+                                &mut ops,
+                                &mut consts,
+                            );
+                            if memory == 0
+                                && mem0_unshared
+                                && let Some(off32) = off32_opt
+                            {
+                                match insn.opcode {
+                                    0x36 | 0x38 => ops.push(RegOp::StoreI32 {
+                                        addr: r_addr,
+                                        val: r_val,
+                                        offset: off32,
+                                        src_off,
+                                    }),
+                                    0x37 | 0x39 => ops.push(RegOp::StoreI64 {
+                                        addr: r_addr,
+                                        val: r_val,
+                                        offset: off32,
+                                        src_off,
+                                    }),
+                                    0x3a => ops.push(RegOp::StoreI32_8 {
+                                        addr: r_addr,
+                                        val: r_val,
+                                        offset: off32,
+                                        src_off,
+                                    }),
+                                    0x3b => ops.push(RegOp::StoreI32_16 {
+                                        addr: r_addr,
+                                        val: r_val,
+                                        offset: off32,
+                                        src_off,
+                                    }),
+                                    _ => {
+                                        let arg_idx = mem_args.len() as u32;
+                                        mem_args.push(MemGenArg { memory, offset });
+                                        ops.push(RegOp::MemGen {
+                                            op: insn.opcode,
+                                            addr: r_addr,
+                                            val: r_val,
+                                            arg_idx,
+                                            src_off,
+                                        });
+                                    }
+                                }
+                            } else {
+                                let arg_idx = mem_args.len() as u32;
+                                mem_args.push(MemGenArg { memory, offset });
+                                ops.push(RegOp::MemGen {
+                                    op: insn.opcode,
+                                    addr: r_addr,
+                                    val: r_val,
+                                    arg_idx,
+                                    src_off,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    let addr_v = vstack.pop()?;
+                    let base_tmp = slot_top(&vstack);
+                    let fast_mem32 = memory == 0 && mem0_unshared && !mem0_is_64;
+                    let off32_opt = u32::try_from(offset).ok();
+                    let lazy_fused = if fast_mem32 && let Some(off32) = off32_opt {
+                        match (insn.opcode, addr_v.src) {
+                            (0x28 | 0x2a, VVal::ShlImm { src: idx, shift: 2 }) => {
+                                let (dst, consumed, is_tee) = try_direct_local_dst(
+                                    pc,
+                                    cur_block_ops,
+                                    &mut vstack,
+                                    &mut ops,
+                                    ty,
+                                );
+                                ops.push(RegOp::LoadI32Shl2 {
+                                    dst,
+                                    idx,
+                                    offset: off32,
+                                    src_off,
+                                });
+                                Some((dst, consumed, is_tee))
+                            }
+                            (
+                                0x28 | 0x2a,
+                                VVal::AddShl {
+                                    base,
+                                    idx,
+                                    shift: 2,
+                                },
+                            ) => {
+                                let (dst, consumed, is_tee) = try_direct_local_dst(
+                                    pc,
+                                    cur_block_ops,
+                                    &mut vstack,
+                                    &mut ops,
+                                    ty,
+                                );
+                                ops.push(RegOp::LoadI32Shl2Add {
+                                    dst,
+                                    base,
+                                    idx,
+                                    offset: off32,
+                                    src_off,
+                                });
+                                Some((dst, consumed, is_tee))
+                            }
+                            (
+                                0x29 | 0x2b,
+                                VVal::AddShl {
+                                    base,
+                                    idx,
+                                    shift: 3,
+                                },
+                            ) => {
+                                let (dst, consumed, is_tee) = try_direct_local_dst(
+                                    pc,
+                                    cur_block_ops,
+                                    &mut vstack,
+                                    &mut ops,
+                                    ty,
+                                );
+                                ops.push(RegOp::LoadI64Shl3Add {
+                                    dst,
+                                    base,
+                                    idx,
+                                    offset: off32,
+                                    src_off,
+                                });
+                                Some((dst, consumed, is_tee))
+                            }
+                            _ => None,
+                        }
                     } else {
                         None
                     };
-                    if let Some((base_reg, imm)) = fused_add_imm {
-                        let r_val = mat(
-                            val_v.src,
-                            base_tmp + 1,
-                            &mut max_slots,
-                            &mut ops,
-                            &mut consts,
-                        );
-                        match insn.opcode {
-                            0x36 | 0x38 => ops.push(RegOp::StoreI32AddImm {
-                                addr: base_reg,
-                                val: r_val,
-                                imm,
-                                src_off,
-                            }),
-                            _ => ops.push(RegOp::StoreI32_8AddImm {
-                                addr: base_reg,
-                                val: r_val,
-                                imm,
-                                src_off,
-                            }),
-                        }
+                    let (dst, consumed, is_tee) = if let Some(res) = lazy_fused {
+                        res
                     } else {
                         let r_addr =
                             mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
-                        let r_val = mat(
-                            val_v.src,
-                            base_tmp + 1,
-                            &mut max_slots,
-                            &mut ops,
-                            &mut consts,
-                        );
+                        let (dst, consumed, is_tee) =
+                            try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
                         if memory == 0
                             && mem0_unshared
-                            && let Ok(off32) = u32::try_from(offset)
+                            && let Some(off32) = off32_opt
                         {
-                            match insn.opcode {
-                                0x36 | 0x38 => ops.push(RegOp::StoreI32 {
-                                    addr: r_addr,
-                                    val: r_val,
+                            let can_fuse_addr = !mem0_is_64
+                                && matches!(insn.opcode, 0x28 | 0x29 | 0x2a | 0x2b | 0x2d)
+                                && r_addr >= local_reg_slots
+                                && ops.len() > cur_block_start_ip;
+                            let fused_shl2 = if can_fuse_addr
+                                && matches!(insn.opcode, 0x28 | 0x2a)
+                                && let Some(RegOp::I32ShlImm {
+                                    dst: shl_dst,
+                                    src: idx,
+                                    shift: 2,
+                                }) = ops.last().copied()
+                                && shl_dst == r_addr
+                            {
+                                ops.pop();
+                                Some(idx)
+                            } else {
+                                None
+                            };
+                            let fused_addr = if fused_shl2.is_none()
+                                && can_fuse_addr
+                                && let Some(RegOp::I32Add { dst: add_dst, a, b }) =
+                                    ops.last().copied()
+                                && add_dst == r_addr
+                            {
+                                ops.pop();
+                                Some((a, b))
+                            } else {
+                                None
+                            };
+                            let fused_imm = if fused_shl2.is_none()
+                                && fused_addr.is_none()
+                                && can_fuse_addr
+                                && matches!(insn.opcode, 0x28 | 0x2a | 0x2d)
+                                && off32 == 0
+                                && let Some(RegOp::I32AddImm {
+                                    dst: add_dst,
+                                    src,
+                                    imm,
+                                }) = ops.last().copied()
+                                && add_dst == r_addr
+                            {
+                                ops.pop();
+                                Some((src, imm as u32))
+                            } else {
+                                None
+                            };
+                            match (insn.opcode, fused_shl2, fused_addr, fused_imm) {
+                                (0x28 | 0x2a, Some(idx), _, _) => ops.push(RegOp::LoadI32Shl2 {
+                                    dst,
+                                    idx,
                                     offset: off32,
                                     src_off,
                                 }),
-                                0x37 | 0x39 => ops.push(RegOp::StoreI64 {
-                                    addr: r_addr,
-                                    val: r_val,
+                                (0x28 | 0x2a, None, Some((a, b)), _) => {
+                                    ops.push(RegOp::LoadI32AddAddr {
+                                        dst,
+                                        a,
+                                        b,
+                                        offset: off32,
+                                        src_off,
+                                    })
+                                }
+                                (0x29 | 0x2b, None, Some((a, b)), _) => {
+                                    ops.push(RegOp::LoadI64AddAddr {
+                                        dst,
+                                        a,
+                                        b,
+                                        offset: off32,
+                                        src_off,
+                                    })
+                                }
+                                (0x2d, None, Some((a, b)), _) => ops.push(RegOp::LoadU8AddAddr {
+                                    dst,
+                                    a,
+                                    b,
                                     offset: off32,
                                     src_off,
                                 }),
-                                0x3a => ops.push(RegOp::StoreI32_8 {
+                                (0x28 | 0x2a, None, None, Some((base, imm))) => {
+                                    ops.push(RegOp::LoadI32AddImm {
+                                        dst,
+                                        addr: base,
+                                        imm,
+                                        src_off,
+                                    })
+                                }
+                                (0x2d, None, None, Some((base, imm))) => {
+                                    ops.push(RegOp::LoadU8AddImm {
+                                        dst,
+                                        addr: base,
+                                        imm,
+                                        src_off,
+                                    })
+                                }
+                                (0x28 | 0x2a, None, None, None) => ops.push(RegOp::LoadI32 {
+                                    dst,
                                     addr: r_addr,
-                                    val: r_val,
                                     offset: off32,
                                     src_off,
                                 }),
-                                0x3b => ops.push(RegOp::StoreI32_16 {
+                                (0x29 | 0x2b, None, None, None) => ops.push(RegOp::LoadI64 {
+                                    dst,
                                     addr: r_addr,
-                                    val: r_val,
+                                    offset: off32,
+                                    src_off,
+                                }),
+                                (0x2d, None, None, None) => ops.push(RegOp::LoadI32U8 {
+                                    dst,
+                                    addr: r_addr,
+                                    offset: off32,
+                                    src_off,
+                                }),
+                                (0x2f, None, None, None) => ops.push(RegOp::LoadI32U16 {
+                                    dst,
+                                    addr: r_addr,
                                     offset: off32,
                                     src_off,
                                 }),
@@ -2838,7 +3770,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     ops.push(RegOp::MemGen {
                                         op: insn.opcode,
                                         addr: r_addr,
-                                        val: r_val,
+                                        val: dst,
                                         arg_idx,
                                         src_off,
                                     });
@@ -2850,126 +3782,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             ops.push(RegOp::MemGen {
                                 op: insn.opcode,
                                 addr: r_addr,
-                                val: r_val,
+                                val: dst,
                                 arg_idx,
                                 src_off,
                             });
                         }
-                    }
-                } else {
-                    let addr_v = vstack.pop()?;
-                    let base_tmp = slot_top(&vstack);
-                    let r_addr = mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
-                    let (dst, consumed, is_tee) =
-                        try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
-                    if memory == 0
-                        && mem0_unshared
-                        && let Ok(off32) = u32::try_from(offset)
-                    {
-                        let can_fuse_addr = !mem0_is_64
-                            && matches!(insn.opcode, 0x28 | 0x2a | 0x2d)
-                            && r_addr >= local_reg_slots
-                            && ops.len() > cur_block_start_ip;
-                        let fused_addr = if can_fuse_addr
-                            && let Some(RegOp::I32Add { dst: add_dst, a, b }) = ops.last().copied()
-                            && add_dst == r_addr
-                        {
-                            ops.pop();
-                            Some((a, b))
-                        } else {
-                            None
-                        };
-                        let fused_imm = if fused_addr.is_none()
-                            && can_fuse_addr
-                            && off32 == 0
-                            && let Some(RegOp::I32AddImm {
-                                dst: add_dst,
-                                src,
-                                imm,
-                            }) = ops.last().copied()
-                            && add_dst == r_addr
-                        {
-                            ops.pop();
-                            Some((src, imm as u32))
-                        } else {
-                            None
-                        };
-                        match (insn.opcode, fused_addr, fused_imm) {
-                            (0x28 | 0x2a, Some((a, b)), _) => ops.push(RegOp::LoadI32AddAddr {
-                                dst,
-                                a,
-                                b,
-                                offset: off32,
-                                src_off,
-                            }),
-                            (0x2d, Some((a, b)), _) => ops.push(RegOp::LoadU8AddAddr {
-                                dst,
-                                a,
-                                b,
-                                offset: off32,
-                                src_off,
-                            }),
-                            (0x28 | 0x2a, None, Some((base, imm))) => {
-                                ops.push(RegOp::LoadI32AddImm {
-                                    dst,
-                                    addr: base,
-                                    imm,
-                                    src_off,
-                                })
-                            }
-                            (0x2d, None, Some((base, imm))) => ops.push(RegOp::LoadU8AddImm {
-                                dst,
-                                addr: base,
-                                imm,
-                                src_off,
-                            }),
-                            (0x28 | 0x2a, None, None) => ops.push(RegOp::LoadI32 {
-                                dst,
-                                addr: r_addr,
-                                offset: off32,
-                                src_off,
-                            }),
-                            (0x29 | 0x2b, None, None) => ops.push(RegOp::LoadI64 {
-                                dst,
-                                addr: r_addr,
-                                offset: off32,
-                                src_off,
-                            }),
-                            (0x2d, None, None) => ops.push(RegOp::LoadI32U8 {
-                                dst,
-                                addr: r_addr,
-                                offset: off32,
-                                src_off,
-                            }),
-                            (0x2f, None, None) => ops.push(RegOp::LoadI32U16 {
-                                dst,
-                                addr: r_addr,
-                                offset: off32,
-                                src_off,
-                            }),
-                            _ => {
-                                let arg_idx = mem_args.len() as u32;
-                                mem_args.push(MemGenArg { memory, offset });
-                                ops.push(RegOp::MemGen {
-                                    op: insn.opcode,
-                                    addr: r_addr,
-                                    val: dst,
-                                    arg_idx,
-                                    src_off,
-                                });
-                            }
-                        }
-                    } else {
-                        let arg_idx = mem_args.len() as u32;
-                        mem_args.push(MemGenArg { memory, offset });
-                        ops.push(RegOp::MemGen {
-                            op: insn.opcode,
-                            addr: r_addr,
-                            val: dst,
-                            arg_idx,
-                            src_off,
-                        });
-                    }
+                        (dst, consumed, is_tee)
+                    };
                     finish_dst(
                         dst,
                         consumed,
@@ -2977,6 +3796,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         ty,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -2999,6 +3819,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     ty,
                     &mut vstack,
                     &mut max_slots,
+                    &mut max_ref_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -3033,6 +3854,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     ty,
                     &mut vstack,
                     &mut max_slots,
+                    &mut max_ref_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -3297,6 +4119,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     ty,
                     &mut vstack,
                     &mut max_slots,
+                    &mut max_ref_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -3428,8 +4251,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         } else if next_insn.opcode == 0x04 {
                             let (params, results) = block_sig(module, &next_insn.immediate)?;
                             let param_slots = params.iter().map(|t| t.slots()).sum();
+                            let param_ref_slots = params.iter().map(|t| t.ref_slots()).sum();
                             let result_slots = results.iter().map(|t| t.slots()).sum();
-                            let (end, other) = module.data.control.get(body, pc + 1)?;
+                            let result_ref_slots = results.iter().map(|t| t.ref_slots()).sum();
+                            let (end, other) = module.data.control_get(body, pc + 1)?;
                             flush_all(&mut vstack, &mut ops, &mut consts);
                             let ra = mat(
                                 a_v.src,
@@ -3445,11 +4270,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 target: 0,
                             });
                             let base_height = vstack.len().checked_sub(params.len())?;
-                            let base_slot = if base_height < vstack.len() {
-                                vstack[base_height].slot_off
-                            } else {
-                                slot_top(&vstack)
-                            };
+                            let base_slot = slot_top(&vstack[..base_height]);
+                            let base_ref_slot = ref_top(&vstack[..base_height]);
                             let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
                             labels.try_reserve(1).ok()?;
                             labels.push(CompileLabel {
@@ -3459,11 +4281,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 loop_: false,
                                 base_height,
                                 base_slot,
+                                base_ref_slot,
                                 prefix,
                                 params,
                                 results,
                                 param_slots,
+                                param_ref_slots,
                                 result_slots,
+                                result_ref_slots,
                                 parent_dead: false,
                             });
                             let false_pc = other.map_or(end, |e| e + 1);
@@ -3509,6 +4334,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         res_ty,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -3654,8 +4480,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         } else if next_insn.opcode == 0x04 {
                             let (params, results) = block_sig(module, &next_insn.immediate)?;
                             let param_slots = params.iter().map(|t| t.slots()).sum();
+                            let param_ref_slots = params.iter().map(|t| t.ref_slots()).sum();
                             let result_slots = results.iter().map(|t| t.slots()).sum();
-                            let (end, other) = module.data.control.get(body, pc + 1)?;
+                            let result_ref_slots = results.iter().map(|t| t.ref_slots()).sum();
+                            let (end, other) = module.data.control_get(body, pc + 1)?;
                             flush_all(&mut vstack, &mut ops, &mut consts);
                             let base_tmp = slot_top(&vstack);
                             let inv = invert_i32_cmp(cmp);
@@ -3708,11 +4536,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 ip
                             };
                             let base_height = vstack.len().checked_sub(params.len())?;
-                            let base_slot = if base_height < vstack.len() {
-                                vstack[base_height].slot_off
-                            } else {
-                                slot_top(&vstack)
-                            };
+                            let base_slot = slot_top(&vstack[..base_height]);
+                            let base_ref_slot = ref_top(&vstack[..base_height]);
                             let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
                             labels.try_reserve(1).ok()?;
                             labels.push(CompileLabel {
@@ -3722,11 +4547,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 loop_: false,
                                 base_height,
                                 base_slot,
+                                base_ref_slot,
                                 prefix,
                                 params,
                                 results,
                                 param_slots,
+                                param_ref_slots,
                                 result_slots,
+                                result_ref_slots,
                                 parent_dead: false,
                             });
                             let false_pc = other.map_or(end, |e| e + 1);
@@ -3761,6 +4589,62 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         continue;
                     }
 
+                    // Lazy scaled-address expressions over local registers (`local << 2|3` and
+                    // `local_base + (local_idx << 2|3)`) for zero-overhead fused indexed loads/stores!
+                    let next_is_local_set = pc + 1 < n
+                        && !is_block_start[pc + 1]
+                        && cur_block_ops < MAX_BLOCK_OPS
+                        && matches!(code.instructions[pc + 1].opcode, 0x21 | 0x22);
+                    if !next_is_local_set {
+                        let lazy_expr = match (insn.opcode, a_v.src, b_v.src) {
+                            (0x74, VVal::Local(src), VVal::Imm32(c)) if matches!(c & 31, 2 | 3) => {
+                                Some(VVal::ShlImm {
+                                    src,
+                                    shift: (c & 31) as u8,
+                                })
+                            }
+                            (0x6c, VVal::Local(src), VVal::Imm32(4 | 8))
+                            | (0x6c, VVal::Imm32(4 | 8), VVal::Local(src)) => {
+                                let shift = if matches!(b_v.src, VVal::Imm32(4))
+                                    || matches!(a_v.src, VVal::Imm32(4))
+                                {
+                                    2u8
+                                } else {
+                                    3u8
+                                };
+                                Some(VVal::ShlImm { src, shift })
+                            }
+                            (
+                                0x6a,
+                                VVal::Local(base),
+                                VVal::ShlImm {
+                                    src: idx,
+                                    shift: shift @ (2 | 3),
+                                },
+                            )
+                            | (
+                                0x6a,
+                                VVal::ShlImm {
+                                    src: idx,
+                                    shift: shift @ (2 | 3),
+                                },
+                                VVal::Local(base),
+                            ) => Some(VVal::AddShl { base, idx, shift }),
+                            _ => None,
+                        };
+                        if let Some(expr) = lazy_expr {
+                            let slot_off = slot_top(&vstack);
+                            vstack.push(VSlot {
+                                src: expr,
+                                slot_off,
+                                ty: FastType::I32,
+                            });
+                            max_slots = max_slots.max(slot_off as usize + 1);
+                            pc += 1;
+                            continue;
+                        }
+                    }
+
                     let (dst, consumed, is_tee) =
                         try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, res_ty);
                     let base_tmp = slot_top(&vstack);
@@ -3787,11 +4671,19 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         }
                         (0x6c, a, VVal::Imm32(c)) | (0x6c, VVal::Imm32(c), a) => {
                             let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
-                            ops.push(RegOp::I32MulImm {
-                                dst,
-                                src: ra,
-                                imm: c as i32,
-                            });
+                            if c > 1 && c.is_power_of_two() {
+                                ops.push(RegOp::I32ShlImm {
+                                    dst,
+                                    src: ra,
+                                    shift: c.trailing_zeros(),
+                                });
+                            } else {
+                                ops.push(RegOp::I32MulImm {
+                                    dst,
+                                    src: ra,
+                                    imm: c as i32,
+                                });
+                            }
                             true
                         }
                         (0x6e, a, VVal::Imm32(c)) if c != 0 => {
@@ -4005,6 +4897,25 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             }
                         } else if in_cur_block
                             && insn.opcode == 0xa0
+                            && let Some(RegOp::F64Mul {
+                                dst: mtmp,
+                                a: ma,
+                                b: mb,
+                            }) = ops.last().copied()
+                            && mtmp >= local_reg_slots
+                            && rb == mtmp
+                            && ra != mtmp
+                        {
+                            ops.pop();
+                            ops.push(RegOp::F64MulAdd {
+                                dst,
+                                acc: ra,
+                                a: ma,
+                                b: mb,
+                            });
+                            true
+                        } else if in_cur_block
+                            && insn.opcode == 0xa0
                             && let Some(RegOp::LoadI64 {
                                 dst: ldst,
                                 addr,
@@ -4118,6 +5029,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         res_ty,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -4219,6 +5131,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             FastType::V128,
                             &mut vstack,
                             &mut max_slots,
+                            &mut max_ref_slots,
                             &mut cur_block_ops,
                             &mut pc,
                         );
@@ -4272,6 +5185,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             FastType::V128,
                             &mut vstack,
                             &mut max_slots,
+                            &mut max_ref_slots,
                             &mut cur_block_ops,
                             &mut pc,
                         );
@@ -4343,6 +5257,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         FastType::V128,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -4379,6 +5294,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         out_ty,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -4424,6 +5340,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         FastType::V128,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -4457,6 +5374,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         FastType::V128,
                         &mut vstack,
                         &mut max_slots,
+                        &mut max_ref_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -4477,7 +5395,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         &mut blocks,
     );
 
-    if max_slots > MAX_FN_SLOTS {
+    if max_slots > MAX_FN_SLOTS || max_ref_slots > MAX_FN_SLOTS {
         return None;
     }
 
@@ -4508,11 +5426,96 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         table_targets[ti] = target_ip;
     }
 
+    let pure_leaf = !fuel_blocks
+        && !has_loops_or_calls
+        && max_slots <= 16
+        && max_ref_slots == 0
+        && !ops.is_empty()
+        && local_types.iter().all(|t| {
+            matches!(
+                t,
+                FastType::I32 | FastType::I64 | FastType::F32 | FastType::F64
+            )
+        })
+        && result_types.iter().all(|t| {
+            matches!(
+                t,
+                FastType::I32 | FastType::I64 | FastType::F32 | FastType::F64
+            )
+        })
+        && ops.iter().all(|op| {
+            matches!(
+                op,
+                RegOp::Const32 { .. }
+                    | RegOp::Const64 { .. }
+                    | RegOp::Mov { .. }
+                    | RegOp::I32Add { .. }
+                    | RegOp::I32Sub { .. }
+                    | RegOp::I32Mul { .. }
+                    | RegOp::I32And { .. }
+                    | RegOp::I32Or { .. }
+                    | RegOp::I32Xor { .. }
+                    | RegOp::I32Shl { .. }
+                    | RegOp::I32ShrS { .. }
+                    | RegOp::I32ShrU { .. }
+                    | RegOp::I32Rotl { .. }
+                    | RegOp::I32Rotr { .. }
+                    | RegOp::I32AddImm { .. }
+                    | RegOp::I32SubImm { .. }
+                    | RegOp::I32MulImm { .. }
+                    | RegOp::I32AndImm { .. }
+                    | RegOp::I32OrImm { .. }
+                    | RegOp::I32XorImm { .. }
+                    | RegOp::I32ShlImm { .. }
+                    | RegOp::I32ShrSImm { .. }
+                    | RegOp::I32ShrUImm { .. }
+                    | RegOp::I32RotlImm { .. }
+                    | RegOp::I32RotrImm { .. }
+                    | RegOp::I32Eqz { .. }
+                    | RegOp::I32Cmp { .. }
+                    | RegOp::I32CmpImm { .. }
+                    | RegOp::I64Add { .. }
+                    | RegOp::I64Sub { .. }
+                    | RegOp::I64Mul { .. }
+                    | RegOp::I64And { .. }
+                    | RegOp::I64Or { .. }
+                    | RegOp::I64Xor { .. }
+                    | RegOp::I64Shl { .. }
+                    | RegOp::I64ShrS { .. }
+                    | RegOp::I64ShrU { .. }
+                    | RegOp::I64AddImm { .. }
+                    | RegOp::I64Cmp { .. }
+                    | RegOp::I32WrapI64 { .. }
+                    | RegOp::I64ExtendI32S { .. }
+                    | RegOp::F32Add { .. }
+                    | RegOp::F32Sub { .. }
+                    | RegOp::F32Mul { .. }
+                    | RegOp::F32Div { .. }
+                    | RegOp::F64Add { .. }
+                    | RegOp::F64Sub { .. }
+                    | RegOp::F64Mul { .. }
+                    | RegOp::F64Div { .. }
+                    | RegOp::F64Min { .. }
+                    | RegOp::F64Max { .. }
+                    | RegOp::F64Cmp { .. }
+                    | RegOp::F64AddConst { .. }
+                    | RegOp::F64SubConst { .. }
+                    | RegOp::F64MulConst { .. }
+                    | RegOp::F64MinConst { .. }
+                    | RegOp::F64MaxConst { .. }
+                    | RegOp::F64MulAdd { .. }
+                    | RegOp::Select { .. }
+                    | RegOp::Return { .. }
+            )
+        });
+
     Some(Arc::new(FastFunction {
         ops: ops.into_boxed_slice(),
         consts: consts.into_boxed_slice(),
         v128_consts: v128_consts.into_boxed_slice(),
         simd_masks: simd_masks.into_boxed_slice(),
+        ref_heaps: ref_heaps.into_boxed_slice(),
+        local_ref_heaps: local_ref_heaps.into_boxed_slice(),
         mem_args: mem_args.into_boxed_slice(),
         simd_mem_args: simd_mem_args.into_boxed_slice(),
         bulk_args: bulk_args.into_boxed_slice(),
@@ -4526,12 +5529,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         local_types: local_types.into_boxed_slice(),
         result_types: result_types.into_boxed_slice(),
         num_locals: num_locals as u16,
+        num_params: num_params as u16,
         local_reg_slots,
+        local_ref_slots,
         slots: max_slots as u16,
+        ref_slots: max_ref_slots as u16,
         stack_peak: bounds.stack_peak,
         max_nesting: bounds.maximum_nesting,
         mem0_is_64,
         fuel_blocks,
+        pure_leaf,
     }))
 }
 
@@ -4561,7 +5568,13 @@ fn write_v128(regs: &mut [u64], slot: u16, bytes: [u8; 16]) {
 }
 
 #[inline(always)]
-fn slots_to_value(ty: FastType, slots: &[u64], off: usize) -> Value {
+fn slots_to_value(
+    ty: FastType,
+    slots: &[u64],
+    off: usize,
+    refs: &[RefValue],
+    ref_off: usize,
+) -> Value {
     match ty {
         FastType::I32 => Value::I32(slots[off] as u32 as i32),
         FastType::I64 => Value::I64(slots[off] as i64),
@@ -4573,6 +5586,7 @@ fn slots_to_value(ty: FastType, slots: &[u64], off: usize) -> Value {
             b[8..16].copy_from_slice(&slots[off + 1].to_le_bytes());
             Value::V128(V128(b))
         }
+        FastType::Ref => Value::Ref(refs[ref_off]),
     }
 }
 
@@ -4779,16 +5793,20 @@ fn get_or_compile_ref(module: &Module, body: usize) -> Option<&FastFunction> {
 }
 
 #[derive(Clone, Copy)]
-struct ActiveFrame {
+pub(crate) struct ActiveFrame {
     inst_id: usize,
     body: usize,
     func_handle: crate::Func,
     /// Next instruction pointer to resume when callee returns.
     ip: usize,
-    /// Offset in `reg_bank` where this frame's slots begin.
+    /// Offset in `reg_bank` where this frame's scalar slots begin.
     reg_base: usize,
-    /// Relative slot in caller where callee results should be written.
+    /// Offset in `ref_bank` where this frame's reference slots begin.
+    ref_base: usize,
+    /// Relative scalar slot in caller where callee results should be written.
     ret_dst_base: u16,
+    /// Relative ref slot in caller where callee reference results should be written.
+    ret_ref_dst_base: u16,
     /// Logical operand-stack base of this frame (for `max_stack_height` checks).
     logical_base: usize,
     /// BlockMeta for materialization if a nested callee bails.
@@ -5122,8 +6140,10 @@ fn materialize_all(
     cur_body: usize,
     cur_handle: crate::Func,
     cur_reg_base: usize,
+    cur_ref_base: usize,
     cur_meta_idx: u32,
     reg_bank: &[u64],
+    ref_bank: &[RefValue],
 ) -> Result<()> {
     let entry_frame = frames
         .last_mut()
@@ -5159,24 +6179,32 @@ fn materialize_all(
         Ok(())
     };
 
-    let push_operands =
-        |stack: &mut Vec<Value>, func: &FastFunction, meta: &BlockMeta, slots: &[u64]| {
-            let s_start = meta.stack_start as usize;
-            let s_end = s_start + meta.stack_len as usize;
-            let mut off = func.local_reg_slots as usize;
-            for &ty in &func.stack_types[s_start..s_end] {
-                stack.push(slots_to_value(ty, slots, off));
-                off += ty.slots() as usize;
-            }
-        };
-
-    let push_locals = |dst: &mut Vec<Value>, func: &FastFunction, slots: &[u64]| {
-        let mut off = 0usize;
-        for &ty in &func.local_types {
-            dst.push(slots_to_value(ty, slots, off));
+    let push_operands = |stack: &mut Vec<Value>,
+                         func: &FastFunction,
+                         meta: &BlockMeta,
+                         slots: &[u64],
+                         refs: &[RefValue]| {
+        let s_start = meta.stack_start as usize;
+        let s_end = s_start + meta.stack_len as usize;
+        let mut off = func.local_reg_slots as usize;
+        let mut roff = func.local_ref_slots as usize;
+        for &ty in &func.stack_types[s_start..s_end] {
+            stack.push(slots_to_value(ty, slots, off, refs, roff));
             off += ty.slots() as usize;
+            roff += ty.ref_slots() as usize;
         }
     };
+
+    let push_locals =
+        |dst: &mut Vec<Value>, func: &FastFunction, slots: &[u64], refs: &[RefValue]| {
+            let mut off = 0usize;
+            let mut roff = 0usize;
+            for &ty in &func.local_types {
+                dst.push(slots_to_value(ty, slots, off, refs, roff));
+                off += ty.slots() as usize;
+                roff += ty.ref_slots() as usize;
+            }
+        };
 
     let cur_func = Arc::clone(
         store.instances[cur_inst].module.data.register_fast[cur_body]
@@ -5188,6 +6216,7 @@ fn materialize_all(
     if call_stack.is_empty() {
         let meta = &cur_func.blocks[cur_meta_idx as usize];
         let slots = &reg_bank[cur_reg_base..cur_reg_base + cur_func.slots as usize];
+        let refs = &ref_bank[cur_ref_base..cur_ref_base + cur_func.ref_slots as usize];
         entry_frame.function = store.funcs[cur_handle.0.index].clone();
         entry_frame.locals.clear();
         if entry_frame
@@ -5197,11 +6226,11 @@ fn materialize_all(
         {
             return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
         }
-        push_locals(&mut entry_frame.locals, &cur_func, slots);
+        push_locals(&mut entry_frame.locals, &cur_func, slots, refs);
         entry_frame.pc = meta.source_pc as usize;
         entry_frame.register = None;
         fill_labels(store, &mut entry_frame.labels, &cur_func, meta, entry_base)?;
-        push_operands(stack, &cur_func, meta, slots);
+        push_operands(stack, &cur_func, meta, slots, refs);
         return Ok(());
     }
 
@@ -5216,6 +6245,7 @@ fn materialize_all(
         );
         let meta = &f0_func.blocks[f0.meta_after_call as usize];
         let slots = &reg_bank[f0.reg_base..f0.reg_base + f0_func.slots as usize];
+        let refs = &ref_bank[f0.ref_base..f0.ref_base + f0_func.ref_slots as usize];
         entry_frame.function = store.funcs[f0.func_handle.0.index].clone();
         entry_frame.locals.clear();
         if entry_frame
@@ -5225,11 +6255,11 @@ fn materialize_all(
         {
             return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
         }
-        push_locals(&mut entry_frame.locals, &f0_func, slots);
+        push_locals(&mut entry_frame.locals, &f0_func, slots, refs);
         entry_frame.pc = meta.source_pc as usize;
         entry_frame.register = None;
         fill_labels(store, &mut entry_frame.labels, &f0_func, meta, entry_base)?;
-        push_operands(stack, &f0_func, meta, slots);
+        push_operands(stack, &f0_func, meta, slots, refs);
     }
 
     // 2. Push intermediate nested frames (call_stack[1..]).
@@ -5242,12 +6272,13 @@ fn materialize_all(
         );
         let meta = &af_func.blocks[af.meta_after_call as usize];
         let slots = &reg_bank[af.reg_base..af.reg_base + af_func.slots as usize];
+        let refs = &ref_bank[af.ref_base..af.ref_base + af_func.ref_slots as usize];
         let base = stack.len();
         let mut locals = Vec::with_capacity(af_func.num_locals as usize);
-        push_locals(&mut locals, &af_func, slots);
+        push_locals(&mut locals, &af_func, slots, refs);
         let mut labels = Vec::new();
         fill_labels(store, &mut labels, &af_func, meta, base)?;
-        push_operands(stack, &af_func, meta, slots);
+        push_operands(stack, &af_func, meta, slots, refs);
         let fun = store.funcs[af.func_handle.0.index].clone();
         frames.push(Frame {
             register: None,
@@ -5265,12 +6296,13 @@ fn materialize_all(
     {
         let meta = &cur_func.blocks[cur_meta_idx as usize];
         let slots = &reg_bank[cur_reg_base..cur_reg_base + cur_func.slots as usize];
+        let refs = &ref_bank[cur_ref_base..cur_ref_base + cur_func.ref_slots as usize];
         let base = stack.len();
         let mut locals = Vec::with_capacity(cur_func.num_locals as usize);
-        push_locals(&mut locals, &cur_func, slots);
+        push_locals(&mut locals, &cur_func, slots, refs);
         let mut labels = Vec::new();
         fill_labels(store, &mut labels, &cur_func, meta, base)?;
-        push_operands(stack, &cur_func, meta, slots);
+        push_operands(stack, &cur_func, meta, slots, refs);
         let fun = store.funcs[cur_handle.0.index].clone();
         frames.push(Frame {
             register: None,
@@ -5287,7 +6319,280 @@ fn materialize_all(
     Ok(())
 }
 
-/// Executes the frame at the top of `frames` on the lazy untyped-`u64` register tier.
+/// Zero-frame fast path for invoking straight-line, trap-free scalar leaf functions
+/// directly from `Store::invoke` when fuel is disabled and limits permit execution.
+/// Returns `None` on any argument mismatch, tight resource limit, or non-leaf body so
+/// the canonical path handles errors and general execution identically.
+#[inline]
+pub(crate) fn try_invoke_leaf(
+    store: &Store,
+    func_idx: usize,
+    args: &[Value],
+) -> Option<crate::RunOutcome> {
+    let fdata = &store.funcs[func_idx];
+    let func = get_or_compile_ref(&store.instances[fdata.instance].module, fdata.body)?;
+    if !func.pure_leaf || args.len() != func.num_params as usize {
+        return None;
+    }
+    let lim = &store.engine.config.limits;
+    if lim.max_call_depth == 0
+        || func.stack_peak > lim.max_stack_height
+        || store
+            .active_local_slots
+            .checked_add(func.num_locals as usize)
+            .is_none_or(|n| n > store.engine.max_local_slots_limit)
+        || store
+            .active_labels
+            .checked_add(func.max_nesting)
+            .is_none_or(|n| n > store.engine.max_labels_limit)
+    {
+        return None;
+    }
+    let mut regs = [0u64; 16];
+    for (i, (&arg, &ty)) in args.iter().zip(func.local_types.iter()).enumerate() {
+        regs[i] = match (ty, arg) {
+            (FastType::I32, Value::I32(n)) => n as u32 as u64,
+            (FastType::I64, Value::I64(n)) => n as u64,
+            (FastType::F32, Value::F32(n)) => n as u64,
+            (FastType::F64, Value::F64(n)) => n,
+            _ => return None,
+        };
+    }
+    let consts = &func.consts;
+    for &op in &func.ops {
+        match op {
+            RegOp::Const32 { dst, val } => regs[dst as usize] = val as u64,
+            RegOp::Const64 { dst, idx } => regs[dst as usize] = consts[idx as usize],
+            RegOp::Mov { dst, src } => regs[dst as usize] = regs[src as usize],
+            RegOp::I32Add { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32Sub { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).wrapping_sub(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32Mul { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).wrapping_mul(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32And { dst, a, b } => {
+                regs[dst as usize] = ((regs[a as usize] as u32) & (regs[b as usize] as u32)) as u64;
+            }
+            RegOp::I32Or { dst, a, b } => {
+                regs[dst as usize] = ((regs[a as usize] as u32) | (regs[b as usize] as u32)) as u64;
+            }
+            RegOp::I32Xor { dst, a, b } => {
+                regs[dst as usize] = ((regs[a as usize] as u32) ^ (regs[b as usize] as u32)) as u64;
+            }
+            RegOp::I32Shl { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).wrapping_shl(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32ShrS { dst, a, b } => {
+                regs[dst as usize] =
+                    ((regs[a as usize] as i32).wrapping_shr(regs[b as usize] as u32)) as u32 as u64;
+            }
+            RegOp::I32ShrU { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).wrapping_shr(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32Rotl { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).rotate_left(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32Rotr { dst, a, b } => {
+                regs[dst as usize] =
+                    (regs[a as usize] as u32).rotate_right(regs[b as usize] as u32) as u64;
+            }
+            RegOp::I32AddImm { dst, src, imm } => {
+                regs[dst as usize] = (regs[src as usize] as u32).wrapping_add(imm as u32) as u64;
+            }
+            RegOp::I32SubImm { dst, src, imm } => {
+                regs[dst as usize] = (regs[src as usize] as u32).wrapping_sub(imm as u32) as u64;
+            }
+            RegOp::I32MulImm { dst, src, imm } => {
+                regs[dst as usize] = (regs[src as usize] as u32).wrapping_mul(imm as u32) as u64;
+            }
+            RegOp::I32AndImm { dst, src, imm } => {
+                regs[dst as usize] = ((regs[src as usize] as u32) & imm) as u64;
+            }
+            RegOp::I32OrImm { dst, src, imm } => {
+                regs[dst as usize] = ((regs[src as usize] as u32) | imm) as u64;
+            }
+            RegOp::I32XorImm { dst, src, imm } => {
+                regs[dst as usize] = ((regs[src as usize] as u32) ^ imm) as u64;
+            }
+            RegOp::I32ShlImm { dst, src, shift } => {
+                regs[dst as usize] = (regs[src as usize] as u32).wrapping_shl(shift) as u64;
+            }
+            RegOp::I32ShrSImm { dst, src, shift } => {
+                regs[dst as usize] =
+                    ((regs[src as usize] as i32).wrapping_shr(shift)) as u32 as u64;
+            }
+            RegOp::I32ShrUImm { dst, src, shift } => {
+                regs[dst as usize] = (regs[src as usize] as u32).wrapping_shr(shift) as u64;
+            }
+            RegOp::I32RotlImm { dst, src, shift } => {
+                regs[dst as usize] = (regs[src as usize] as u32).rotate_left(shift) as u64;
+            }
+            RegOp::I32RotrImm { dst, src, shift } => {
+                regs[dst as usize] = (regs[src as usize] as u32).rotate_right(shift) as u64;
+            }
+            RegOp::I32Eqz { dst, src } => {
+                regs[dst as usize] = u64::from((regs[src as usize] as u32) == 0);
+            }
+            RegOp::I32Cmp { cmp, dst, a, b } => {
+                regs[dst as usize] = u64::from(eval_i32_cmp(
+                    cmp,
+                    regs[a as usize] as u32,
+                    regs[b as usize] as u32,
+                ));
+            }
+            RegOp::I32CmpImm { cmp, dst, a, imm } => {
+                regs[dst as usize] =
+                    u64::from(eval_i32_cmp(cmp, regs[a as usize] as u32, imm as u32));
+            }
+            RegOp::I64Add { dst, a, b } => {
+                regs[dst as usize] = regs[a as usize].wrapping_add(regs[b as usize]);
+            }
+            RegOp::I64Sub { dst, a, b } => {
+                regs[dst as usize] = regs[a as usize].wrapping_sub(regs[b as usize]);
+            }
+            RegOp::I64Mul { dst, a, b } => {
+                regs[dst as usize] = regs[a as usize].wrapping_mul(regs[b as usize]);
+            }
+            RegOp::I64And { dst, a, b } => regs[dst as usize] = regs[a as usize] & regs[b as usize],
+            RegOp::I64Or { dst, a, b } => regs[dst as usize] = regs[a as usize] | regs[b as usize],
+            RegOp::I64Xor { dst, a, b } => regs[dst as usize] = regs[a as usize] ^ regs[b as usize],
+            RegOp::I64Shl { dst, a, b } => {
+                regs[dst as usize] = regs[a as usize].wrapping_shl(regs[b as usize] as u32);
+            }
+            RegOp::I64ShrS { dst, a, b } => {
+                regs[dst as usize] =
+                    ((regs[a as usize] as i64).wrapping_shr(regs[b as usize] as u32)) as u64;
+            }
+            RegOp::I64ShrU { dst, a, b } => {
+                regs[dst as usize] = regs[a as usize].wrapping_shr(regs[b as usize] as u32);
+            }
+            RegOp::I64AddImm { dst, src, imm } => {
+                regs[dst as usize] = regs[src as usize].wrapping_add(imm as i64 as u64);
+            }
+            RegOp::I64Cmp { cmp, dst, a, b } => {
+                regs[dst as usize] =
+                    u64::from(eval_i64_cmp(cmp, regs[a as usize], regs[b as usize]));
+            }
+            RegOp::I32WrapI64 { dst, src } => regs[dst as usize] = regs[src as usize] as u32 as u64,
+            RegOp::I64ExtendI32S { dst, src } => {
+                regs[dst as usize] = regs[src as usize] as u32 as i32 as i64 as u64;
+            }
+            RegOp::F32Add { dst, a, b } => {
+                regs[dst as usize] = (f32::from_bits(regs[a as usize] as u32)
+                    + f32::from_bits(regs[b as usize] as u32))
+                .to_bits() as u64;
+            }
+            RegOp::F32Sub { dst, a, b } => {
+                regs[dst as usize] = (f32::from_bits(regs[a as usize] as u32)
+                    - f32::from_bits(regs[b as usize] as u32))
+                .to_bits() as u64;
+            }
+            RegOp::F32Mul { dst, a, b } => {
+                regs[dst as usize] = (f32::from_bits(regs[a as usize] as u32)
+                    * f32::from_bits(regs[b as usize] as u32))
+                .to_bits() as u64;
+            }
+            RegOp::F32Div { dst, a, b } => {
+                regs[dst as usize] = (f32::from_bits(regs[a as usize] as u32)
+                    / f32::from_bits(regs[b as usize] as u32))
+                .to_bits() as u64;
+            }
+            RegOp::F64Add { dst, a, b } => {
+                regs[dst as usize] =
+                    (f64::from_bits(regs[a as usize]) + f64::from_bits(regs[b as usize])).to_bits();
+            }
+            RegOp::F64Sub { dst, a, b } => {
+                regs[dst as usize] =
+                    (f64::from_bits(regs[a as usize]) - f64::from_bits(regs[b as usize])).to_bits();
+            }
+            RegOp::F64Mul { dst, a, b } => {
+                regs[dst as usize] =
+                    (f64::from_bits(regs[a as usize]) * f64::from_bits(regs[b as usize])).to_bits();
+            }
+            RegOp::F64Div { dst, a, b } => {
+                regs[dst as usize] =
+                    (f64::from_bits(regs[a as usize]) / f64::from_bits(regs[b as usize])).to_bits();
+            }
+            RegOp::F64Min { dst, a, b } => {
+                regs[dst as usize] = wasm_f64_min(
+                    f64::from_bits(regs[a as usize]),
+                    f64::from_bits(regs[b as usize]),
+                );
+            }
+            RegOp::F64Max { dst, a, b } => {
+                regs[dst as usize] = wasm_f64_max(
+                    f64::from_bits(regs[a as usize]),
+                    f64::from_bits(regs[b as usize]),
+                );
+            }
+            RegOp::F64Cmp { cmp, dst, a, b } => {
+                regs[dst as usize] = u64::from(eval_f64_cmp(
+                    cmp,
+                    f64::from_bits(regs[a as usize]),
+                    f64::from_bits(regs[b as usize]),
+                ));
+            }
+            RegOp::F64AddConst { dst, src, cidx } => {
+                regs[dst as usize] = (f64::from_bits(regs[src as usize])
+                    + f64::from_bits(consts[cidx as usize]))
+                .to_bits();
+            }
+            RegOp::F64SubConst { dst, src, cidx } => {
+                regs[dst as usize] = (f64::from_bits(regs[src as usize])
+                    - f64::from_bits(consts[cidx as usize]))
+                .to_bits();
+            }
+            RegOp::F64MulConst { dst, src, cidx } => {
+                regs[dst as usize] = (f64::from_bits(regs[src as usize])
+                    * f64::from_bits(consts[cidx as usize]))
+                .to_bits();
+            }
+            RegOp::F64MinConst { dst, src, cidx } => {
+                regs[dst as usize] = wasm_f64_min(
+                    f64::from_bits(regs[src as usize]),
+                    f64::from_bits(consts[cidx as usize]),
+                );
+            }
+            RegOp::F64MaxConst { dst, src, cidx } => {
+                regs[dst as usize] = wasm_f64_max(
+                    f64::from_bits(regs[src as usize]),
+                    f64::from_bits(consts[cidx as usize]),
+                );
+            }
+            RegOp::F64MulAdd { dst, acc, a, b } => {
+                let prod = f64::from_bits(regs[a as usize]) * f64::from_bits(regs[b as usize]);
+                regs[dst as usize] = (f64::from_bits(regs[acc as usize]) + prod).to_bits();
+            }
+            RegOp::Select { dst, a, b, cond } => {
+                regs[dst as usize] = if regs[cond as usize] as u32 != 0 {
+                    regs[a as usize]
+                } else {
+                    regs[b as usize]
+                };
+            }
+            RegOp::Return { base, .. } => {
+                let mut out = Vec::with_capacity(func.result_types.len());
+                for (i, &ty) in func.result_types.iter().enumerate() {
+                    out.push(slots_to_value(ty, &regs, base as usize + i, &[], 0));
+                }
+                return Some(crate::RunOutcome::Returned(out));
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Executes the frame at the top of `frames` on the lazy untyped-`u64` + parallel `RefValue` register tier.
 ///
 /// Precondition: the caller has already charged 1 source fuel for `frames.last().pc` (`== 0`),
 /// checked cancellation, and verified entry limits for the frame.
@@ -5306,13 +6611,7 @@ pub(crate) fn run(
     let entry_base = entry_frame.base;
     let entry_handle = {
         let inst = &store.instances[entry_inst];
-        let decoded = inst.module.data.inner.decoded();
-        let num_import_funcs = decoded
-            .imports
-            .iter()
-            .filter(|i| matches!(i.kind, ImportKind::Func(_)))
-            .count();
-        inst.funcs[num_import_funcs + entry_body]
+        inst.funcs[inst.module.data.imported_funcs + entry_body]
     };
 
     // Honor opt-in entry threshold if configured: let cold entries run on Decoded
@@ -5341,8 +6640,8 @@ pub(crate) fn run(
             && entry_mod
                 .data
                 .inner
-                .module()
-                .codes
+                .decoded()
+                .code
                 .get(entry_body)
                 .is_none_or(|c| c.instructions.len() > 1)
         {
@@ -5350,13 +6649,21 @@ pub(crate) fn run(
         }
     }
 
-    let (entry_slots, entry_stack_peak, entry_max_nesting, entry_fuel_blocks, first_op) = {
+    let (
+        entry_slots,
+        entry_ref_slots,
+        entry_stack_peak,
+        entry_max_nesting,
+        entry_fuel_blocks,
+        first_op,
+    ) = {
         let Some(entry_func) = get_or_compile_ref(&store.instances[entry_inst].module, entry_body)
         else {
             return Ok(FastOutcome::Declined);
         };
         (
             entry_func.slots as usize,
+            entry_func.ref_slots as usize,
             entry_func.stack_peak,
             entry_func.max_nesting,
             entry_func.fuel_blocks,
@@ -5403,24 +6710,73 @@ pub(crate) fn run(
         }
     };
 
-    // Populate register bank for the entry frame.
-    let mut reg_bank: Vec<u64> = Vec::new();
-    if reg_bank.try_reserve_exact(entry_slots).is_err() {
+    // Take pooled register banks and call stack from `Store` (safe under re-entry:
+    // nested invocations receive empty Vecs and restore their own buffers on return).
+    let mut reg_bank = std::mem::take(&mut store.fast_reg_bank);
+    let mut ref_bank = std::mem::take(&mut store.fast_ref_bank);
+    let mut call_stack = std::mem::take(&mut store.fast_call_stack);
+    reg_bank.clear();
+    ref_bank.clear();
+    call_stack.clear();
+
+    let restore_pools = |store: &mut Store,
+                         mut reg_bank: Vec<u64>,
+                         mut ref_bank: Vec<RefValue>,
+                         mut call_stack: Vec<ActiveFrame>| {
+        reg_bank.clear();
+        if reg_bank.capacity() > 8192 {
+            reg_bank.shrink_to(1024);
+        }
+        // Always clear `ref_bank` so no stale GC/extern handles linger in the pool!
+        ref_bank.clear();
+        if ref_bank.capacity() > 2048 {
+            ref_bank.shrink_to(256);
+        }
+        call_stack.clear();
+        if call_stack.capacity() > 256 {
+            call_stack.shrink_to(64);
+        }
+        if store.fast_reg_bank.capacity() < reg_bank.capacity() {
+            store.fast_reg_bank = reg_bank;
+        }
+        if store.fast_ref_bank.capacity() < ref_bank.capacity() {
+            store.fast_ref_bank = ref_bank;
+        }
+        if store.fast_call_stack.capacity() < call_stack.capacity() {
+            store.fast_call_stack = call_stack;
+        }
+    };
+
+    if entry_slots > reg_bank.capacity() && reg_bank.try_reserve(entry_slots).is_err() {
+        restore_pools(store, reg_bank, ref_bank, call_stack);
+        return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
+    }
+    if entry_ref_slots > ref_bank.capacity() && ref_bank.try_reserve(entry_ref_slots).is_err() {
+        restore_pools(store, reg_bank, ref_bank, call_stack);
         return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
     }
     for &v in &entry_frame.locals {
-        if let Value::V128(vec) = v {
-            reg_bank.push(u64::from_le_bytes(vec.0[0..8].try_into().unwrap()));
-            reg_bank.push(u64::from_le_bytes(vec.0[8..16].try_into().unwrap()));
-        } else if let Some(bits) = value_to_bits(v) {
-            reg_bank.push(bits);
-        } else {
-            return Ok(FastOutcome::Declined);
+        match v {
+            Value::Ref(r) => ref_bank.push(r),
+            Value::V128(vec) => {
+                reg_bank.push(u64::from_le_bytes(vec.0[0..8].try_into().unwrap()));
+                reg_bank.push(u64::from_le_bytes(vec.0[8..16].try_into().unwrap()));
+            }
+            other => {
+                if let Some(bits) = value_to_bits(other) {
+                    reg_bank.push(bits);
+                } else {
+                    restore_pools(store, reg_bank, ref_bank, call_stack);
+                    return Ok(FastOutcome::Declined);
+                }
+            }
         }
     }
     reg_bank.resize(entry_slots, 0);
+    if entry_ref_slots > ref_bank.len() {
+        ref_bank.resize(entry_ref_slots, RefValue::Null(crate::HeapType::None));
+    }
 
-    let cancel = store.cancellation.clone();
     let mut local_fuel = *fuel;
     // Charge the remaining ops of block 0 once up front so the hot loop has zero
     // `first_entry_block` checks on every basic block!
@@ -5434,7 +6790,6 @@ pub(crate) fn run(
             frames,
             stack,
             &mut local_fuel,
-            &cancel.0,
             entry_inst,
             entry_body,
             entry_handle,
@@ -5442,6 +6797,8 @@ pub(crate) fn run(
             start_ip,
             first_block_fuel,
             &mut reg_bank,
+            &mut ref_bank,
+            &mut call_stack,
             max_stack_height,
             max_call_depth,
         )
@@ -5451,7 +6808,6 @@ pub(crate) fn run(
             frames,
             stack,
             &mut local_fuel,
-            &cancel.0,
             entry_inst,
             entry_body,
             entry_handle,
@@ -5459,10 +6815,13 @@ pub(crate) fn run(
             start_ip,
             first_block_fuel,
             &mut reg_bank,
+            &mut ref_bank,
+            &mut call_stack,
             max_stack_height,
             max_call_depth,
         )
     };
+    restore_pools(store, reg_bank, ref_bank, call_stack);
     if res.is_err() {
         store.active_local_slots = initial_active_local_slots;
     }
@@ -5484,6 +6843,7 @@ struct ExecCursors {
     body: usize,
     handle: crate::Func,
     reg_base: usize,
+    ref_base: usize,
     logical_base: usize,
     mem0: Option<usize>,
     ip: usize,
@@ -5498,6 +6858,8 @@ enum InnerExit {
         callee_body: usize,
         arg_base: u16,
         arg_slots: u16,
+        arg_ref_base: u16,
+        arg_ref_slots: u16,
         logical_arg_start: u16,
         meta_at_call: u32,
         meta_after_call: u32,
@@ -5509,12 +6871,16 @@ enum InnerExit {
         callee_body: usize,
         arg_base: u16,
         arg_slots: u16,
+        arg_ref_base: u16,
+        arg_ref_slots: u16,
         src_off: u8,
     },
     SwitchInst,
     ReturnTop {
         base: u16,
         count: u16,
+        ref_base: u16,
+        ref_count: u16,
     },
     Bail {
         meta: u32,
@@ -5609,6 +6975,680 @@ enum InnerExit {
     },
 }
 
+#[cold]
+#[inline(never)]
+fn exec_cold_scalar_alu(op: RegOp, regs: &mut [u64]) -> Result<()> {
+    match op {
+        RegOp::I32DivS { dst, a, b, .. } => {
+            let va = regs[a as usize] as i32;
+            let vb = regs[b as usize] as i32;
+            if vb == 0 {
+                return Err(trap("integer divide by zero"));
+            }
+            let Some(q) = va.checked_div(vb) else {
+                return Err(trap("integer overflow"));
+            };
+            regs[dst as usize] = q as u32 as u64;
+        }
+        RegOp::I32DivU { dst, a, b, .. } => {
+            let vb = regs[b as usize] as u32;
+            if vb == 0 {
+                return Err(trap("integer divide by zero"));
+            }
+            regs[dst as usize] = ((regs[a as usize] as u32) / vb) as u64;
+        }
+        RegOp::I32RemS { dst, a, b, .. } => {
+            let vb = regs[b as usize] as i32;
+            if vb == 0 {
+                return Err(trap("integer divide by zero"));
+            }
+            regs[dst as usize] = (regs[a as usize] as i32).wrapping_rem(vb) as u32 as u64;
+        }
+        RegOp::I32RemU { dst, a, b, .. } => {
+            let vb = regs[b as usize] as u32;
+            if vb == 0 {
+                return Err(trap("integer divide by zero"));
+            }
+            regs[dst as usize] = ((regs[a as usize] as u32) % vb) as u64;
+        }
+        RegOp::Unary {
+            op: uop, dst, src, ..
+        } => {
+            let a = regs[src as usize];
+            let v = if integer::supported(uop) {
+                integer::unary(uop, a)?
+            } else {
+                float::unary(uop, a)?
+            };
+            regs[dst as usize] = v;
+        }
+        RegOp::Binary {
+            op: bop, dst, a, b, ..
+        } => {
+            let va = regs[a as usize];
+            let vb = regs[b as usize];
+            let v = if integer::supported(bop) {
+                integer::binary(bop, va, vb)?
+            } else {
+                float::binary(bop, va, vb)?
+            };
+            regs[dst as usize] = v;
+        }
+        RegOp::WideArith { kind, base } => {
+            let b = base as usize;
+            let bits = match kind {
+                0 | 1 => {
+                    let a = (u128::from(regs[b + 1]) << 64) | u128::from(regs[b]);
+                    let rhs = (u128::from(regs[b + 3]) << 64) | u128::from(regs[b + 2]);
+                    if kind == 0 {
+                        a.wrapping_add(rhs)
+                    } else {
+                        a.wrapping_sub(rhs)
+                    }
+                }
+                2 => ((regs[b] as i64 as i128) * (regs[b + 1] as i64 as i128)) as u128,
+                _ => u128::from(regs[b]) * u128::from(regs[b + 1]),
+            };
+            regs[b] = bits as u64;
+            regs[b + 1] = (bits >> 64) as u64;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn resolve_indirect_callee(
+    site: CallIndirectSite,
+    regs: &[u64],
+    inst_tabs: &[crate::Table],
+    tabs: &crate::arena::Arena<crate::Tab>,
+    funcs: &crate::arena::Arena<crate::Function>,
+    inst_canonical: &[crate::CanonicalTypeId],
+    canonical_lock: &std::sync::Mutex<crate::canonical::CanonicalTypes>,
+    max_type_work: usize,
+    store_id: u64,
+) -> Result<crate::Func> {
+    let raw_ix = regs[site.index_reg as usize];
+    let ix = if site.table_is_64 {
+        raw_ix
+    } else {
+        raw_ix as u32 as u64
+    };
+    let tab_h = inst_tabs[site.table_idx as usize];
+    let tab = &tabs[tab_h.0.index];
+    let Some(&val) = usize::try_from(ix).ok().and_then(|i| tab.values.get(i)) else {
+        return Err(trap("table out of bounds"));
+    };
+    let Value::Ref(RefValue::Func(callee_handle)) = val else {
+        return Err(trap("null indirect call"));
+    };
+    let Some(callee_fn) = funcs
+        .get_live(callee_handle.0.index, callee_handle.0.generation)
+        .filter(|_| callee_handle.0.store == store_id)
+    else {
+        return Err(err(ErrorKind::Host, "foreign or stale handle"));
+    };
+    let expected_canonical = inst_canonical[site.type_idx as usize];
+    let compatible = if callee_fn.canonical == expected_canonical {
+        true
+    } else {
+        let guard = canonical_lock
+            .lock()
+            .map_err(|_| err(ErrorKind::Host, "canonical registry poisoned"))?;
+        guard.is_subtype(
+            callee_fn.canonical,
+            expected_canonical,
+            false,
+            max_type_work,
+        )?
+    };
+    if !compatible {
+        return Err(trap("indirect call type mismatch"));
+    }
+    Ok(callee_handle)
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn exec_cold_simd<const DENSE: bool>(
+    op: RegOp,
+    cur_func: &FastFunction,
+    regs: &mut [u64],
+    inst_globals: &[crate::Global],
+    globals: &mut crate::arena::Arena<crate::Glob>,
+    p0_base: usize,
+    p0_slice: &mut [u8],
+    p1_base: usize,
+    p1_slice: &mut [u8],
+    mem0_64: bool,
+    simd_scratch: &mut Vec<Value>,
+) -> Result<Option<InnerExit>> {
+    match op {
+        RegOp::MovV128 { dst, src } => {
+            let lo = regs[src as usize];
+            let hi = regs[src as usize + 1];
+            regs[dst as usize] = lo;
+            regs[dst as usize + 1] = hi;
+        }
+        RegOp::ConstV128 { dst, idx } => {
+            let [lo, hi] = cur_func.v128_consts[idx as usize];
+            regs[dst as usize] = lo;
+            regs[dst as usize + 1] = hi;
+        }
+        RegOp::SelectV128 { dst, a, b, cond } => {
+            let s = if regs[cond as usize] as u32 != 0 {
+                a
+            } else {
+                b
+            };
+            let lo = regs[s as usize];
+            let hi = regs[s as usize + 1];
+            regs[dst as usize] = lo;
+            regs[dst as usize + 1] = hi;
+        }
+        RegOp::GlobalGetV128 { dst, global } => {
+            let gh = inst_globals[global as usize];
+            let Value::V128(v) = globals[gh.0.index].value else {
+                return Err(trap("global type"));
+            };
+            write_v128(regs, dst, v.0);
+        }
+        RegOp::GlobalSetV128 { src, global } => {
+            let gh = inst_globals[global as usize];
+            let slot = &mut globals[gh.0.index];
+            if slot.ty.value != ValType::V128 {
+                return Err(trap("global type"));
+            }
+            slot.value = Value::V128(V128(read_v128(regs, src)));
+        }
+        RegOp::LoadV128 {
+            dst,
+            addr,
+            offset,
+            src_off,
+        } => {
+            let raw = regs[addr as usize];
+            let at = if !mem0_64 {
+                Some((raw as u32 as usize) + (offset as usize))
+            } else {
+                raw.checked_add(offset as u64)
+                    .and_then(|e| usize::try_from(e).ok())
+            };
+            if let Some(at) = at
+                && let Some(arr) =
+                    fast_read_bytes::<16, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+            {
+                write_v128(regs, dst, arr);
+            } else {
+                return Ok(Some(InnerExit::SlowSimdMem {
+                    op: 0xfd00,
+                    mem: 0,
+                    offset: offset as u64,
+                    raw,
+                    dst,
+                    in_vec: [0u8; 16],
+                    lane: 0,
+                    src_off,
+                }));
+            }
+        }
+        RegOp::StoreV128 {
+            addr,
+            val,
+            offset,
+            src_off,
+        } => {
+            let raw = regs[addr as usize];
+            let data = read_v128(regs, val);
+            let at = if !mem0_64 {
+                Some((raw as u32 as usize) + (offset as usize))
+            } else {
+                raw.checked_add(offset as u64)
+                    .and_then(|e| usize::try_from(e).ok())
+            };
+            if let Some(at) = at
+                && fast_write_bytes::<16, DENSE>(at, data, p0_base, p0_slice, p1_base, p1_slice)
+            {
+                // committed
+            } else {
+                return Ok(Some(InnerExit::SlowSimdMem {
+                    op: 0xfd0b,
+                    mem: 0,
+                    offset: offset as u64,
+                    raw,
+                    dst: val,
+                    in_vec: data,
+                    lane: 0,
+                    src_off,
+                }));
+            }
+        }
+        RegOp::SimdMemGen {
+            op: mop,
+            addr,
+            val,
+            arg_idx,
+            src_off,
+        } => {
+            let arg = cur_func.simd_mem_args[arg_idx as usize];
+            let raw = regs[addr as usize];
+            let sub = mop & 0xff;
+            let in_vec = if sub == 11 || (0x54..=0x5b).contains(&sub) {
+                read_v128(regs, arg.src_vec)
+            } else {
+                [0u8; 16]
+            };
+            return Ok(Some(InnerExit::SlowSimdMem {
+                op: mop,
+                mem: arg.memory,
+                offset: arg.offset,
+                raw,
+                dst: val,
+                in_vec,
+                lane: arg.lane,
+                src_off,
+            }));
+        }
+        RegOp::SimdShuffle {
+            dst,
+            a,
+            b,
+            mask_idx,
+        } => {
+            let va = read_v128(regs, a);
+            let vb = read_v128(regs, b);
+            let ix = cur_func.simd_masks[mask_idx as usize];
+            let mut out = [0u8; 16];
+            for i in 0..16 {
+                let m = ix[i] as usize;
+                out[i] = if m < 16 { va[m] } else { vb[m - 16] };
+            }
+            write_v128(regs, dst, out);
+        }
+        RegOp::SimdUnary {
+            op: sop,
+            dst,
+            src,
+            lane,
+        } => match sop {
+            0xfd4d => {
+                let lo = !regs[src as usize];
+                let hi = !regs[src as usize + 1];
+                regs[dst as usize] = lo;
+                regs[dst as usize + 1] = hi;
+            }
+            0xfd0f => {
+                let w = u64::from_ne_bytes([regs[src as usize] as u8; 8]);
+                regs[dst as usize] = w;
+                regs[dst as usize + 1] = w;
+            }
+            0xfd10 => {
+                let b = (regs[src as usize] as u16).to_le_bytes();
+                let w = u64::from_le_bytes([b[0], b[1], b[0], b[1], b[0], b[1], b[0], b[1]]);
+                regs[dst as usize] = w;
+                regs[dst as usize + 1] = w;
+            }
+            0xfd11 | 0xfd13 => {
+                let x = regs[src as usize] as u32 as u64;
+                let w = x | (x << 32);
+                regs[dst as usize] = w;
+                regs[dst as usize + 1] = w;
+            }
+            0xfd12 | 0xfd14 => {
+                let w = regs[src as usize];
+                regs[dst as usize] = w;
+                regs[dst as usize + 1] = w;
+            }
+            0xfd1b | 0xfd1f => {
+                let word = regs[src as usize + (lane as usize >> 1)];
+                regs[dst as usize] = ((word >> ((lane & 1) * 32)) as u32) as u64;
+            }
+            0xfd1d | 0xfd21 => {
+                regs[dst as usize] = regs[src as usize + lane as usize];
+            }
+            _ => simd_unary_slow(sop, lane, regs, dst, src, simd_scratch)?,
+        },
+        RegOp::SimdBinary {
+            op: sop,
+            dst,
+            a,
+            b,
+            lane,
+        } => match sop {
+            0xfd4e => {
+                let lo = regs[a as usize] & regs[b as usize];
+                let hi = regs[a as usize + 1] & regs[b as usize + 1];
+                regs[dst as usize] = lo;
+                regs[dst as usize + 1] = hi;
+            }
+            0xfd4f => {
+                let lo = regs[a as usize] & !regs[b as usize];
+                let hi = regs[a as usize + 1] & !regs[b as usize + 1];
+                regs[dst as usize] = lo;
+                regs[dst as usize + 1] = hi;
+            }
+            0xfd50 => {
+                let lo = regs[a as usize] | regs[b as usize];
+                let hi = regs[a as usize + 1] | regs[b as usize + 1];
+                regs[dst as usize] = lo;
+                regs[dst as usize + 1] = hi;
+            }
+            0xfd51 => {
+                let lo = regs[a as usize] ^ regs[b as usize];
+                let hi = regs[a as usize + 1] ^ regs[b as usize + 1];
+                regs[dst as usize] = lo;
+                regs[dst as usize + 1] = hi;
+            }
+            0xfdae | 0xfdb1 | 0xfdb5 => {
+                let alo = regs[a as usize];
+                let ahi = regs[a as usize + 1];
+                let blo = regs[b as usize];
+                let bhi = regs[b as usize + 1];
+                let lane_op = |x: u32, y: u32| -> u32 {
+                    match sop {
+                        0xfdae => x.wrapping_add(y),
+                        0xfdb1 => x.wrapping_sub(y),
+                        _ => x.wrapping_mul(y),
+                    }
+                };
+                let r0 = lane_op(alo as u32, blo as u32) as u64;
+                let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
+                let r2 = lane_op(ahi as u32, bhi as u32) as u64;
+                let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
+                regs[dst as usize] = r0 | (r1 << 32);
+                regs[dst as usize + 1] = r2 | (r3 << 32);
+            }
+            0xfde4..=0xfde6 => {
+                let alo = regs[a as usize];
+                let ahi = regs[a as usize + 1];
+                let blo = regs[b as usize];
+                let bhi = regs[b as usize + 1];
+                let lane_op = |x: u32, y: u32| -> u32 {
+                    let fx = f32::from_bits(x);
+                    let fy = f32::from_bits(y);
+                    match sop {
+                        0xfde4 => (fx + fy).to_bits(),
+                        0xfde5 => (fx - fy).to_bits(),
+                        _ => (fx * fy).to_bits(),
+                    }
+                };
+                let r0 = lane_op(alo as u32, blo as u32) as u64;
+                let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
+                let r2 = lane_op(ahi as u32, bhi as u32) as u64;
+                let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
+                regs[dst as usize] = r0 | (r1 << 32);
+                regs[dst as usize + 1] = r2 | (r3 << 32);
+            }
+            0xfdf0..=0xfdf2 => {
+                let ax0 = f64::from_bits(regs[a as usize]);
+                let ax1 = f64::from_bits(regs[a as usize + 1]);
+                let bx0 = f64::from_bits(regs[b as usize]);
+                let bx1 = f64::from_bits(regs[b as usize + 1]);
+                let (r0, r1) = match sop {
+                    0xfdf0 => (ax0 + bx0, ax1 + bx1),
+                    0xfdf1 => (ax0 - bx0, ax1 - bx1),
+                    _ => (ax0 * bx0, ax1 * bx1),
+                };
+                regs[dst as usize] = r0.to_bits();
+                regs[dst as usize + 1] = r1.to_bits();
+            }
+            _ => simd_binary_slow(sop, lane, regs, dst, a, b, simd_scratch)?,
+        },
+        RegOp::SimdTernary {
+            op: sop,
+            dst,
+            a,
+            b,
+            c,
+        } => match sop {
+            0xfd52 | 0xfa09..=0xfa0c => {
+                let alo = regs[a as usize];
+                let ahi = regs[a as usize + 1];
+                let blo = regs[b as usize];
+                let bhi = regs[b as usize + 1];
+                let clo = regs[c as usize];
+                let chi = regs[c as usize + 1];
+                regs[dst as usize] = (alo & clo) | (blo & !clo);
+                regs[dst as usize + 1] = (ahi & chi) | (bhi & !chi);
+            }
+            _ => simd_ternary_slow(sop, regs, dst, a, b, c, simd_scratch)?,
+        },
+        _ => unreachable!(),
+    }
+    Ok(None)
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn exec_cold_mem_bulk<const DENSE: bool>(
+    op: RegOp,
+    cur_func: &FastFunction,
+    regs: &[u64],
+    p0_base: usize,
+    p0_slice: &mut [u8],
+    p1_base: usize,
+    p1_slice: &mut [u8],
+    #[cfg(test)] has_bulk_cancel_hook: bool,
+) -> Option<InnerExit> {
+    match op {
+        RegOp::MemGen {
+            op: mop,
+            addr,
+            val,
+            arg_idx,
+            src_off,
+        } => {
+            let arg = cur_func.mem_args[arg_idx as usize];
+            let raw = regs[addr as usize];
+            if mop >= 0x36 {
+                Some(InnerExit::SlowStore {
+                    op: mop,
+                    mem: arg.memory,
+                    offset: arg.offset,
+                    raw,
+                    val: regs[val as usize],
+                    src_off,
+                })
+            } else {
+                Some(InnerExit::SlowLoad {
+                    op: mop,
+                    mem: arg.memory,
+                    offset: arg.offset,
+                    raw,
+                    dst: val,
+                    kind: SlowLoadKind::Assign,
+                    src_off,
+                })
+            }
+        }
+        RegOp::MemSize { dst, mem } => Some(InnerExit::MemSize { dst, mem }),
+        RegOp::MemGrow {
+            dst,
+            delta,
+            mem,
+            src_off: _,
+        } => Some(InnerExit::MemGrow {
+            dst,
+            delta: regs[delta as usize],
+            mem,
+        }),
+        RegOp::MemCopy0 {
+            dst,
+            src,
+            len,
+            src_off,
+        } => {
+            let d_raw = regs[dst as usize];
+            let s_raw = regs[src as usize];
+            let n_raw = regs[len as usize];
+            let fast_done = if n_raw <= 4096
+                && let (Ok(d), Ok(s), Ok(n)) = (
+                    usize::try_from(d_raw),
+                    usize::try_from(s_raw),
+                    usize::try_from(n_raw),
+                ) {
+                if DENSE {
+                    if d.checked_add(n).is_some_and(|e| e <= p0_slice.len())
+                        && s.checked_add(n).is_some_and(|e| e <= p0_slice.len())
+                    {
+                        p0_slice.copy_within(s..s + n, d);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    let d0 = d.wrapping_sub(p0_base);
+                    let s0 = s.wrapping_sub(p0_base);
+                    if d0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
+                        && s0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
+                    {
+                        p0_slice.copy_within(s0..s0 + n, d0);
+                        true
+                    } else {
+                        let d1 = d.wrapping_sub(p1_base);
+                        let s1 = s.wrapping_sub(p1_base);
+                        if d1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
+                            && s1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
+                        {
+                            p1_slice.copy_within(s1..s1 + n, d1);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            } else {
+                false
+            };
+            if fast_done {
+                None
+            } else {
+                Some(InnerExit::MemCopy {
+                    dst_mem: 0,
+                    src_mem: 0,
+                    dst: d_raw,
+                    src: s_raw,
+                    len: n_raw,
+                    src_off,
+                })
+            }
+        }
+        RegOp::MemFill0 {
+            dst,
+            val,
+            len,
+            src_off,
+        } => {
+            let d_raw = regs[dst as usize];
+            let v_raw = regs[val as usize];
+            let n_raw = regs[len as usize];
+            #[cfg(test)]
+            let allow_fast = !has_bulk_cancel_hook && n_raw <= 4096;
+            #[cfg(not(test))]
+            let allow_fast = n_raw <= 4096;
+            let fast_done = if allow_fast
+                && let (Ok(d), Ok(n)) = (usize::try_from(d_raw), usize::try_from(n_raw))
+            {
+                if DENSE {
+                    if let Some(sub) = d.checked_add(n).and_then(|e| p0_slice.get_mut(d..e)) {
+                        sub.fill(v_raw as u8);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    let d0 = d.wrapping_sub(p0_base);
+                    if let Some(sub) = d0.checked_add(n).and_then(|e| p0_slice.get_mut(d0..e)) {
+                        sub.fill(v_raw as u8);
+                        true
+                    } else {
+                        let d1 = d.wrapping_sub(p1_base);
+                        if let Some(sub) = d1.checked_add(n).and_then(|e| p1_slice.get_mut(d1..e)) {
+                            sub.fill(v_raw as u8);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            } else {
+                false
+            };
+            if fast_done {
+                None
+            } else {
+                Some(InnerExit::MemFill {
+                    mem: 0,
+                    dst: d_raw,
+                    val: v_raw,
+                    len: n_raw,
+                    src_off,
+                })
+            }
+        }
+        RegOp::MemBulkGen {
+            kind,
+            src_off,
+            dst,
+            src_or_val,
+            len,
+            arg_idx,
+        } => {
+            let arg = cur_func.bulk_args[arg_idx as usize];
+            Some(match kind {
+                0 => InnerExit::MemCopy {
+                    dst_mem: arg.dst_mem,
+                    src_mem: arg.src_mem,
+                    dst: regs[dst as usize],
+                    src: regs[src_or_val as usize],
+                    len: regs[len as usize],
+                    src_off,
+                },
+                1 => InnerExit::MemFill {
+                    mem: arg.dst_mem,
+                    dst: regs[dst as usize],
+                    val: regs[src_or_val as usize],
+                    len: regs[len as usize],
+                    src_off,
+                },
+                2 => InnerExit::MemInit {
+                    mem: arg.dst_mem,
+                    seg: arg.src_mem,
+                    dst: regs[dst as usize],
+                    src: regs[src_or_val as usize],
+                    len: regs[len as usize],
+                    src_off,
+                },
+                3 => InnerExit::DataDrop { seg: arg.dst_mem },
+                4 => InnerExit::TableInit {
+                    table: arg.dst_mem,
+                    seg: arg.src_mem,
+                    dst: regs[dst as usize],
+                    src: regs[src_or_val as usize],
+                    len: regs[len as usize],
+                    src_off,
+                },
+                5 => InnerExit::ElemDrop { seg: arg.dst_mem },
+                _ => InnerExit::TableCopy {
+                    dst_table: arg.dst_mem,
+                    src_table: arg.src_mem,
+                    dst: regs[dst as usize],
+                    src: regs[src_or_val as usize],
+                    len: regs[len as usize],
+                    src_off,
+                },
+            })
+        }
+        RegOp::TableSize { dst, table } => Some(InnerExit::TableSize { dst, table }),
+        _ => unreachable!(),
+    }
+}
+
 /// Inner register dispatch loop specialized on `FUEL` and `DENSE` memory backing.
 /// When `DENSE == true`, `p0_slice` spans the entire contiguous linear memory 0 (`p0_base == 0`,
 /// `p1_slice` dead), freeing registers and eliminating all 2-page LRU checks and misses.
@@ -5619,9 +7659,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
     cursors: &mut ExecCursors,
     call_stack: &mut Vec<ActiveFrame>,
     reg_bank: &mut Vec<u64>,
+    ref_bank: &mut Vec<RefValue>,
     simd_scratch: &mut Vec<Value>,
     fuel: &mut Option<u64>,
-    cancel: &std::sync::atomic::AtomicBool,
     cache_p0_idx: usize,
     cache_p1_idx: usize,
     frames_len: usize,
@@ -5635,6 +7675,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
     let mut cur_body = cursors.body;
     let mut cur_handle = cursors.handle;
     let mut cur_reg_base = cursors.reg_base;
+    let mut cur_ref_base = cursors.ref_base;
     let mut cur_logical_base = cursors.logical_base;
     let mut cur_mem0 = cursors.mem0;
     let mut ip = cursors.ip;
@@ -5656,8 +7697,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
     let exit = {
         let instances = &store.instances;
         let funcs = &store.funcs;
-        let tabs = &store.tabs;
+        let tabs = &mut store.tabs;
         let globals = &mut store.globals;
+        let cancel = &store.cancellation.0;
         let canonical_lock = &store.engine.canonical;
         let max_type_work = store.engine.config.limits.max_type_work;
         let (p0_base, p0_slice, p1_base, p1_slice): (usize, &mut [u8], usize, &mut [u8]) = if DENSE
@@ -5691,10 +7733,11 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
         let mut consts: &[u64] = &cur_func.consts;
         let mut mem0_64 = cur_func.mem0_is_64;
         let mut regs: &mut [u64] = &mut reg_bank[cur_reg_base..];
+        let mut refs: &mut [RefValue] = &mut ref_bank[cur_ref_base..];
         let mut remaining_fuel = if FUEL { fuel.unwrap_or(0) } else { 0 };
 
         macro_rules! inline_call_target {
-            ($callee_handle:expr, $arg_base:expr, $arg_slots:expr, $logical_arg_start:expr, $meta_at_call:expr, $meta_after_call:expr, $src_off:expr) => {{
+            ($callee_handle:expr, $arg_base:expr, $arg_slots:expr, $arg_ref_base:expr, $arg_ref_slots:expr, $logical_arg_start:expr, $meta_at_call:expr, $meta_after_call:expr, $src_off:expr) => {{
                 let callee_handle = $callee_handle;
                 let Some(callee_fn) = funcs
                     .get_live(callee_handle.0.index, callee_handle.0.generation)
@@ -5754,6 +7797,21 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 }
                                 reg_bank.resize(needed, 0);
                             }
+                            let new_ref_base = cur_ref_base + cur_func.ref_slots as usize;
+                            let needed_ref = new_ref_base + callee_fast.ref_slots as usize;
+                            if needed_ref > ref_bank.len() {
+                                if ref_bank.try_reserve(needed_ref - ref_bank.len()).is_err() {
+                                    if FUEL {
+                                        *fuel = Some(remaining_fuel);
+                                    }
+                                    refund_on_trap!($src_off);
+                                    return Err(err(
+                                        ErrorKind::ResourceLimit,
+                                        "frame allocation failed",
+                                    ));
+                                }
+                                ref_bank.resize(needed_ref, RefValue::Null(crate::HeapType::None));
+                            }
                             let arg_src = cur_reg_base + $arg_base as usize;
                             let arg_slots = $arg_slots as usize;
                             let nloc_reg = callee_fast.local_reg_slots as usize;
@@ -5763,6 +7821,17 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             if nloc_reg > arg_slots {
                                 reg_bank[new_reg_base + arg_slots..new_reg_base + nloc_reg].fill(0);
                             }
+                            let arg_ref_src = cur_ref_base + $arg_ref_base as usize;
+                            let arg_ref_slots = $arg_ref_slots as usize;
+                            if arg_ref_slots > 0 {
+                                ref_bank.copy_within(
+                                    arg_ref_src..arg_ref_src + arg_ref_slots,
+                                    new_ref_base,
+                                );
+                            }
+                            for (i, &heap) in callee_fast.local_ref_heaps.iter().enumerate() {
+                                ref_bank[new_ref_base + arg_ref_slots + i] = RefValue::Null(heap);
+                            }
                             active_local_slots += nloc;
                             call_stack.push(ActiveFrame {
                                 inst_id: cur_inst,
@@ -5770,7 +7839,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 func_handle: cur_handle,
                                 ip,
                                 reg_base: cur_reg_base,
+                                ref_base: cur_ref_base,
                                 ret_dst_base: $arg_base,
+                                ret_ref_dst_base: $arg_ref_base,
                                 logical_base: cur_logical_base,
                                 meta_after_call: $meta_after_call,
                                 mem0: cur_mem0,
@@ -5779,11 +7850,13 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             cur_handle = callee_handle;
                             cur_func = callee_fast;
                             cur_reg_base = new_reg_base;
+                            cur_ref_base = new_ref_base;
                             cur_logical_base = next_logical_base;
                             ops = &cur_func.ops;
                             consts = &cur_func.consts;
                             mem0_64 = cur_func.mem0_is_64;
                             regs = &mut reg_bank[cur_reg_base..];
+                            refs = &mut ref_bank[cur_ref_base..];
                             ip = 0;
                             continue;
                         } else {
@@ -5796,6 +7869,8 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 callee_body,
                                 arg_base: $arg_base,
                                 arg_slots: $arg_slots,
+                                arg_ref_base: $arg_ref_base,
+                                arg_ref_slots: $arg_ref_slots,
                                 logical_arg_start: $logical_arg_start,
                                 meta_at_call: $meta_at_call,
                                 meta_after_call: $meta_after_call,
@@ -5814,7 +7889,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
         }
 
         macro_rules! inline_tail_call_target {
-            ($callee_handle:expr, $arg_base:expr, $arg_slots:expr, $meta_at_call:expr, $src_off:expr) => {{
+            ($callee_handle:expr, $arg_base:expr, $arg_slots:expr, $arg_ref_base:expr, $arg_ref_slots:expr, $meta_at_call:expr, $src_off:expr) => {{
                 let callee_handle = $callee_handle;
                 let Some(callee_fn) = funcs
                     .get_live(callee_handle.0.index, callee_handle.0.generation)
@@ -5867,6 +7942,20 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 }
                                 reg_bank.resize(needed, 0);
                             }
+                            let needed_ref = cur_ref_base + callee_fast.ref_slots as usize;
+                            if needed_ref > ref_bank.len() {
+                                if ref_bank.try_reserve(needed_ref - ref_bank.len()).is_err() {
+                                    if FUEL {
+                                        *fuel = Some(remaining_fuel);
+                                    }
+                                    refund_on_trap!($src_off);
+                                    return Err(err(
+                                        ErrorKind::ResourceLimit,
+                                        "frame allocation failed",
+                                    ));
+                                }
+                                ref_bank.resize(needed_ref, RefValue::Null(crate::HeapType::None));
+                            }
                             let arg_src = cur_reg_base + $arg_base as usize;
                             let arg_slots = $arg_slots as usize;
                             let new_nloc_reg = callee_fast.local_reg_slots as usize;
@@ -5877,6 +7966,17 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 reg_bank[cur_reg_base + arg_slots..cur_reg_base + new_nloc_reg]
                                     .fill(0);
                             }
+                            let arg_ref_src = cur_ref_base + $arg_ref_base as usize;
+                            let arg_ref_slots = $arg_ref_slots as usize;
+                            if arg_ref_slots > 0 && arg_ref_src != cur_ref_base {
+                                ref_bank.copy_within(
+                                    arg_ref_src..arg_ref_src + arg_ref_slots,
+                                    cur_ref_base,
+                                );
+                            }
+                            for (i, &heap) in callee_fast.local_ref_heaps.iter().enumerate() {
+                                ref_bank[cur_ref_base + arg_ref_slots + i] = RefValue::Null(heap);
+                            }
                             active_local_slots = next_active_locals;
                             cur_body = callee_body;
                             cur_handle = callee_handle;
@@ -5885,6 +7985,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             consts = &cur_func.consts;
                             mem0_64 = cur_func.mem0_is_64;
                             regs = &mut reg_bank[cur_reg_base..];
+                            refs = &mut ref_bank[cur_ref_base..];
                             ip = 0;
                             continue;
                         } else {
@@ -5897,6 +7998,8 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 callee_body,
                                 arg_base: $arg_base,
                                 arg_slots: $arg_slots,
+                                arg_ref_base: $arg_ref_base,
+                                arg_ref_slots: $arg_ref_slots,
                                 src_off: $src_off,
                             };
                         }
@@ -5969,57 +8072,19 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     regs[dst as usize] =
                         (regs[a as usize] as u32).wrapping_mul(regs[b as usize] as u32) as u64;
                 }
-                RegOp::I32DivS { dst, a, b, src_off } => {
-                    let va = regs[a as usize] as i32;
-                    let vb = regs[b as usize] as i32;
-                    if vb == 0 {
+                RegOp::I32DivS { src_off, .. }
+                | RegOp::I32DivU { src_off, .. }
+                | RegOp::I32RemS { src_off, .. }
+                | RegOp::I32RemU { src_off, .. }
+                | RegOp::Unary { src_off, .. }
+                | RegOp::Binary { src_off, .. } => {
+                    if let Err(e) = exec_cold_scalar_alu(op, regs) {
                         if FUEL {
                             *fuel = Some(remaining_fuel);
                         }
                         refund_on_trap!(src_off);
-                        return Err(trap("integer divide by zero"));
+                        return Err(e);
                     }
-                    let Some(q) = va.checked_div(vb) else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("integer overflow"));
-                    };
-                    regs[dst as usize] = q as u32 as u64;
-                }
-                RegOp::I32DivU { dst, a, b, src_off } => {
-                    let vb = regs[b as usize] as u32;
-                    if vb == 0 {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("integer divide by zero"));
-                    }
-                    regs[dst as usize] = ((regs[a as usize] as u32) / vb) as u64;
-                }
-                RegOp::I32RemS { dst, a, b, src_off } => {
-                    let vb = regs[b as usize] as i32;
-                    if vb == 0 {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("integer divide by zero"));
-                    }
-                    regs[dst as usize] = (regs[a as usize] as i32).wrapping_rem(vb) as u32 as u64;
-                }
-                RegOp::I32RemU { dst, a, b, src_off } => {
-                    let vb = regs[b as usize] as u32;
-                    if vb == 0 {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("integer divide by zero"));
-                    }
-                    regs[dst as usize] = ((regs[a as usize] as u32) % vb) as u64;
                 }
                 RegOp::I32And { dst, a, b } => {
                     regs[dst as usize] =
@@ -6239,55 +8304,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         f64::from_bits(consts[cidx as usize]),
                     );
                 }
-
-                // ---- Generic scalar unary/binary ----
-                RegOp::Unary {
-                    op: uop,
-                    dst,
-                    src,
-                    src_off,
-                } => {
-                    let a = regs[src as usize];
-                    let res = if integer::supported(uop) {
-                        integer::unary(uop, a)
-                    } else {
-                        float::unary(uop, a)
-                    };
-                    match res {
-                        Ok(v) => regs[dst as usize] = v,
-                        Err(e) => {
-                            if FUEL {
-                                *fuel = Some(remaining_fuel);
-                            }
-                            refund_on_trap!(src_off);
-                            return Err(e);
-                        }
-                    }
-                }
-                RegOp::Binary {
-                    op: bop,
-                    dst,
-                    a,
-                    b,
-                    src_off,
-                } => {
-                    let va = regs[a as usize];
-                    let vb = regs[b as usize];
-                    let res = if integer::supported(bop) {
-                        integer::binary(bop, va, vb)
-                    } else {
-                        float::binary(bop, va, vb)
-                    };
-                    match res {
-                        Ok(v) => regs[dst as usize] = v,
-                        Err(e) => {
-                            if FUEL {
-                                *fuel = Some(remaining_fuel);
-                            }
-                            refund_on_trap!(src_off);
-                            return Err(e);
-                        }
-                    }
+                RegOp::F64MulAdd { dst, acc, a, b } => {
+                    let prod = f64::from_bits(regs[a as usize]) * f64::from_bits(regs[b as usize]);
+                    regs[dst as usize] = (f64::from_bits(regs[acc as usize]) + prod).to_bits();
                 }
 
                 RegOp::Select { dst, a, b, cond } => {
@@ -6534,6 +8553,122 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         }
                         break InnerExit::SlowLoad {
                             op: 0x28,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst,
+                            kind: SlowLoadKind::Assign,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::LoadI64AddAddr {
+                    dst,
+                    a,
+                    b,
+                    offset,
+                    src_off,
+                } => {
+                    let raw =
+                        (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32) as u64;
+                    let at = (raw as usize) + (offset as usize);
+                    if let Some(arr) =
+                        fast_read_bytes::<8, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                    {
+                        regs[dst as usize] = u64::from_le_bytes(arr);
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x29,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst,
+                            kind: SlowLoadKind::Assign,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::LoadI32Shl2 {
+                    dst,
+                    idx,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = (regs[idx as usize] as u32).wrapping_shl(2) as u64;
+                    let at = (raw as usize) + (offset as usize);
+                    if let Some(arr) =
+                        fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                    {
+                        regs[dst as usize] = u32::from_le_bytes(arr) as u64;
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x28,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst,
+                            kind: SlowLoadKind::Assign,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::LoadI32Shl2Add {
+                    dst,
+                    base,
+                    idx,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2))
+                        as u64;
+                    let at = (raw as usize) + (offset as usize);
+                    if let Some(arr) =
+                        fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                    {
+                        regs[dst as usize] = u32::from_le_bytes(arr) as u64;
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x28,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst,
+                            kind: SlowLoadKind::Assign,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::LoadI64Shl3Add {
+                    dst,
+                    base,
+                    idx,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3))
+                        as u64;
+                    let at = (raw as usize) + (offset as usize);
+                    if let Some(arr) =
+                        fast_read_bytes::<8, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                    {
+                        regs[dst as usize] = u64::from_le_bytes(arr);
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x29,
                             mem: 0,
                             offset: offset as u64,
                             raw,
@@ -6865,253 +9000,131 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         };
                     }
                 }
-                RegOp::MemGen {
-                    op: mop,
-                    addr,
+                RegOp::StoreI32Shl2 {
+                    idx,
                     val,
-                    arg_idx,
+                    offset,
                     src_off,
                 } => {
-                    let arg = cur_func.mem_args[arg_idx as usize];
-                    let raw = regs[addr as usize];
-                    if FUEL {
-                        *fuel = Some(remaining_fuel);
-                    }
-                    if mop >= 0x36 {
+                    let raw = (regs[idx as usize] as u32).wrapping_shl(2) as u64;
+                    let v = regs[val as usize];
+                    let at = (raw as usize) + (offset as usize);
+                    if fast_write_bytes::<4, DENSE>(
+                        at,
+                        (v as u32).to_le_bytes(),
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
                         break InnerExit::SlowStore {
-                            op: mop,
-                            mem: arg.memory,
-                            offset: arg.offset,
-                            raw,
-                            val: regs[val as usize],
-                            src_off,
-                        };
-                    } else {
-                        break InnerExit::SlowLoad {
-                            op: mop,
-                            mem: arg.memory,
-                            offset: arg.offset,
-                            raw,
-                            dst: val,
-                            kind: SlowLoadKind::Assign,
-                            src_off,
-                        };
-                    }
-                }
-                RegOp::MemSize { dst, mem } => {
-                    if FUEL {
-                        *fuel = Some(remaining_fuel);
-                    }
-                    break InnerExit::MemSize { dst, mem };
-                }
-                RegOp::MemGrow {
-                    dst,
-                    delta,
-                    mem,
-                    src_off: _,
-                } => {
-                    let d = regs[delta as usize];
-                    if FUEL {
-                        *fuel = Some(remaining_fuel);
-                    }
-                    break InnerExit::MemGrow { dst, delta: d, mem };
-                }
-                RegOp::MemCopy0 {
-                    dst,
-                    src,
-                    len,
-                    src_off,
-                } => {
-                    let d_raw = regs[dst as usize];
-                    let s_raw = regs[src as usize];
-                    let n_raw = regs[len as usize];
-                    let fast_done = if n_raw <= 4096
-                        && let (Ok(d), Ok(s), Ok(n)) = (
-                            usize::try_from(d_raw),
-                            usize::try_from(s_raw),
-                            usize::try_from(n_raw),
-                        ) {
-                        if DENSE {
-                            if d.checked_add(n).is_some_and(|e| e <= p0_slice.len())
-                                && s.checked_add(n).is_some_and(|e| e <= p0_slice.len())
-                            {
-                                p0_slice.copy_within(s..s + n, d);
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            let d0 = d.wrapping_sub(p0_base);
-                            let s0 = s.wrapping_sub(p0_base);
-                            if d0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
-                                && s0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
-                            {
-                                p0_slice.copy_within(s0..s0 + n, d0);
-                                true
-                            } else {
-                                let d1 = d.wrapping_sub(p1_base);
-                                let s1 = s.wrapping_sub(p1_base);
-                                if d1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
-                                    && s1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
-                                {
-                                    p1_slice.copy_within(s1..s1 + n, d1);
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    if !fast_done {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        break InnerExit::MemCopy {
-                            dst_mem: 0,
-                            src_mem: 0,
-                            dst: d_raw,
-                            src: s_raw,
-                            len: n_raw,
-                            src_off,
-                        };
-                    }
-                }
-                RegOp::MemFill0 {
-                    dst,
-                    val,
-                    len,
-                    src_off,
-                } => {
-                    let d_raw = regs[dst as usize];
-                    let v_raw = regs[val as usize];
-                    let n_raw = regs[len as usize];
-                    #[cfg(test)]
-                    let allow_fast = !has_bulk_cancel_hook && n_raw <= 4096;
-                    #[cfg(not(test))]
-                    let allow_fast = n_raw <= 4096;
-                    let fast_done = if allow_fast
-                        && let (Ok(d), Ok(n)) = (usize::try_from(d_raw), usize::try_from(n_raw))
-                    {
-                        if DENSE {
-                            if let Some(sub) = d.checked_add(n).and_then(|e| p0_slice.get_mut(d..e))
-                            {
-                                sub.fill(v_raw as u8);
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            let d0 = d.wrapping_sub(p0_base);
-                            if let Some(sub) =
-                                d0.checked_add(n).and_then(|e| p0_slice.get_mut(d0..e))
-                            {
-                                sub.fill(v_raw as u8);
-                                true
-                            } else {
-                                let d1 = d.wrapping_sub(p1_base);
-                                if let Some(sub) =
-                                    d1.checked_add(n).and_then(|e| p1_slice.get_mut(d1..e))
-                                {
-                                    sub.fill(v_raw as u8);
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    if !fast_done {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        break InnerExit::MemFill {
+                            op: 0x36,
                             mem: 0,
-                            dst: d_raw,
-                            val: v_raw,
-                            len: n_raw,
+                            offset: offset as u64,
+                            raw,
+                            val: v,
                             src_off,
                         };
                     }
                 }
-                RegOp::MemBulkGen {
-                    kind,
+                RegOp::StoreI32Shl2Add {
+                    base,
+                    idx,
+                    val,
+                    offset,
                     src_off,
-                    dst,
-                    src_or_val,
-                    len,
-                    arg_idx,
                 } => {
-                    let arg = cur_func.bulk_args[arg_idx as usize];
-                    if FUEL {
-                        *fuel = Some(remaining_fuel);
-                    }
-                    match kind {
-                        0 => {
-                            break InnerExit::MemCopy {
-                                dst_mem: arg.dst_mem,
-                                src_mem: arg.src_mem,
-                                dst: regs[dst as usize],
-                                src: regs[src_or_val as usize],
-                                len: regs[len as usize],
-                                src_off,
-                            };
+                    let raw = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2))
+                        as u64;
+                    let v = regs[val as usize];
+                    let at = (raw as usize) + (offset as usize);
+                    if fast_write_bytes::<4, DENSE>(
+                        at,
+                        (v as u32).to_le_bytes(),
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
                         }
-                        1 => {
-                            break InnerExit::MemFill {
-                                mem: arg.dst_mem,
-                                dst: regs[dst as usize],
-                                val: regs[src_or_val as usize],
-                                len: regs[len as usize],
-                                src_off,
-                            };
-                        }
-                        2 => {
-                            break InnerExit::MemInit {
-                                mem: arg.dst_mem,
-                                seg: arg.src_mem,
-                                dst: regs[dst as usize],
-                                src: regs[src_or_val as usize],
-                                len: regs[len as usize],
-                                src_off,
-                            };
-                        }
-                        3 => {
-                            break InnerExit::DataDrop { seg: arg.dst_mem };
-                        }
-                        4 => {
-                            break InnerExit::TableInit {
-                                table: arg.dst_mem,
-                                seg: arg.src_mem,
-                                dst: regs[dst as usize],
-                                src: regs[src_or_val as usize],
-                                len: regs[len as usize],
-                                src_off,
-                            };
-                        }
-                        5 => {
-                            break InnerExit::ElemDrop { seg: arg.dst_mem };
-                        }
-                        _ => {
-                            break InnerExit::TableCopy {
-                                dst_table: arg.dst_mem,
-                                src_table: arg.src_mem,
-                                dst: regs[dst as usize],
-                                src: regs[src_or_val as usize],
-                                len: regs[len as usize],
-                                src_off,
-                            };
-                        }
+                        break InnerExit::SlowStore {
+                            op: 0x36,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            val: v,
+                            src_off,
+                        };
                     }
                 }
-                RegOp::TableSize { dst, table } => {
-                    if FUEL {
-                        *fuel = Some(remaining_fuel);
+                RegOp::StoreI64Shl3Add {
+                    base,
+                    idx,
+                    val,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3))
+                        as u64;
+                    let v = regs[val as usize];
+                    let at = (raw as usize) + (offset as usize);
+                    if fast_write_bytes::<8, DENSE>(
+                        at,
+                        v.to_le_bytes(),
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowStore {
+                            op: 0x37,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            val: v,
+                            src_off,
+                        };
                     }
-                    break InnerExit::TableSize { dst, table };
+                }
+                RegOp::MemGen { .. }
+                | RegOp::MemSize { .. }
+                | RegOp::MemGrow { .. }
+                | RegOp::MemCopy0 { .. }
+                | RegOp::MemFill0 { .. }
+                | RegOp::MemBulkGen { .. }
+                | RegOp::TableSize { .. } => {
+                    if let Some(cold_exit) = exec_cold_mem_bulk::<DENSE>(
+                        op,
+                        cur_func,
+                        regs,
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                        #[cfg(test)]
+                        has_bulk_cancel_hook,
+                    ) {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break cold_exit;
+                    }
                 }
 
                 // ---- Superinstructions: compare + branch & counted loop ----
@@ -7209,6 +9222,8 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         callee_handle,
                         site.arg_base,
                         site.arg_slots,
+                        site.arg_ref_base,
+                        site.arg_ref_slots,
                         site.logical_arg_start,
                         site.meta_at_call,
                         site.meta_after_call,
@@ -7217,77 +9232,32 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                 }
                 RegOp::CallIndirect { call_idx, src_off } => {
                     let site = cur_func.call_indirect_sites[call_idx as usize];
-                    let raw_ix = regs[site.index_reg as usize];
-                    let ix = if site.table_is_64 {
-                        raw_ix
-                    } else {
-                        raw_ix as u32 as u64
-                    };
-                    let tab_h = inst_tabs[site.table_idx as usize];
-                    let tab = &tabs[tab_h.0.index];
-                    let Some(&val) = usize::try_from(ix).ok().and_then(|i| tab.values.get(i))
-                    else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("table out of bounds"));
-                    };
-                    let Value::Ref(RefValue::Func(callee_handle)) = val else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("null indirect call"));
-                    };
-                    let Some(callee_fn) = funcs
-                        .get_live(callee_handle.0.index, callee_handle.0.generation)
-                        .filter(|_| callee_handle.0.store == store_id)
-                    else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(err(ErrorKind::Host, "foreign or stale handle"));
-                    };
-                    let expected_canonical = inst_canonical[site.type_idx as usize];
-                    let compatible = if callee_fn.canonical == expected_canonical {
-                        true
-                    } else {
-                        let Ok(guard) = canonical_lock.lock() else {
+                    let callee_handle = match resolve_indirect_callee(
+                        site,
+                        regs,
+                        inst_tabs,
+                        tabs,
+                        funcs,
+                        inst_canonical,
+                        canonical_lock,
+                        max_type_work,
+                        store_id,
+                    ) {
+                        Ok(h) => h,
+                        Err(e) => {
                             if FUEL {
                                 *fuel = Some(remaining_fuel);
                             }
                             refund_on_trap!(src_off);
-                            return Err(err(ErrorKind::Host, "canonical registry poisoned"));
-                        };
-                        match guard.is_subtype(
-                            callee_fn.canonical,
-                            expected_canonical,
-                            false,
-                            max_type_work,
-                        ) {
-                            Ok(ok) => ok,
-                            Err(e) => {
-                                if FUEL {
-                                    *fuel = Some(remaining_fuel);
-                                }
-                                refund_on_trap!(src_off);
-                                return Err(e);
-                            }
+                            return Err(e);
                         }
                     };
-                    if !compatible {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("indirect call type mismatch"));
-                    }
                     inline_call_target!(
                         callee_handle,
                         site.arg_base,
                         site.arg_slots,
+                        site.arg_ref_base,
+                        site.arg_ref_slots,
                         site.logical_arg_start,
                         site.meta_at_call,
                         site.meta_after_call,
@@ -7301,21 +9271,154 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         callee_handle,
                         site.arg_base,
                         site.arg_slots,
+                        site.arg_ref_base,
+                        site.arg_ref_slots,
                         site.meta_at_call,
                         src_off
                     );
                 }
                 RegOp::ReturnCallIndirect { call_idx, src_off } => {
                     let site = cur_func.call_indirect_sites[call_idx as usize];
-                    let raw_ix = regs[site.index_reg as usize];
-                    let ix = if site.table_is_64 {
-                        raw_ix
-                    } else {
-                        raw_ix as u32 as u64
+                    let callee_handle = match resolve_indirect_callee(
+                        site,
+                        regs,
+                        inst_tabs,
+                        tabs,
+                        funcs,
+                        inst_canonical,
+                        canonical_lock,
+                        max_type_work,
+                        store_id,
+                    ) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            if FUEL {
+                                *fuel = Some(remaining_fuel);
+                            }
+                            refund_on_trap!(src_off);
+                            return Err(e);
+                        }
                     };
-                    let tab_h = inst_tabs[site.table_idx as usize];
+                    inline_tail_call_target!(
+                        callee_handle,
+                        site.arg_base,
+                        site.arg_slots,
+                        site.arg_ref_base,
+                        site.arg_ref_slots,
+                        site.meta_at_call,
+                        src_off
+                    );
+                }
+                RegOp::WideArith { .. } => {
+                    exec_cold_scalar_alu(op, regs)?;
+                }
+                RegOp::MovV128 { .. }
+                | RegOp::ConstV128 { .. }
+                | RegOp::SelectV128 { .. }
+                | RegOp::GlobalGetV128 { .. }
+                | RegOp::GlobalSetV128 { .. }
+                | RegOp::LoadV128 { .. }
+                | RegOp::StoreV128 { .. }
+                | RegOp::SimdMemGen { .. }
+                | RegOp::SimdShuffle { .. }
+                | RegOp::SimdUnary { .. }
+                | RegOp::SimdBinary { .. }
+                | RegOp::SimdTernary { .. } => {
+                    if let Some(simd_exit) = exec_cold_simd::<DENSE>(
+                        op,
+                        cur_func,
+                        regs,
+                        inst_globals,
+                        globals,
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                        mem0_64,
+                        simd_scratch,
+                    )? {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break simd_exit;
+                    }
+                }
+                // ---- Reference operations (parallel `ref_bank`) ----
+                RegOp::MovRef { dst, src } => {
+                    refs[dst as usize] = refs[src as usize];
+                }
+                RegOp::MoveRefRange {
+                    dst_base,
+                    src_base,
+                    count,
+                } => {
+                    let s = src_base as usize;
+                    let d = dst_base as usize;
+                    let c = count as usize;
+                    refs.copy_within(s..s + c, d);
+                }
+                RegOp::RefNull { dst, heap_idx } => {
+                    refs[dst as usize] = RefValue::Null(cur_func.ref_heaps[heap_idx as usize]);
+                }
+                RegOp::RefIsNull { dst, src } => {
+                    regs[dst as usize] = u64::from(matches!(refs[src as usize], RefValue::Null(_)));
+                }
+                RegOp::RefFunc { dst, func_idx } => {
+                    refs[dst as usize] = RefValue::Func(inst_funcs[func_idx as usize]);
+                }
+                RegOp::RefEq { dst, a, b } => {
+                    let va = refs[a as usize];
+                    let vb = refs[b as usize];
+                    regs[dst as usize] = u64::from(
+                        va == vb || matches!((va, vb), (RefValue::Null(_), RefValue::Null(_))),
+                    );
+                }
+                RegOp::RefAsNonNull { dst, src, src_off } => {
+                    let v = refs[src as usize];
+                    if matches!(v, RefValue::Null(_)) {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        refund_on_trap!(src_off);
+                        return Err(trap("null reference"));
+                    }
+                    refs[dst as usize] = v;
+                }
+                RegOp::SelectRef { dst, a, b, cond } => {
+                    refs[dst as usize] = if regs[cond as usize] as u32 != 0 {
+                        refs[a as usize]
+                    } else {
+                        refs[b as usize]
+                    };
+                }
+                RegOp::GlobalGetRef { dst, global } => {
+                    let gh = inst_globals[global as usize];
+                    let Value::Ref(r) = globals[gh.0.index].value else {
+                        return Err(trap("global type"));
+                    };
+                    refs[dst as usize] = r;
+                }
+                RegOp::GlobalSetRef { src, global } => {
+                    let gh = inst_globals[global as usize];
+                    let slot = &mut globals[gh.0.index];
+                    slot.value = Value::Ref(refs[src as usize]);
+                }
+                RegOp::TableGet {
+                    dst,
+                    idx,
+                    table,
+                    src_off,
+                } => {
+                    let tab_h = inst_tabs[table as usize];
                     let tab = &tabs[tab_h.0.index];
-                    let Some(&val) = usize::try_from(ix).ok().and_then(|i| tab.values.get(i))
+                    let raw = regs[idx as usize];
+                    let ix = if tab.ty.index_type == IndexType::I64 {
+                        raw
+                    } else {
+                        raw as u32 as u64
+                    };
+                    let Some(&Value::Ref(r)) =
+                        usize::try_from(ix).ok().and_then(|i| tab.values.get(i))
                     else {
                         if FUEL {
                             *fuel = Some(remaining_fuel);
@@ -7323,386 +9426,38 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         refund_on_trap!(src_off);
                         return Err(trap("table out of bounds"));
                     };
-                    let Value::Ref(RefValue::Func(callee_handle)) = val else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("null indirect call"));
+                    refs[dst as usize] = r;
+                }
+                RegOp::TableSet {
+                    idx,
+                    val,
+                    table,
+                    src_off,
+                } => {
+                    let tab_h = inst_tabs[table as usize];
+                    let tab = &mut tabs[tab_h.0.index];
+                    let raw = regs[idx as usize];
+                    let ix = if tab.ty.index_type == IndexType::I64 {
+                        raw
+                    } else {
+                        raw as u32 as u64
                     };
-                    let Some(callee_fn) = funcs
-                        .get_live(callee_handle.0.index, callee_handle.0.generation)
-                        .filter(|_| callee_handle.0.store == store_id)
+                    let Some(slot) = usize::try_from(ix).ok().and_then(|i| tab.values.get_mut(i))
                     else {
                         if FUEL {
                             *fuel = Some(remaining_fuel);
                         }
                         refund_on_trap!(src_off);
-                        return Err(err(ErrorKind::Host, "foreign or stale handle"));
+                        return Err(trap("table out of bounds"));
                     };
-                    let expected_canonical = inst_canonical[site.type_idx as usize];
-                    let compatible = if callee_fn.canonical == expected_canonical {
-                        true
-                    } else {
-                        let Ok(guard) = canonical_lock.lock() else {
-                            if FUEL {
-                                *fuel = Some(remaining_fuel);
-                            }
-                            refund_on_trap!(src_off);
-                            return Err(err(ErrorKind::Host, "canonical registry poisoned"));
-                        };
-                        match guard.is_subtype(
-                            callee_fn.canonical,
-                            expected_canonical,
-                            false,
-                            max_type_work,
-                        ) {
-                            Ok(ok) => ok,
-                            Err(e) => {
-                                if FUEL {
-                                    *fuel = Some(remaining_fuel);
-                                }
-                                refund_on_trap!(src_off);
-                                return Err(e);
-                            }
-                        }
-                    };
-                    if !compatible {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        refund_on_trap!(src_off);
-                        return Err(trap("indirect call type mismatch"));
-                    }
-                    inline_tail_call_target!(
-                        callee_handle,
-                        site.arg_base,
-                        site.arg_slots,
-                        site.meta_at_call,
-                        src_off
-                    );
+                    *slot = Value::Ref(refs[val as usize]);
                 }
-                RegOp::WideArith { kind, base } => {
-                    let b = base as usize;
-                    let bits = match kind {
-                        0 | 1 => {
-                            let a = (u128::from(regs[b + 1]) << 64) | u128::from(regs[b]);
-                            let rhs = (u128::from(regs[b + 3]) << 64) | u128::from(regs[b + 2]);
-                            if kind == 0 {
-                                a.wrapping_add(rhs)
-                            } else {
-                                a.wrapping_sub(rhs)
-                            }
-                        }
-                        2 => ((regs[b] as i64 as i128) * (regs[b + 1] as i64 as i128)) as u128,
-                        _ => u128::from(regs[b]) * u128::from(regs[b + 1]),
-                    };
-                    regs[b] = bits as u64;
-                    regs[b + 1] = (bits >> 64) as u64;
-                }
-                // ---- Native SIMD & Relaxed SIMD ----
-                RegOp::MovV128 { dst, src } => {
-                    let lo = regs[src as usize];
-                    let hi = regs[src as usize + 1];
-                    regs[dst as usize] = lo;
-                    regs[dst as usize + 1] = hi;
-                }
-                RegOp::ConstV128 { dst, idx } => {
-                    let [lo, hi] = cur_func.v128_consts[idx as usize];
-                    regs[dst as usize] = lo;
-                    regs[dst as usize + 1] = hi;
-                }
-                RegOp::SelectV128 { dst, a, b, cond } => {
-                    let s = if regs[cond as usize] as u32 != 0 {
-                        a
-                    } else {
-                        b
-                    };
-                    let lo = regs[s as usize];
-                    let hi = regs[s as usize + 1];
-                    regs[dst as usize] = lo;
-                    regs[dst as usize + 1] = hi;
-                }
-                RegOp::GlobalGetV128 { dst, global } => {
-                    let gh = inst_globals[global as usize];
-                    let Value::V128(v) = globals[gh.0.index].value else {
-                        return Err(trap("global type"));
-                    };
-                    write_v128(regs, dst, v.0);
-                }
-                RegOp::GlobalSetV128 { src, global } => {
-                    let gh = inst_globals[global as usize];
-                    let slot = &mut globals[gh.0.index];
-                    if slot.ty.value != ValType::V128 {
-                        return Err(trap("global type"));
-                    }
-                    slot.value = Value::V128(V128(read_v128(regs, src)));
-                }
-                RegOp::LoadV128 {
-                    dst,
-                    addr,
-                    offset,
-                    src_off,
+                RegOp::Return {
+                    base,
+                    count,
+                    ref_base,
+                    ref_count,
                 } => {
-                    let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(arr) =
-                            fast_read_bytes::<16, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
-                        write_v128(regs, dst, arr);
-                    } else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        break InnerExit::SlowSimdMem {
-                            op: 0xfd00,
-                            mem: 0,
-                            offset: offset as u64,
-                            raw,
-                            dst,
-                            in_vec: [0u8; 16],
-                            lane: 0,
-                            src_off,
-                        };
-                    }
-                }
-                RegOp::StoreV128 {
-                    addr,
-                    val,
-                    offset,
-                    src_off,
-                } => {
-                    let raw = regs[addr as usize];
-                    let data = read_v128(regs, val);
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && fast_write_bytes::<16, DENSE>(
-                            at, data, p0_base, p0_slice, p1_base, p1_slice,
-                        )
-                    {
-                        // committed
-                    } else {
-                        if FUEL {
-                            *fuel = Some(remaining_fuel);
-                        }
-                        break InnerExit::SlowSimdMem {
-                            op: 0xfd0b,
-                            mem: 0,
-                            offset: offset as u64,
-                            raw,
-                            dst: val,
-                            in_vec: data,
-                            lane: 0,
-                            src_off,
-                        };
-                    }
-                }
-                RegOp::SimdMemGen {
-                    op: mop,
-                    addr,
-                    val,
-                    arg_idx,
-                    src_off,
-                } => {
-                    let arg = cur_func.simd_mem_args[arg_idx as usize];
-                    let raw = regs[addr as usize];
-                    let sub = mop & 0xff;
-                    let in_vec = if sub == 11 || (0x54..=0x5b).contains(&sub) {
-                        read_v128(regs, arg.src_vec)
-                    } else {
-                        [0u8; 16]
-                    };
-                    if FUEL {
-                        *fuel = Some(remaining_fuel);
-                    }
-                    break InnerExit::SlowSimdMem {
-                        op: mop,
-                        mem: arg.memory,
-                        offset: arg.offset,
-                        raw,
-                        dst: val,
-                        in_vec,
-                        lane: arg.lane,
-                        src_off,
-                    };
-                }
-                RegOp::SimdShuffle {
-                    dst,
-                    a,
-                    b,
-                    mask_idx,
-                } => {
-                    let va = read_v128(regs, a);
-                    let vb = read_v128(regs, b);
-                    let ix = cur_func.simd_masks[mask_idx as usize];
-                    let mut out = [0u8; 16];
-                    for i in 0..16 {
-                        let m = ix[i] as usize;
-                        out[i] = if m < 16 { va[m] } else { vb[m - 16] };
-                    }
-                    write_v128(regs, dst, out);
-                }
-                RegOp::SimdUnary {
-                    op: sop,
-                    dst,
-                    src,
-                    lane,
-                } => match sop {
-                    0xfd4d => {
-                        let lo = !regs[src as usize];
-                        let hi = !regs[src as usize + 1];
-                        regs[dst as usize] = lo;
-                        regs[dst as usize + 1] = hi;
-                    }
-                    0xfd0f => {
-                        let w = u64::from_ne_bytes([regs[src as usize] as u8; 8]);
-                        regs[dst as usize] = w;
-                        regs[dst as usize + 1] = w;
-                    }
-                    0xfd10 => {
-                        let b = (regs[src as usize] as u16).to_le_bytes();
-                        let w =
-                            u64::from_le_bytes([b[0], b[1], b[0], b[1], b[0], b[1], b[0], b[1]]);
-                        regs[dst as usize] = w;
-                        regs[dst as usize + 1] = w;
-                    }
-                    0xfd11 | 0xfd13 => {
-                        let x = regs[src as usize] as u32 as u64;
-                        let w = x | (x << 32);
-                        regs[dst as usize] = w;
-                        regs[dst as usize + 1] = w;
-                    }
-                    0xfd12 | 0xfd14 => {
-                        let w = regs[src as usize];
-                        regs[dst as usize] = w;
-                        regs[dst as usize + 1] = w;
-                    }
-                    0xfd1b | 0xfd1f => {
-                        let word = regs[src as usize + (lane as usize >> 1)];
-                        regs[dst as usize] = ((word >> ((lane & 1) * 32)) as u32) as u64;
-                    }
-                    0xfd1d | 0xfd21 => {
-                        regs[dst as usize] = regs[src as usize + lane as usize];
-                    }
-                    _ => simd_unary_slow(sop, lane, regs, dst, src, simd_scratch)?,
-                },
-                RegOp::SimdBinary {
-                    op: sop,
-                    dst,
-                    a,
-                    b,
-                    lane,
-                } => match sop {
-                    0xfd4e => {
-                        let lo = regs[a as usize] & regs[b as usize];
-                        let hi = regs[a as usize + 1] & regs[b as usize + 1];
-                        regs[dst as usize] = lo;
-                        regs[dst as usize + 1] = hi;
-                    }
-                    0xfd4f => {
-                        let lo = regs[a as usize] & !regs[b as usize];
-                        let hi = regs[a as usize + 1] & !regs[b as usize + 1];
-                        regs[dst as usize] = lo;
-                        regs[dst as usize + 1] = hi;
-                    }
-                    0xfd50 => {
-                        let lo = regs[a as usize] | regs[b as usize];
-                        let hi = regs[a as usize + 1] | regs[b as usize + 1];
-                        regs[dst as usize] = lo;
-                        regs[dst as usize + 1] = hi;
-                    }
-                    0xfd51 => {
-                        let lo = regs[a as usize] ^ regs[b as usize];
-                        let hi = regs[a as usize + 1] ^ regs[b as usize + 1];
-                        regs[dst as usize] = lo;
-                        regs[dst as usize + 1] = hi;
-                    }
-                    0xfdae | 0xfdb1 | 0xfdb5 => {
-                        let alo = regs[a as usize];
-                        let ahi = regs[a as usize + 1];
-                        let blo = regs[b as usize];
-                        let bhi = regs[b as usize + 1];
-                        let lane_op = |x: u32, y: u32| -> u32 {
-                            match sop {
-                                0xfdae => x.wrapping_add(y),
-                                0xfdb1 => x.wrapping_sub(y),
-                                _ => x.wrapping_mul(y),
-                            }
-                        };
-                        let r0 = lane_op(alo as u32, blo as u32) as u64;
-                        let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
-                        let r2 = lane_op(ahi as u32, bhi as u32) as u64;
-                        let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
-                        regs[dst as usize] = r0 | (r1 << 32);
-                        regs[dst as usize + 1] = r2 | (r3 << 32);
-                    }
-                    0xfde4..=0xfde6 => {
-                        let alo = regs[a as usize];
-                        let ahi = regs[a as usize + 1];
-                        let blo = regs[b as usize];
-                        let bhi = regs[b as usize + 1];
-                        let lane_op = |x: u32, y: u32| -> u32 {
-                            let fx = f32::from_bits(x);
-                            let fy = f32::from_bits(y);
-                            match sop {
-                                0xfde4 => (fx + fy).to_bits(),
-                                0xfde5 => (fx - fy).to_bits(),
-                                _ => (fx * fy).to_bits(),
-                            }
-                        };
-                        let r0 = lane_op(alo as u32, blo as u32) as u64;
-                        let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
-                        let r2 = lane_op(ahi as u32, bhi as u32) as u64;
-                        let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
-                        regs[dst as usize] = r0 | (r1 << 32);
-                        regs[dst as usize + 1] = r2 | (r3 << 32);
-                    }
-                    0xfdf0..=0xfdf2 => {
-                        let ax0 = f64::from_bits(regs[a as usize]);
-                        let ax1 = f64::from_bits(regs[a as usize + 1]);
-                        let bx0 = f64::from_bits(regs[b as usize]);
-                        let bx1 = f64::from_bits(regs[b as usize + 1]);
-                        let (r0, r1) = match sop {
-                            0xfdf0 => (ax0 + bx0, ax1 + bx1),
-                            0xfdf1 => (ax0 - bx0, ax1 - bx1),
-                            _ => (ax0 * bx0, ax1 * bx1),
-                        };
-                        regs[dst as usize] = r0.to_bits();
-                        regs[dst as usize + 1] = r1.to_bits();
-                    }
-                    _ => simd_binary_slow(sop, lane, regs, dst, a, b, simd_scratch)?,
-                },
-                RegOp::SimdTernary {
-                    op: sop,
-                    dst,
-                    a,
-                    b,
-                    c,
-                } => match sop {
-                    0xfd52 | 0xfa09..=0xfa0c => {
-                        let alo = regs[a as usize];
-                        let ahi = regs[a as usize + 1];
-                        let blo = regs[b as usize];
-                        let bhi = regs[b as usize + 1];
-                        let clo = regs[c as usize];
-                        let chi = regs[c as usize + 1];
-                        regs[dst as usize] = (alo & clo) | (blo & !clo);
-                        regs[dst as usize + 1] = (ahi & chi) | (bhi & !chi);
-                    }
-                    _ => simd_ternary_slow(sop, regs, dst, a, b, c, simd_scratch)?,
-                },
-                RegOp::Return { base, count } => {
                     if let Some(caller) = call_stack.pop() {
                         let released = cur_func.num_locals as usize;
                         let src_start = cur_reg_base + base as usize;
@@ -7718,10 +9473,21 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         } else if c > 2 {
                             reg_bank.copy_within(src_start..src_start + c, dst_start);
                         }
+                        let rc = ref_count as usize;
+                        if rc > 0 {
+                            let rsrc = cur_ref_base + ref_base as usize;
+                            let rdst = caller.ref_base + caller.ret_ref_dst_base as usize;
+                            if rc == 1 {
+                                ref_bank[rdst] = ref_bank[rsrc];
+                            } else {
+                                ref_bank.copy_within(rsrc..rsrc + rc, rdst);
+                            }
+                        }
                         active_local_slots = active_local_slots.saturating_sub(released);
                         cur_body = caller.body;
                         cur_handle = caller.func_handle;
                         cur_reg_base = caller.reg_base;
+                        cur_ref_base = caller.ref_base;
                         cur_logical_base = caller.logical_base;
                         ip = caller.ip;
                         if caller.inst_id == cur_inst {
@@ -7733,6 +9499,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             consts = &cur_func.consts;
                             mem0_64 = cur_func.mem0_is_64;
                             regs = &mut reg_bank[cur_reg_base..];
+                            refs = &mut ref_bank[cur_ref_base..];
                             continue;
                         } else {
                             cur_inst = caller.inst_id;
@@ -7746,7 +9513,12 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     if FUEL {
                         *fuel = Some(remaining_fuel);
                     }
-                    break InnerExit::ReturnTop { base, count };
+                    break InnerExit::ReturnTop {
+                        base,
+                        count,
+                        ref_base,
+                        ref_count,
+                    };
                 }
                 RegOp::TrapUnreachable { src_off } => {
                     if FUEL {
@@ -7769,6 +9541,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
     cursors.body = cur_body;
     cursors.handle = cur_handle;
     cursors.reg_base = cur_reg_base;
+    cursors.ref_base = cur_ref_base;
     cursors.logical_base = cur_logical_base;
     cursors.mem0 = cur_mem0;
     cursors.ip = ip;
@@ -7784,7 +9557,6 @@ fn run_loop<const FUEL: bool>(
     frames: &mut Vec<Frame>,
     stack: &mut Vec<Value>,
     fuel: &mut Option<u64>,
-    cancel: &std::sync::atomic::AtomicBool,
     mut cur_inst: usize,
     mut cur_body: usize,
     mut cur_handle: crate::Func,
@@ -7792,12 +9564,14 @@ fn run_loop<const FUEL: bool>(
     mut ip: usize,
     mut cur_block_fuel: u16,
     reg_bank: &mut Vec<u64>,
+    ref_bank: &mut Vec<RefValue>,
+    call_stack: &mut Vec<ActiveFrame>,
     max_stack_height: usize,
     max_call_depth: usize,
 ) -> Result<FastOutcome> {
-    let mut call_stack: Vec<ActiveFrame> = Vec::new();
     let mut simd_scratch: Vec<Value> = Vec::new();
     let mut cur_reg_base: usize = 0;
+    let mut cur_ref_base: usize = 0;
     let mut cur_mem0: Option<usize> = resolve_mem0(store, cur_inst);
     if let Some(i) = cur_mem0
         && store.mems[i].bytes.has_written_storage()
@@ -7808,18 +9582,8 @@ fn run_loop<const FUEL: bool>(
     let mut cache_p1_idx: usize = 1;
     let frames_len = frames.len();
     let store_id = store.id;
-    let max_local_slots_limit = {
-        let lim = &store.engine.config.limits;
-        let by_bytes = (lim.max_store_memory_bytes / std::mem::size_of::<Value>() as u64)
-            .min(usize::MAX as u64) as usize;
-        lim.max_total_locals.max(lim.max_locals).min(by_bytes)
-    };
-    let max_labels_limit = {
-        let lim = &store.engine.config.limits;
-        let by_bytes = (lim.max_store_memory_bytes / std::mem::size_of::<Label>() as u64)
-            .min(usize::MAX as u64) as usize;
-        lim.max_total_locals.max(lim.max_locals).min(by_bytes)
-    };
+    let max_local_slots_limit = store.engine.max_local_slots_limit;
+    let max_labels_limit = store.engine.max_labels_limit;
 
     macro_rules! refund_on_trap {
         ($src_off:expr) => {{
@@ -7836,13 +9600,15 @@ fn run_loop<const FUEL: bool>(
                 store,
                 frames,
                 stack,
-                &call_stack,
+                call_stack,
                 cur_inst,
                 cur_body,
                 cur_handle,
                 cur_reg_base,
+                cur_ref_base,
                 $meta,
                 reg_bank,
+                ref_bank,
             )?;
             return Ok(FastOutcome::Bailed);
         }};
@@ -7854,6 +9620,7 @@ fn run_loop<const FUEL: bool>(
             body: cur_body,
             handle: cur_handle,
             reg_base: cur_reg_base,
+            ref_base: cur_ref_base,
             logical_base: cur_logical_base,
             mem0: cur_mem0,
             ip,
@@ -7865,11 +9632,11 @@ fn run_loop<const FUEL: bool>(
             dispatch_inner::<FUEL, true>(
                 store,
                 &mut cursors,
-                &mut call_stack,
+                call_stack,
                 reg_bank,
+                ref_bank,
                 &mut simd_scratch,
                 fuel,
-                cancel,
                 cache_p0_idx,
                 cache_p1_idx,
                 frames_len,
@@ -7883,11 +9650,11 @@ fn run_loop<const FUEL: bool>(
             dispatch_inner::<FUEL, false>(
                 store,
                 &mut cursors,
-                &mut call_stack,
+                call_stack,
                 reg_bank,
+                ref_bank,
                 &mut simd_scratch,
                 fuel,
-                cancel,
                 cache_p0_idx,
                 cache_p1_idx,
                 frames_len,
@@ -7902,6 +9669,7 @@ fn run_loop<const FUEL: bool>(
         cur_body = cursors.body;
         cur_handle = cursors.handle;
         cur_reg_base = cursors.reg_base;
+        cur_ref_base = cursors.ref_base;
         cur_logical_base = cursors.logical_base;
         cur_mem0 = cursors.mem0;
         ip = cursors.ip;
@@ -8178,25 +9946,37 @@ fn run_loop<const FUEL: bool>(
                 callee_body,
                 arg_base,
                 arg_slots,
+                arg_ref_base,
+                arg_ref_slots,
                 logical_arg_start,
                 meta_at_call: _,
                 meta_after_call,
                 src_off,
             } => {
-                let cur_slots = store.instances[cur_inst].module.data.register_fast[cur_body]
-                    .get()
-                    .and_then(|o| o.as_deref())
-                    .unwrap()
-                    .slots as usize;
-                let (callee_slots, callee_num_locals, callee_local_reg_slots) = {
+                let (cur_slots, cur_ref_slots) = {
+                    let f = store.instances[cur_inst].module.data.register_fast[cur_body]
+                        .get()
+                        .and_then(|o| o.as_deref())
+                        .unwrap();
+                    (f.slots as usize, f.ref_slots as usize)
+                };
+                let (
+                    callee_slots,
+                    callee_ref_slots,
+                    callee_num_locals,
+                    callee_local_reg_slots,
+                    callee_ref_heaps,
+                ) = {
                     let f = store.instances[callee_inst].module.data.register_fast[callee_body]
                         .get()
                         .and_then(|o| o.as_deref())
                         .unwrap();
                     (
                         f.slots as usize,
+                        f.ref_slots as usize,
                         f.num_locals as usize,
                         f.local_reg_slots as usize,
+                        f.local_ref_heaps.clone(),
                     )
                 };
                 let new_reg_base = cur_reg_base + cur_slots;
@@ -8208,6 +9988,15 @@ fn run_loop<const FUEL: bool>(
                     }
                     reg_bank.resize(needed, 0);
                 }
+                let new_ref_base = cur_ref_base + cur_ref_slots;
+                let needed_ref = new_ref_base + callee_ref_slots;
+                if needed_ref > ref_bank.len() {
+                    if ref_bank.try_reserve(needed_ref - ref_bank.len()).is_err() {
+                        refund_on_trap!(src_off);
+                        return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
+                    }
+                    ref_bank.resize(needed_ref, RefValue::Null(crate::HeapType::None));
+                }
                 let arg_src = cur_reg_base + arg_base as usize;
                 let arg_slots_usize = arg_slots as usize;
                 if arg_slots_usize > 0 {
@@ -8216,6 +10005,15 @@ fn run_loop<const FUEL: bool>(
                 if callee_local_reg_slots > arg_slots_usize {
                     reg_bank[new_reg_base + arg_slots_usize..new_reg_base + callee_local_reg_slots]
                         .fill(0);
+                }
+                let arg_ref_src = cur_ref_base + arg_ref_base as usize;
+                let arg_ref_slots_usize = arg_ref_slots as usize;
+                if arg_ref_slots_usize > 0 {
+                    ref_bank
+                        .copy_within(arg_ref_src..arg_ref_src + arg_ref_slots_usize, new_ref_base);
+                }
+                for (i, &heap) in callee_ref_heaps.iter().enumerate() {
+                    ref_bank[new_ref_base + arg_ref_slots_usize + i] = RefValue::Null(heap);
                 }
                 store.acquire_local_slots(callee_num_locals);
                 let next_logical_base = cur_logical_base + logical_arg_start as usize;
@@ -8226,7 +10024,9 @@ fn run_loop<const FUEL: bool>(
                     func_handle: cur_handle,
                     ip,
                     reg_base: cur_reg_base,
+                    ref_base: cur_ref_base,
                     ret_dst_base: arg_base,
+                    ret_ref_dst_base: arg_ref_base,
                     logical_base: cur_logical_base,
                     meta_after_call,
                     mem0: cur_mem0,
@@ -8235,6 +10035,7 @@ fn run_loop<const FUEL: bool>(
                 cur_body = callee_body;
                 cur_handle = callee_handle;
                 cur_reg_base = new_reg_base;
+                cur_ref_base = new_ref_base;
                 cur_logical_base = next_logical_base;
                 cur_mem0 = callee_mem0;
                 if let Some(i) = cur_mem0
@@ -8252,6 +10053,8 @@ fn run_loop<const FUEL: bool>(
                 callee_body,
                 arg_base,
                 arg_slots,
+                arg_ref_base,
+                arg_ref_slots,
                 src_off,
             } => {
                 let cur_num_locals = store.instances[cur_inst].module.data.register_fast[cur_body]
@@ -8259,15 +10062,23 @@ fn run_loop<const FUEL: bool>(
                     .and_then(|o| o.as_deref())
                     .unwrap()
                     .num_locals as usize;
-                let (callee_slots, callee_num_locals, callee_local_reg_slots) = {
+                let (
+                    callee_slots,
+                    callee_ref_slots,
+                    callee_num_locals,
+                    callee_local_reg_slots,
+                    callee_ref_heaps,
+                ) = {
                     let f = store.instances[callee_inst].module.data.register_fast[callee_body]
                         .get()
                         .and_then(|o| o.as_deref())
                         .unwrap();
                     (
                         f.slots as usize,
+                        f.ref_slots as usize,
                         f.num_locals as usize,
                         f.local_reg_slots as usize,
+                        f.local_ref_heaps.clone(),
                     )
                 };
                 let needed = cur_reg_base + callee_slots;
@@ -8278,6 +10089,14 @@ fn run_loop<const FUEL: bool>(
                     }
                     reg_bank.resize(needed, 0);
                 }
+                let needed_ref = cur_ref_base + callee_ref_slots;
+                if needed_ref > ref_bank.len() {
+                    if ref_bank.try_reserve(needed_ref - ref_bank.len()).is_err() {
+                        refund_on_trap!(src_off);
+                        return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
+                    }
+                    ref_bank.resize(needed_ref, RefValue::Null(crate::HeapType::None));
+                }
                 let arg_src = cur_reg_base + arg_base as usize;
                 let arg_slots_usize = arg_slots as usize;
                 if arg_slots_usize > 0 && arg_src != cur_reg_base {
@@ -8286,6 +10105,15 @@ fn run_loop<const FUEL: bool>(
                 if callee_local_reg_slots > arg_slots_usize {
                     reg_bank[cur_reg_base + arg_slots_usize..cur_reg_base + callee_local_reg_slots]
                         .fill(0);
+                }
+                let arg_ref_src = cur_ref_base + arg_ref_base as usize;
+                let arg_ref_slots_usize = arg_ref_slots as usize;
+                if arg_ref_slots_usize > 0 && arg_ref_src != cur_ref_base {
+                    ref_bank
+                        .copy_within(arg_ref_src..arg_ref_src + arg_ref_slots_usize, cur_ref_base);
+                }
+                for (i, &heap) in callee_ref_heaps.iter().enumerate() {
+                    ref_bank[cur_ref_base + arg_ref_slots_usize + i] = RefValue::Null(heap);
                 }
                 store.release_local_slots(cur_num_locals);
                 store.acquire_local_slots(callee_num_locals);
@@ -8302,21 +10130,29 @@ fn run_loop<const FUEL: bool>(
                 cache_p1_idx = 1;
                 ip = 0;
             }
-            InnerExit::ReturnTop { base, count: _ } => {
+            InnerExit::ReturnTop {
+                base,
+                count: _,
+                ref_base,
+                ref_count: _,
+            } => {
                 let entry_frame = frames.last().unwrap();
                 let entry_base = entry_frame.base;
                 let entry_locals = entry_frame.locals.len();
                 stack.truncate(entry_base);
                 let regs = &reg_bank[cur_reg_base..];
+                let refs = &ref_bank[cur_ref_base..];
                 let cur_func = store.instances[cur_inst].module.data.register_fast[cur_body]
                     .get()
                     .and_then(|o| o.as_deref())
                     .unwrap();
                 let cur_num_locals = cur_func.num_locals as usize;
                 let mut off = base as usize;
+                let mut roff = ref_base as usize;
                 for &ty in &cur_func.result_types {
-                    stack.push(slots_to_value(ty, regs, off));
+                    stack.push(slots_to_value(ty, regs, off, refs, roff));
                     off += ty.slots() as usize;
+                    roff += ty.ref_slots() as usize;
                 }
                 // Reconcile `active_local_slots` to `entry_frame.locals.len()` (which `execution.rs`
                 // releases on `FastOutcome::Returned`) in case a tail call replaced the entry frame.
@@ -8337,7 +10173,7 @@ pub(crate) fn is_admitted(module: &Module, body: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, Engine, ExecutionPolicy, External, FeatureSet, Linker};
+    use crate::{Config, Engine, ExecutionPolicy, External, FeatureSet, Linker, RunOutcome};
 
     fn leb_u32(out: &mut Vec<u8>, mut v: u32) {
         loop {
@@ -9109,10 +10945,13 @@ mod tests {
             p
         };
         let funcs = vec![2, 0, 1];
-        // Initial 8 pages (512 KiB), max 512 pages (32 MiB) so grow past 16 MiB works.
+        // Initial 8 pages (512 KiB), max past DENSE_MAX_BYTES so grow-and-demote works.
         let mut mem = vec![1, 0x01];
         leb_u32(&mut mem, 8);
-        leb_u32(&mut mem, 512);
+        leb_u32(
+            &mut mem,
+            (crate::linear::DENSE_MAX_BYTES / 65536 + 64) as u32,
+        );
         let mut exps = vec![3];
         for (name, kind, idx) in [
             ("memory", 2u8, 0u32),
@@ -9217,9 +11056,10 @@ mod tests {
             .enumerate()
         {
             let mut cfg = Config::default();
-            cfg.limits.max_memory_pages = 512;
-            cfg.limits.max_memory_bytes = 32 << 20;
-            cfg.limits.max_store_memory_bytes = 32 << 20;
+            let dense_max_pages = crate::linear::DENSE_MAX_BYTES / 65536;
+            cfg.limits.max_memory_pages = (dense_max_pages + 64) as u64;
+            cfg.limits.max_memory_bytes = (crate::linear::DENSE_MAX_BYTES + (4 << 20)) as u64;
+            cfg.limits.max_store_memory_bytes = (crate::linear::DENSE_MAX_BYTES + (4 << 20)) as u64;
             let engine = Engine::with_execution_policy(cfg, policy).unwrap();
             let module = engine.compile(&wasm).unwrap();
             let mut store = Store::new(&engine);
@@ -9253,15 +11093,17 @@ mod tests {
                 .unwrap_err();
             assert_eq!(oob_err.kind, ErrorKind::Trap);
 
-            // Grow past DENSE_MAX_BYTES (8 + 256 = 264 pages = 16.5 MiB) -> demotes cleanly to sparse!
+            // Grow past DENSE_MAX_BYTES (8 + dense_max_pages pages) -> demotes cleanly to sparse!
+            let grow_pages = (crate::linear::DENSE_MAX_BYTES / 65536) as i32;
+            let probe_addr = ((grow_pages + 4) * 65536) + 12;
             let probe = store
-                .invoke(f_grow, &[Value::I32(256), Value::I32(260 * 65536 + 12)])
+                .invoke(f_grow, &[Value::I32(grow_pages), Value::I32(probe_addr)])
                 .unwrap();
             if policy == ExecutionPolicy::Register {
                 let mem_h = store.instances[0].mems[0];
                 assert!(
                     !store.mems[mem_h.0.index].bytes.is_dense(),
-                    "16.5 MiB memory (> DENSE_MAX_BYTES) must demote back to sparse"
+                    "memory grown past DENSE_MAX_BYTES must demote back to sparse"
                 );
             }
             // Subsequent multi-page run still matches after demotion!
@@ -10879,10 +12721,8 @@ mod tests {
         for _ in 0..BLOCKS {
             insns.extend_from_slice(&[0x02, 0x40, 0x0b]); // block; end
         }
-        for _ in 0..DEPTH {
-            insns.push(0x1a); // drop
-        }
-        insns.extend_from_slice(&[0x41, 0x2a, 0x0b]); // i32.const 42; end
+        insns.extend(std::iter::repeat_n(0x1a, DEPTH)); // drop
+        insns.extend_from_slice(&[0x41, 0x2a]); // i32.const 42 (`body()` appends final `end`)
 
         let wasm = wasm_mod(&[
             sec(1, &[1, 0x60, 0, 1, 0x7f]), // type 0: () -> i32
@@ -10925,7 +12765,7 @@ mod tests {
             sec(7, &[1, 1, b'f', 0x00, 0]),
             sec(10, &{
                 let mut c = vec![1];
-                c.extend_from_slice(&body(&[], &[0x41, 0x01, 0x41, 0x02, 0x6a, 0x0b]));
+                c.extend_from_slice(&body(&[], &[0x41, 0x01, 0x41, 0x02, 0x6a]));
                 c
             }),
         ]);
@@ -10947,6 +12787,548 @@ mod tests {
         assert!(
             module.data.register_fast[0].get().is_none(),
             "zero-remaining-fuel call must decline without compiling uncached body"
+        );
+    }
+
+    #[test]
+    fn fast_register_ref_ops_gc_root_survival_and_reentry_parity() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // Types:
+        //  0: (externref, i32) -> (i32, externref)   [entry & tail callee]
+        //  1: (i32) -> i32                           [host gc_and_reenter]
+        //  2: (externref) -> externref               [nested re-entry & indirect callee]
+        //  3: (funcref, i32) -> i32                  [ref.as_non_null / table / eq / traps]
+        //  4: (i32) -> (i32, externref)              [block signature for multi-value ref br]
+        let mut type_sec = vec![5];
+        type_sec.extend_from_slice(&[0x60, 2, 0x6f, 0x7f, 2, 0x7f, 0x6f]); // type 0
+        type_sec.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // type 1
+        type_sec.extend_from_slice(&[0x60, 1, 0x6f, 1, 0x6f]); // type 2
+        type_sec.extend_from_slice(&[0x60, 2, 0x70, 0x7f, 1, 0x7f]); // type 3
+        type_sec.extend_from_slice(&[0x60, 1, 0x7f, 2, 0x7f, 0x6f]); // type 4
+
+        // Import 0: env.gc_and_reenter : type 1
+        let mut imp_sec = vec![1];
+        imp_sec.extend_from_slice(&[3, b'e', b'n', b'v', 2, b'g', b'c', 0x00, 1]);
+
+        // Defined functions (indices 1..=4):
+        //  func 1 (body 0): type 0  ("entry")
+        //  func 2 (body 1): type 2  ("nested")
+        //  func 3 (body 2): type 0  ("tail_target")
+        //  func 4 (body 3): type 3  ("ref_edge")
+        let func_sec = vec![4, 0, 2, 0, 3];
+
+        // Tables:
+        //  table 0: externref, min 4
+        //  table 1: funcref, min 4
+        let tab_sec = vec![2, 0x6f, 0x00, 4, 0x70, 0x00, 4];
+
+        // Globals:
+        //  global 0: mut externref = ref.null extern
+        let glob_sec = vec![1, 0x6f, 0x01, 0xd0, 0x6f, 0x0b];
+
+        // Exports: "entry" -> 1, "nested" -> 2, "ref_edge" -> 4
+        let mut exp_sec = vec![3];
+        exp_sec.extend_from_slice(&[5, b'e', b'n', b't', b'r', b'y', 0x00, 1]);
+        exp_sec.extend_from_slice(&[6, b'n', b'e', b's', b't', b'e', b'd', 0x00, 2]);
+        exp_sec.extend_from_slice(&[8, b'r', b'e', b'f', b'_', b'e', b'd', b'g', b'e', 0x00, 4]);
+
+        // Element section: active table 1 offset 0 -> [func 2] (also declares func 2 & 3 for ref.func!)
+        let mut elem_sec = vec![2];
+        // Active elem for table 1 at offset 0: [func 2]
+        elem_sec.extend_from_slice(&[0x02, 1, 0x41, 0x00, 0x0b, 0x00, 1, 2]);
+        // Declarative elem for func 3 (so `ref.func 3` is valid)
+        elem_sec.extend_from_slice(&[0x03, 0x00, 1, 3]);
+
+        // Body 0 (func 1, "entry"): (local 0: externref, local 1: i32) -> (i32, externref)
+        // Locals: 1 externref (local 2)
+        // 1) local.set 2 = local.get 0 (keep a local ref copy)
+        // 2) table.set 0[1] = local.get 0; global.set 0 = table.get 0[1]
+        // 3) push local.get 0 onto operand stack, THEN call host func 0 (gc_and_reenter)
+        //    -> forces clean bailout + materialize_all with ref LIVE in BOTH local 2 and operand stack!
+        // 4) after host returns i32, use typed select (0x1c, 1, externref) between stack ref and global.get 0
+        // 5) call_indirect table 1 type 2 (func 2 "nested") passing selected externref
+        // 6) multi-value block returning (i32, externref) via br_if / br_table
+        // 7) return_call func 3 ("tail_target")
+        let body0 = body(
+            &[(1, 0x6f)],
+            &[
+                // local.set 2 = local.get 0
+                0x20, 0x00, 0x21, 0x02, // table.set 0[1] = local.get 2
+                0x41, 0x01, 0x20, 0x02, 0x26, 0x00, // global.set 0 = table.get 0[1]
+                0x41, 0x01, 0x25, 0x00, 0x24, 0x00,
+                // clear table 0[1] and global 0 BEFORE host collect so ONLY stack + local 2 root the externref!
+                0x41, 0x01, 0xd0, 0x6f, 0x26, 0x00, 0xd0, 0x6f, 0x24, 0x00,
+                // push local.get 0 onto operand stack (stays live across host call!)
+                0x20, 0x00, // call host env.gc(local.get 1)
+                0x20, 0x01, 0x10, 0x00,
+                // stack: [externref_on_stack, host_i32]
+                // local.set 1 = host_i32
+                0x21, 0x01, // push local.get 2, push local.get 1, typed select externref
+                0x20, 0x02, 0x20, 0x01, 0x1c, 0x01, 0x6f,
+                // call_indirect table 1 type 2 (idx 0 -> func 2 "nested")
+                0x41, 0x00, 0x11, 0x02, 0x01, // local.tee 2
+                0x22, 0x02,
+                // multi-value block (type 4: i32 -> (i32, externref))
+                0x1a, // drop tee copy
+                0x20, 0x01, // push i32 param to block
+                0x02, 0x04, // block (type 4)
+                // stack inside block: [i32]
+                0x20, 0x02, // push externref -> stack: [i32, externref]
+                // br_if 0 if local.get 1 != 0
+                0x20, 0x01, 0x0d, 0x00,
+                // fallthrough if local.get 1 == 0: drop ref, push ref.null extern
+                0x1a, 0xd0, 0x6f, 0x0b, // end block -> stack: [i32, externref]
+                // swap order to (externref, i32) for tail call to func 3:
+                0x21, 0x02, // save externref in local 2
+                0x21, 0x01, // save i32 in local 1
+                0x20, 0x02, // arg 0: externref
+                0x20, 0x01, // arg 1: i32
+                0x12, 0x03, // return_call func 3
+            ],
+        );
+
+        // Body 1 (func 2, "nested"): (externref) -> externref
+        // Exercises ref.is_null, select, table.set/get, global.set/get without host bailout!
+        let body1 = body(
+            &[],
+            &[
+                // table.set 0[2] = local.get 0
+                0x41, 0x02, 0x20, 0x00, 0x26, 0x00, // global.set 0 = table.get 0[2]
+                0x41, 0x02, 0x25, 0x00, 0x24, 0x00,
+                // return select(global.get 0, ref.null extern, i32.eqz(ref.is_null(local.get 0)))
+                0x23, 0x00, 0xd0, 0x6f, 0x20, 0x00, 0xd1, 0x45, 0x1c, 0x01, 0x6f,
+                // clear table 0[2] and global 0 so no extra root remains
+                0x21, 0x00, 0x41, 0x02, 0xd0, 0x6f, 0x26, 0x00, 0xd0, 0x6f, 0x24, 0x00, 0x20, 0x00,
+            ],
+        );
+
+        // Body 2 (func 3, "tail_target"): (externref, i32) -> (i32, externref)
+        let body2 = body(
+            &[],
+            &[
+                // push (i32 + (ref.is_null(arg0) ? 10 : 1), arg0)
+                0x20, 0x01, 0x41, 0x0a, 0x41, 0x01, 0x20, 0x00, 0xd1, 0x1b, 0x6a, 0x20, 0x00,
+            ],
+        );
+
+        // Body 3 (func 4, "ref_edge"): (funcref, i32) -> i32
+        // mode 0: ref.as_non_null(arg0) -> returns 7 (traps on null!)
+        // mode 1: table.get 1[99] -> traps OOB!
+        // mode 2: table.set 1[99] = ref.func 3 -> traps OOB!
+        // mode 3: ref.eq on eqref nulls + ref.func + ref.is_null
+        let body3 = body(
+            &[(1, 0x70)],
+            &[
+                // if mode == 0: ref.as_non_null(local 0); return 7
+                0x20, 0x01, 0x45, 0x04, 0x40, 0x20, 0x00, 0xd4, 0x1a, 0x41, 0x07, 0x0f, 0x0b,
+                // if mode == 1: table.get 1[99]; drop; return 1
+                0x20, 0x01, 0x41, 0x01, 0x46, 0x04, 0x40, 0x41, 0xe3, 0x00, 0x25, 0x01, 0x1a, 0x41,
+                0x01, 0x0f, 0x0b,
+                // if mode == 2: table.set 1[99] = ref.func 3; return 2
+                0x20, 0x01, 0x41, 0x02, 0x46, 0x04, 0x40, 0x41, 0xe3, 0x00, 0xd2, 0x03, 0x26, 0x01,
+                0x41, 0x02, 0x0f, 0x0b,
+                // mode 3: ref.func 3 -> local 2, check !is_null && ref.eq(null eq, null eq)
+                0xd2, 0x03, 0x21, 0x02, 0x20, 0x02, 0xd1, 0x45, // 1
+                0xd0, 0x6d, 0xd0, 0x6d, 0xd3, // ref.eq(ref.null eq, ref.null eq) == 1
+                0x6a, // 2
+                0xd0, 0x71, 0xd0, 0x6d, 0xd3, // ref.eq(ref.null none, ref.null eq) == 1
+                0x6a, // 3
+            ],
+        );
+
+        let mut code_sec = vec![4];
+        code_sec.extend_from_slice(&body0);
+        code_sec.extend_from_slice(&body1);
+        code_sec.extend_from_slice(&body2);
+        code_sec.extend_from_slice(&body3);
+
+        let wasm = wasm_mod(&[
+            sec(1, &type_sec),
+            sec(2, &imp_sec),
+            sec(3, &func_sec),
+            sec(4, &tab_sec),
+            sec(6, &glob_sec),
+            sec(7, &exp_sec),
+            sec(9, &elem_sec),
+            sec(10, &code_sec),
+        ]);
+
+        // 1) Verify admission AND GC root survival across host `store.collect()` + nested re-entry!
+        let mut cfg = Config::default();
+        cfg.features.gc = true;
+        cfg.features.function_references = true;
+        cfg.features.tail_call = true;
+        let reg_engine =
+            Engine::with_execution_policy(cfg.clone(), ExecutionPolicy::Register).unwrap();
+        let reg_mod = reg_engine.compile(&wasm).unwrap();
+        for b in 0..4 {
+            assert!(
+                is_admitted(&reg_mod, b),
+                "ref-bearing body {b} must be admitted to register fast tier"
+            );
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let reentered = Arc::new(AtomicUsize::new(0));
+        let nested_slot: Arc<std::sync::Mutex<Option<crate::Func>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let mut store = Store::new(&reg_engine);
+        let mut linker = Linker::new(&reg_engine);
+        let dropped_cb = Arc::clone(&dropped);
+        let reentered_cb = Arc::clone(&reentered);
+        let nested_cb = Arc::clone(&nested_slot);
+        let host_gc = store
+            .create_host_func_with_caller(
+                wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                move |caller, args| {
+                    let Value::I32(x) = args[0] else {
+                        return Err(trap("bad arg"));
+                    };
+                    // Trigger full GC while outer register frame holds owned externref in local + stack!
+                    caller.store.collect()?;
+                    assert!(
+                        !dropped_cb.load(Ordering::SeqCst),
+                        "owned externref rooted in register frame must NOT be collected during host callback"
+                    );
+                    // Re-enter a register-admitted ref function from inside the host callback!
+                    if let Some(nf) = *nested_cb.lock().unwrap() {
+                        let tmp = caller.store.create_extern_ref(999)?;
+                        let out = caller.store.invoke(nf, &[tmp])?;
+                        assert_eq!(out, RunOutcome::Returned(vec![tmp]));
+                        assert!(
+                            caller.store.fast_ref_bank.is_empty(),
+                            "nested fast::run must clear fast_ref_bank before returning"
+                        );
+                        reentered_cb.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(vec![Value::I32(x + 5)])
+                },
+            )
+            .unwrap();
+        linker.define("env", "gc", External::Func(host_gc)).unwrap();
+        let inst = linker.instantiate(&mut store, &reg_mod).unwrap();
+        let External::Func(f_entry) = inst.export(&store, "entry").unwrap() else {
+            panic!()
+        };
+        let External::Func(f_nested) = inst.export(&store, "nested").unwrap() else {
+            panic!()
+        };
+        *nested_slot.lock().unwrap() = Some(f_nested);
+
+        let owned = store
+            .create_owned_extern_ref(77, DropFlag(Arc::clone(&dropped)))
+            .unwrap();
+        // Release published roots so ONLY the invocation argument / active frame keeps `owned` alive!
+        store.release_published(&[owned]);
+        let out = store.invoke(f_entry, &[owned, Value::I32(10)]).unwrap();
+        assert_eq!(
+            out,
+            RunOutcome::Returned(vec![Value::I32(16), owned]),
+            "entry must return exact (i32, externref)"
+        );
+        assert_eq!(reentered.load(Ordering::SeqCst), 1);
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "returned published externref must still be live"
+        );
+        assert!(
+            store.fast_ref_bank.is_empty(),
+            "pooled fast_ref_bank must be empty after return"
+        );
+        // Now release published results and collect: proves zero leaked refs in `fast_ref_bank`!
+        store.release_published(&[owned]);
+        store.collect().unwrap();
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "owned externref must be reclaimed once published results are released (no stale pool leak)"
+        );
+
+        // 2) Fuel-prefix parity across `Decoded` vs `Register` for `ref_edge` (all modes including null & OOB traps)!
+        for (mode, fref) in [
+            (0, Value::Ref(RefValue::Null(crate::HeapType::Func))),
+            (1, Value::Ref(RefValue::Null(crate::HeapType::Func))),
+            (2, Value::Ref(RefValue::Null(crate::HeapType::Func))),
+            (3, Value::Ref(RefValue::Null(crate::HeapType::Func))),
+        ] {
+            for fuel_limit in 0u64..=40 {
+                let mut pair = Vec::with_capacity(2);
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut fcfg = Config::default();
+                    fcfg.features.gc = true;
+                    fcfg.features.function_references = true;
+                    fcfg.features.tail_call = true;
+                    fcfg.limits.fuel = Some(fuel_limit);
+                    let eng = Engine::with_execution_policy(fcfg, policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let mut lnk = Linker::new(&eng);
+                    let hfn = st
+                        .create_host_func_with_caller(
+                            wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                            |_c, a| Ok(vec![a[0]]),
+                        )
+                        .unwrap();
+                    lnk.define("env", "gc", External::Func(hfn)).unwrap();
+                    let ins = lnk.instantiate(&mut st, &m).unwrap();
+                    let External::Func(fe) = ins.export(&st, "ref_edge").unwrap() else {
+                        panic!()
+                    };
+                    let r = st.invoke(fe, &[fref, Value::I32(mode)]);
+                    if policy == ExecutionPolicy::Register {
+                        assert!(st.fast_ref_bank.is_empty());
+                    }
+                    pair.push((
+                        r.map_err(|e| (e.kind, e.trap_code, e.message)),
+                        st.current_fuel,
+                    ));
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "ref_edge parity mismatch for mode={mode}, fuel={fuel_limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_register_superinstructions_and_pure_leaf_parity() {
+        // Types:
+        //  0: (f64, f64, f64) -> f64         ("fma_check": acc + a * b)
+        //  1: (f64, f64, f64) -> f64         ("fma_rev": (a * b) + acc)
+        //  2: (i32, i32, i32) -> i32         ("scaled_mem": tests AddShl/ShlImm wrap + local mutation flush)
+        //  3: (i32, i32) -> i64              ("scaled_i64": tests LoadI64Shl3Add/StoreI64Shl3Add/LoadI64AddAddr)
+        //  4: (i32) -> (i32, i64)            ("multi_leaf": pure_leaf multi-result)
+        //  5: () -> ()                       ("void_leaf": pure_leaf 0-result)
+        let mut type_sec = vec![6];
+        type_sec.extend_from_slice(&[0x60, 3, 0x7c, 0x7c, 0x7c, 1, 0x7c]); // 0
+        type_sec.extend_from_slice(&[0x60, 3, 0x7c, 0x7c, 0x7c, 1, 0x7c]); // 1
+        type_sec.extend_from_slice(&[0x60, 3, 0x7f, 0x7f, 0x7f, 1, 0x7f]); // 2
+        type_sec.extend_from_slice(&[0x60, 2, 0x7f, 0x7f, 1, 0x7e]); // 3
+        type_sec.extend_from_slice(&[0x60, 1, 0x7f, 2, 0x7f, 0x7e]); // 4
+        type_sec.extend_from_slice(&[0x60, 0, 0]); // 5
+
+        let func_sec = vec![6, 0, 1, 2, 3, 4, 5];
+        let mem_sec = vec![1, 0x00, 1]; // 1 page (64 KiB)
+
+        let mut exp_sec = vec![6];
+        for (idx, name) in [
+            "fma_check",
+            "fma_rev",
+            "scaled_mem",
+            "scaled_i64",
+            "multi_leaf",
+            "void_leaf",
+        ]
+        .iter()
+        .enumerate()
+        {
+            exp_sec.push(name.len() as u8);
+            exp_sec.extend_from_slice(name.as_bytes());
+            exp_sec.push(0x00);
+            exp_sec.push(idx as u8);
+        }
+
+        // func 0 ("fma_check"): local.get 0 + (local.get 1 * local.get 2) -> exercises F64MulAdd + pure_leaf!
+        let b0 = body(&[], &[0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0xa2, 0xa0]);
+        // func 1 ("fma_rev"): (local.get 1 * local.get 2) + local.get 0 -> must preserve prod-first NaN order!
+        let b1 = body(&[], &[0x20, 0x01, 0x20, 0x02, 0xa2, 0x20, 0x00, 0xa0]);
+        // func 2 ("scaled_mem"): (base: i32, idx: i32, val: i32) -> i32
+        //  - stores val at (base + (idx << 2)) via StoreI32Shl2Add
+        //  - stores (val ^ 0x55) at (idx * 4 + offset 4) via StoreI32Shl2
+        //  - pushes lazy (base + (idx << 2)) onto stack, MUTATES base & idx BEFORE i32.load -> tests flush_local!
+        //  - returns sum of both loads!
+        let b2 = body(
+            &[(1, 0x7f)],
+            &[
+                // StoreI32Shl2Add: mem[base + (idx << 2)] = val
+                0x20, 0x00, 0x20, 0x01, 0x41, 0x02, 0x74, 0x6a, 0x20, 0x02, 0x36, 0x02, 0x00,
+                // StoreI32Shl2 (via i32.mul 4): mem[(idx * 4) + 4] = val ^ 0x55
+                0x20, 0x01, 0x41, 0x04, 0x6c, 0x20, 0x02, 0x41, 0xd5, 0x00, 0x73, 0x36, 0x02, 0x04,
+                // Push lazy AddShl(base, idx, 2) onto stack, THEN mutate local 0 and local 1!
+                0x20, 0x00, 0x20, 0x01, 0x41, 0x02, 0x74, 0x6a, 0x41, 0x7f, 0x21,
+                0x00, // local.set 0 = 127 (must flush lazy AddShl first!)
+                0x41, 0x7f, 0x21, 0x01, // local.set 1 = 127
+                0x28, 0x02, 0x00, // i32.load from flushed original address!
+                0x21, 0x03,
+                // LoadI32Shl2Add on mutated locals (127 + (127 << 2) = 635) + original loaded value
+                0x20, 0x00, 0x20, 0x01, 0x41, 0x02, 0x74, 0x6a, 0x28, 0x02, 0x00, 0x20, 0x03, 0x6a,
+            ],
+        );
+        // func 3 ("scaled_i64"): (base: i32, idx: i32) -> i64
+        // Exercises StoreI64Shl3Add, LoadI64Shl3Add, and LoadI64AddAddr!
+        let b3 = body(
+            &[],
+            &[
+                // mem64[base + (idx << 3)] = 0x1122334455667788
+                0x20, 0x00, 0x20, 0x01, 0x41, 0x03, 0x74, 0x6a, 0x42, 0x88, 0xef, 0x99, 0xab, 0xc4,
+                0xe6, 0xa8, 0x89, 0x11, // i64.const
+                0x37, 0x03, 0x00, // LoadI64Shl3Add
+                0x20, 0x00, 0x20, 0x01, 0x41, 0x03, 0x74, 0x6a, 0x29, 0x03, 0x00,
+                // LoadI64AddAddr (base + (idx * 8) where idx*8 is materialized via i32.mul 16 >> 1)
+                0x20, 0x00, 0x20, 0x01, 0x41, 0x10, 0x6c, 0x41, 0x01, 0x76, 0x6a, 0x29, 0x03, 0x00,
+                0x7c, // i64.add
+            ],
+        );
+        // func 4 ("multi_leaf"): (x: i32) -> (i32, i64)
+        let b4 = body(
+            &[],
+            &[
+                0x20, 0x00, 0x41, 0x07, 0x6a, 0x20, 0x00, 0xac, 0x42, 0x03, 0x7c,
+            ],
+        );
+        // func 5 ("void_leaf"): () -> ()
+        let b5 = body(&[], &[]);
+
+        let mut code_sec = vec![6];
+        for b in [&b0, &b1, &b2, &b3, &b4, &b5] {
+            code_sec.extend_from_slice(b);
+        }
+
+        let wasm = wasm_mod(&[
+            sec(1, &type_sec),
+            sec(3, &func_sec),
+            sec(5, &mem_sec),
+            sec(7, &exp_sec),
+            sec(10, &code_sec),
+        ]);
+
+        // Verify `pure_leaf` classification on unfueled Register engine!
+        let reg_eng =
+            Engine::with_execution_policy(Config::default(), ExecutionPolicy::Register).unwrap();
+        let reg_mod = reg_eng.compile(&wasm).unwrap();
+        assert!(get_or_compile_ref(&reg_mod, 0).unwrap().pure_leaf);
+        assert!(get_or_compile_ref(&reg_mod, 1).unwrap().pure_leaf);
+        assert!(!get_or_compile_ref(&reg_mod, 2).unwrap().pure_leaf);
+        assert!(get_or_compile_ref(&reg_mod, 4).unwrap().pure_leaf);
+        assert!(get_or_compile_ref(&reg_mod, 5).unwrap().pure_leaf);
+
+        // 1) F64MulAdd two-rounding IEEE-754 + signed zero + dual-NaN payload parity!
+        let one_plus_eps = f64::from_bits(1.0_f64.to_bits() + 1);
+        let one_minus_eps = f64::from_bits(1.0_f64.to_bits() - 1);
+        let qnan1 = 0x7ff8_0000_0000_0001_u64;
+        let qnan2 = 0x7ff8_0000_0000_0002_u64;
+        let fma_cases = [
+            (
+                (-1.0_f64).to_bits(),
+                one_plus_eps.to_bits(),
+                one_minus_eps.to_bits(),
+            ),
+            (
+                (-0.0_f64).to_bits(),
+                (-0.0_f64).to_bits(),
+                1.0_f64.to_bits(),
+            ),
+            (qnan1, qnan2, 1.0_f64.to_bits()),
+            (qnan2, qnan1, 1.0_f64.to_bits()),
+        ];
+        for fname in ["fma_check", "fma_rev"] {
+            for (acc, a, b) in fma_cases {
+                let mut pair = Vec::new();
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let eng = Engine::with_execution_policy(Config::default(), policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                    let External::Func(f) = ins.export(&st, fname).unwrap() else {
+                        panic!()
+                    };
+                    pair.push(
+                        st.invoke(f, &[Value::F64(acc), Value::F64(a), Value::F64(b)])
+                            .unwrap(),
+                    );
+                }
+                assert_eq!(pair[0], pair[1], "{fname} bit-exact parity mismatch");
+            }
+        }
+
+        // 2) Scaled memory superinstructions: 32-bit wrap-around + local mutation flush + OOB fuel prefix!
+        let mem_cases = [
+            (0i32, 3i32, 0x1234_5678i32),
+            // 32-bit wrap-around: base = 0xffff_fffc (-4), idx = 1 => (-4 + 4) as u32 = 0!
+            (-4i32, 1i32, 0x0bad_f00di32),
+            // OOB trap case: base = 65536, idx = 1
+            (65536i32, 1i32, 99i32),
+        ];
+        for (base, idx, val) in mem_cases {
+            for fuel in [
+                None,
+                Some(0),
+                Some(1),
+                Some(5),
+                Some(12),
+                Some(20),
+                Some(30),
+                Some(60),
+            ] {
+                let mut pair = Vec::new();
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut c = Config::default();
+                    c.limits.fuel = fuel;
+                    let eng = Engine::with_execution_policy(c, policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                    let External::Func(f2) = ins.export(&st, "scaled_mem").unwrap() else {
+                        panic!()
+                    };
+                    let External::Func(f3) = ins.export(&st, "scaled_i64").unwrap() else {
+                        panic!()
+                    };
+                    let r2 = st
+                        .invoke(f2, &[Value::I32(base), Value::I32(idx), Value::I32(val)])
+                        .map_err(|e| (e.kind, e.trap_code, e.message));
+                    let f2_rem = st.current_fuel;
+                    let r3 = st
+                        .invoke(f3, &[Value::I32(base), Value::I32(idx)])
+                        .map_err(|e| (e.kind, e.trap_code, e.message));
+                    let f3_rem = st.current_fuel;
+                    pair.push((r2, f2_rem, r3, f3_rem));
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "scaled mem parity mismatch for base={base}, idx={idx}, fuel={fuel:?}"
+                );
+            }
+        }
+
+        // 3) Pure leaf zero-frame entry: multi-result, void-result, error parity, and cancellation!
+        let mut st = Store::new(&reg_eng);
+        let ins = Linker::new(&reg_eng)
+            .instantiate(&mut st, &reg_mod)
+            .unwrap();
+        let External::Func(f_multi) = ins.export(&st, "multi_leaf").unwrap() else {
+            panic!()
+        };
+        let External::Func(f_void) = ins.export(&st, "void_leaf").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            st.invoke(f_multi, &[Value::I32(-10)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(-3), Value::I64(-7)])
+        );
+        assert_eq!(
+            st.invoke(f_void, &[]).unwrap(),
+            RunOutcome::Returned(vec![])
+        );
+        // Wrong argument type / count must fall through to canonical error!
+        assert_eq!(
+            st.invoke(f_multi, &[Value::I64(1)]).unwrap_err().kind,
+            ErrorKind::Host
+        );
+        assert_eq!(st.invoke(f_multi, &[]).unwrap_err().kind, ErrorKind::Host);
+        // Cancellation must still be honored before leaf execution!
+        st.cancellation_token().cancel();
+        assert_eq!(
+            st.invoke(f_multi, &[Value::I32(1)]).unwrap_err().kind,
+            ErrorKind::ResourceLimit
         );
     }
 }

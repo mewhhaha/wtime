@@ -150,6 +150,24 @@ pub struct Engine {
     policy: ExecutionPolicy,
     #[cfg(feature = "register-executor")]
     register_entry_threshold: Option<u64>,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    max_local_slots_limit: usize,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    max_labels_limit: usize,
     config: Config,
     canonical: Arc<std::sync::Mutex<canonical::CanonicalTypes>>,
 }
@@ -189,11 +207,47 @@ impl Engine {
         let mut canonical = canonical::CanonicalTypes::new(id);
         canonical.set_limit(config.limits.max_canonical_types);
         canonical.set_byte_limit(config.limits.max_canonical_type_bytes);
+        #[cfg(all(
+            feature = "register-executor",
+            not(any(
+                feature = "execution-reference",
+                feature = "performance-counters",
+                feature = "opcode-coverage"
+            ))
+        ))]
+        let (max_local_slots_limit, max_labels_limit) = {
+            let lim = &config.limits;
+            let by_val = (lim.max_store_memory_bytes / std::mem::size_of::<Value>() as u64)
+                .min(usize::MAX as u64) as usize;
+            let by_lbl = (lim.max_store_memory_bytes
+                / std::mem::size_of::<execution::Label>() as u64)
+                .min(usize::MAX as u64) as usize;
+            let base = lim.max_total_locals.max(lim.max_locals);
+            (base.min(by_val), base.min(by_lbl))
+        };
         Ok(Self {
             id,
             policy,
             #[cfg(feature = "register-executor")]
             register_entry_threshold: None,
+            #[cfg(all(
+                feature = "register-executor",
+                not(any(
+                    feature = "execution-reference",
+                    feature = "performance-counters",
+                    feature = "opcode-coverage"
+                ))
+            ))]
+            max_local_slots_limit,
+            #[cfg(all(
+                feature = "register-executor",
+                not(any(
+                    feature = "execution-reference",
+                    feature = "performance-counters",
+                    feature = "opcode-coverage"
+                ))
+            ))]
+            max_labels_limit,
             config,
             canonical: Arc::new(std::sync::Mutex::new(canonical)),
         })
@@ -255,23 +309,36 @@ impl Engine {
             Vec::new().into_boxed_slice()
         };
         // Each body's declared locals as runs of one type, with the type's
-        // zero, so that a call zeroes them without inspecting their types.
-        let local_runs = validated
-            .decoded()
-            .code
-            .iter()
-            .map(|body| {
-                let mut runs: Vec<(Value, u32)> = Vec::new();
-                for &t in &body.locals {
-                    let value = Value::zero(t);
-                    match runs.last_mut() {
-                        Some((zero, n)) if *zero == value && *n < u32::MAX => *n += 1,
-                        _ => runs.push((value, 1)),
-                    }
+        // zero, packed into a single flat slice so a call zeroes them without
+        // inspecting types and module compile avoids per-body heap allocations.
+        let mut local_runs_data: Vec<(Value, u32)> = Vec::new();
+        let mut local_runs_offsets: Vec<u32> =
+            Vec::with_capacity(validated.decoded().code.len() + 1);
+        local_runs_offsets.push(0);
+        for body in &validated.decoded().code {
+            let start = local_runs_data.len();
+            for &t in &body.locals {
+                let value = Value::zero(t);
+                if local_runs_data.len() > start
+                    && let Some((zero, n)) = local_runs_data.last_mut()
+                    && *zero == value
+                    && *n < u32::MAX
+                {
+                    *n += 1;
+                } else {
+                    local_runs_data.push((value, 1));
                 }
-                runs.into_boxed_slice()
-            })
-            .collect();
+            }
+            let end = u32::try_from(local_runs_data.len())
+                .map_err(|_| err(ErrorKind::ResourceLimit, "local run table overflow"))?;
+            local_runs_offsets.push(end);
+        }
+        let imported_funcs = validated
+            .decoded()
+            .imports
+            .iter()
+            .filter(|i| matches!(i.kind, ImportKind::Func(_) | ImportKind::ExactFunc(_)))
+            .count();
         let plans = execution::plan::FunctionPlans::prepare(&validated);
         let module = Module {
             data: Arc::new(ModuleData {
@@ -302,7 +369,9 @@ impl Engine {
                 ))]
                 register_fast_fuel: self.config.limits.fuel.is_some(),
                 control,
-                local_runs,
+                local_runs_data: local_runs_data.into_boxed_slice(),
+                local_runs_offsets: local_runs_offsets.into_boxed_slice(),
+                imported_funcs,
                 #[cfg(not(feature = "execution-reference"))]
                 lowered,
                 #[cfg(not(feature = "execution-reference"))]
@@ -348,11 +417,16 @@ impl Engine {
 
 /// For each function body and instruction: where a block, loop, if,
 /// try_table or try that starts there ends, and where its else, catch or
-/// delegate is. Stored as two u32s per instruction (8 bytes, not the 24 of
-/// `Option<(usize, Option<usize>)>`): a large module holds millions.
+/// delegate is. Built lazily per body on first use so cold module validation
+/// and preparation avoid allocating control maps for unexecuted functions.
+#[cfg(all(test, feature = "register-executor"))]
+type ControlOverride = (usize, usize, Option<(usize, Option<usize>)>);
+
 #[derive(Debug)]
 struct ControlMap {
-    bodies: Vec<Box<[ControlEntry]>>,
+    bodies: Box<[std::sync::OnceLock<Box<[ControlEntry]>>]>,
+    #[cfg(all(test, feature = "register-executor"))]
+    overrides: Vec<ControlOverride>,
 }
 #[derive(Clone, Copy, Debug)]
 struct ControlEntry {
@@ -370,8 +444,24 @@ impl ControlMap {
     /// The end and the else/catch position of the block starting at `pc` of
     /// `body`; `None` when no block starts there.
     #[inline]
-    fn get(&self, body: usize, pc: usize) -> Option<(usize, Option<usize>)> {
-        let entry = self.bodies.get(body)?.get(pc)?;
+    fn get(
+        &self,
+        validated: &ValidatedModule,
+        body: usize,
+        pc: usize,
+    ) -> Option<(usize, Option<usize>)> {
+        #[cfg(all(test, feature = "register-executor"))]
+        for &(b, p, val) in self.overrides.iter().rev() {
+            if b == body && p == pc {
+                return val;
+            }
+        }
+        let slot = self.bodies.get(body)?;
+        let entries = match slot.get() {
+            Some(entries) => entries,
+            None => slot.get_or_init(|| body_control_slice(&validated.decoded().code[body])),
+        };
+        let entry = entries.get(pc)?;
         (entry.end != ControlEntry::NONE).then(|| {
             (
                 entry.end as usize,
@@ -382,21 +472,14 @@ impl ControlMap {
     fn bytes(&self) -> usize {
         self.bodies
             .iter()
+            .filter_map(|slot| slot.get())
             .map(|body| std::mem::size_of_val::<[ControlEntry]>(body))
             .sum()
     }
     /// Test support: overwrite one entry, to corrupt metadata on purpose.
     #[cfg(all(test, feature = "register-executor"))]
     fn set(&mut self, body: usize, pc: usize, value: Option<(usize, Option<usize>)>) {
-        self.bodies[body][pc] = match value {
-            Some((end, other)) => ControlEntry {
-                end: u32::try_from(end).expect("test control position fits u32"),
-                other: other.map_or(ControlEntry::NONE, |other| {
-                    u32::try_from(other).expect("test control position fits u32")
-                }),
-            },
-            None => ControlEntry::EMPTY,
-        };
+        self.overrides.push((body, pc, value));
     }
 }
 #[derive(Debug)]
@@ -428,8 +511,12 @@ struct ModuleData {
     ))]
     register_fast_fuel: bool,
     control: ControlMap,
-    /// Each body's declared locals as (zero value, count) runs of one type.
-    local_runs: Box<[LocalRuns]>,
+    /// Flattened declared-local `(zero value, count)` runs across all bodies.
+    local_runs_data: Box<[(Value, u32)]>,
+    local_runs_offsets: Box<[u32]>,
+    /// Precomputed count of imported functions (`Func` or `ExactFunc`).
+    #[allow(dead_code)]
+    imported_funcs: usize,
     /// Lowered bodies for straight-line runs, built on first use and shared
     /// by every store using the module.
     #[cfg(not(feature = "execution-reference"))]
@@ -442,8 +529,18 @@ struct ModuleData {
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,
 }
-/// A body's declared locals as (zero value, count) runs of one type.
-type LocalRuns = Box<[(Value, u32)]>;
+impl ModuleData {
+    #[inline]
+    fn control_get(&self, body: usize, pc: usize) -> Option<(usize, Option<usize>)> {
+        self.control.get(&self.inner, body, pc)
+    }
+    #[inline]
+    fn local_runs(&self, body: usize) -> &[(Value, u32)] {
+        let start = self.local_runs_offsets[body] as usize;
+        let end = self.local_runs_offsets[body + 1] as usize;
+        &self.local_runs_data[start..end]
+    }
+}
 /// An immutable Engine-bound executable payload. Clones retain the same storage.
 #[derive(Clone, Debug)]
 pub struct Module {
@@ -764,6 +861,33 @@ pub struct Store {
     materialization_roundtrips: u64,
     #[cfg(feature = "performance-counters")]
     perf: perf::Counters,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    fast_reg_bank: Vec<u64>,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    fast_ref_bank: Vec<RefValue>,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    fast_call_stack: Vec<execution::register::fast::ActiveFrame>,
     current_fuel: Option<u64>,
     resume_fuel: Option<Option<u64>>,
     active_local_slots: usize,
@@ -934,6 +1058,33 @@ impl Store {
                 materialization_roundtrips: 0,
                 #[cfg(feature = "performance-counters")]
                 perf: perf::Counters::default(),
+                #[cfg(all(
+                    feature = "register-executor",
+                    not(any(
+                        feature = "execution-reference",
+                        feature = "performance-counters",
+                        feature = "opcode-coverage"
+                    ))
+                ))]
+                fast_reg_bank: Vec::new(),
+                #[cfg(all(
+                    feature = "register-executor",
+                    not(any(
+                        feature = "execution-reference",
+                        feature = "performance-counters",
+                        feature = "opcode-coverage"
+                    ))
+                ))]
+                fast_ref_bank: Vec::new(),
+                #[cfg(all(
+                    feature = "register-executor",
+                    not(any(
+                        feature = "execution-reference",
+                        feature = "performance-counters",
+                        feature = "opcode-coverage"
+                    ))
+                ))]
+                fast_call_stack: Vec::new(),
                 current_fuel: None,
                 resume_fuel: None,
                 active_local_slots: 0,
@@ -2056,31 +2207,28 @@ impl Store {
 
 fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
     let code = &module.decoded().code;
-    // Per body, in parallel as decoding and validation are; the first error
-    // in body order is reported.
-    let threads = module
-        .limits()
-        .body_threads(code.iter().map(|b| b.span.end - b.span.start).sum());
-    let maps =
-        wtime_types::parallel::map_ordered(code, threads, || (), |_, body| body_control(body));
-    let mut bodies = Vec::with_capacity(maps.len());
-    for map in maps {
-        bodies.push(map?)
+    for body in code {
+        if body.instructions.len() >= ControlEntry::NONE as usize {
+            return Err(err(
+                ErrorKind::ResourceLimit,
+                "function body too large for control map",
+            ));
+        }
     }
-    Ok(ControlMap { bodies })
+    let bodies = (0..code.len())
+        .map(|_| std::sync::OnceLock::new())
+        .collect();
+    Ok(ControlMap {
+        bodies,
+        #[cfg(all(test, feature = "register-executor"))]
+        overrides: Vec::new(),
+    })
 }
 
-/// The control entries of one body.
-fn body_control(body: &wtime_validate::FunctionBody) -> Result<Box<[ControlEntry]>> {
-    // Positions must fit below the u32 sentinel.
-    if body.instructions.len() >= ControlEntry::NONE as usize {
-        return Err(err(
-            ErrorKind::ResourceLimit,
-            "function body too large for control map",
-        ));
-    }
+/// Computes the control entries of one validated body on demand.
+fn body_control_slice(body: &wtime_validate::FunctionBody) -> Box<[ControlEntry]> {
     let mut map = vec![ControlEntry::EMPTY; body.instructions.len()];
-    let mut open: Vec<(usize, Option<usize>)> = vec![];
+    let mut open: Vec<(usize, Option<usize>)> = Vec::new();
     for (pc, i) in body.instructions.iter().enumerate() {
         match i.opcode {
             2..=4 | 6 | 0x1f => open.push((pc, None)),
@@ -2100,10 +2248,7 @@ fn body_control(body: &wtime_validate::FunctionBody) -> Result<Box<[ControlEntry
             _ => {}
         }
     }
-    if !open.is_empty() {
-        return Err(err(ErrorKind::Validation, "unclosed control block"));
-    }
-    Ok(map.into_boxed_slice())
+    map.into_boxed_slice()
 }
 
 impl Store {
@@ -3050,8 +3195,12 @@ mod lowering_and_bulk_acceptance {
             m.data.inner.decoded().code[0].instructions.as_ptr(),
             clone.data.inner.decoded().code[0].instructions.as_ptr()
         ));
-        let expected = m.data.control.bodies[0].len() * std::mem::size_of::<ControlEntry>();
+        assert_eq!(m.lowered_control_bytes(), 0);
+        assert!(m.data.control_get(0, 0).is_some());
+        let expected =
+            m.data.control.bodies[0].get().unwrap().len() * std::mem::size_of::<ControlEntry>();
         assert_eq!(m.lowered_control_bytes(), expected);
+        assert_eq!(clone.lowered_control_bytes(), expected);
         assert!(expected > 0);
         assert_eq!(m.source_bytes(), bytes.len());
     }

@@ -121,7 +121,7 @@ impl Store {
         locals
             .try_reserve_exact(body.locals.len())
             .map_err(|_| err(ErrorKind::ResourceLimit, "frame allocation failed"))?;
-        for &(zero, n) in module.data.local_runs[fun.body].iter() {
+        for &(zero, n) in module.data.local_runs(fun.body) {
             locals.resize(locals.len() + n as usize, zero);
         }
         #[cfg(feature = "compact-executor")]
@@ -139,8 +139,30 @@ impl Store {
         }
         #[allow(unused_mut)]
         let mut labels = vec![];
-        #[cfg(feature = "register-executor")]
+        #[cfg(all(
+            feature = "register-executor",
+            any(
+                feature = "execution-reference",
+                feature = "performance-counters",
+                feature = "opcode-coverage"
+            )
+        ))]
         let register = if self.engine.policy == ExecutionPolicy::Register {
+            register::activate_entry(self, fun.instance, fun.body, &locals, &mut labels)
+        } else {
+            None
+        };
+        #[cfg(all(
+            feature = "register-executor",
+            not(any(
+                feature = "execution-reference",
+                feature = "performance-counters",
+                feature = "opcode-coverage"
+            ))
+        ))]
+        let register = if self.engine.policy == ExecutionPolicy::Register
+            && self.engine.register_entry_threshold.is_some()
+        {
             register::activate_entry(self, fun.instance, fun.body, &locals, &mut labels)
         } else {
             None
@@ -229,6 +251,21 @@ impl Store {
             self.check_function_values(&self.funcs[k], &out, &ty.results)?;
             self.publish_values(&out);
             return Ok(RunOutcome::Returned(out));
+        }
+        #[cfg(all(
+            feature = "register-executor",
+            not(any(
+                feature = "execution-reference",
+                feature = "performance-counters",
+                feature = "opcode-coverage"
+            ))
+        ))]
+        if self.engine.policy == ExecutionPolicy::Register
+            && self.engine.register_entry_threshold.is_none()
+            && self.engine.config.limits.fuel.is_none()
+            && let Some(outcome) = register::fast::try_invoke_leaf(self, k, args)
+        {
+            return Ok(outcome);
         }
         #[cfg(feature = "performance-counters")]
         self.perf
@@ -634,8 +671,7 @@ impl Store {
                     let (a, r) = arity(&table.block, module);
                     let (end, _) = module
                         .data
-                        .control
-                        .get(frame.function.body, pc)
+                        .control_get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
                         .len()
@@ -700,8 +736,7 @@ impl Store {
                     };
                     let (end, other) = module
                         .data
-                        .control
-                        .get(frame.function.body, pc)
+                        .control_get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
                         .len()

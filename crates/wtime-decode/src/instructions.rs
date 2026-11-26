@@ -462,21 +462,31 @@ pub(crate) fn body_expression_bounded(
             Some(wb) => wb.avail_insns(),
             None => max_insns,
         };
-        let estimate = (r.remaining() / 3).min(1 << 16).min(avail);
+        let estimate = (r.remaining() / 2).clamp(1, 1 << 16).min(avail);
         let _ = instructions.try_reserve_exact(estimate);
         let _ = offsets.try_reserve_exact(estimate);
     }
+    // Check once that every byte offset within this body fits in `u32` (when the whole body
+    // end offset fits in `u32`, no per-instruction `try_from` check is needed).
+    let offsets_fit_u32 = r
+        .offset()
+        .checked_add(r.remaining())
+        .is_some_and(|end| end <= u32::MAX as usize);
     let mut depth = 1usize;
     let mut count = 0usize;
     let mut body_imm_elems = 0usize;
     let mut saw_data_count_op = false;
     while depth > 0 {
-        let offset = u32::try_from(r.offset()).map_err(|_| {
-            Error::new(
-                ErrorKind::ResourceLimit,
-                "module too large for u32 instruction offsets",
-            )
-        })?;
+        let offset = if offsets_fit_u32 {
+            r.offset() as u32
+        } else {
+            u32::try_from(r.offset()).map_err(|_| {
+                Error::new(
+                    ErrorKind::ResourceLimit,
+                    "module too large for u32 instruction offsets",
+                )
+            })?
+        };
         let mut reserved_this_insn = false;
         if keep {
             if count >= max_insns {
@@ -527,7 +537,7 @@ pub(crate) fn body_expression_bounded(
                 )?
             }
         };
-        if matches!(insn.opcode, 0xfc08 | 0xfc09) {
+        if insn.opcode >= 0xfc00 && matches!(insn.opcode, 0xfc08 | 0xfc09) {
             saw_data_count_op = true;
         }
         count = count.saturating_add(1);
@@ -588,6 +598,7 @@ pub fn decode_instruction(r: &mut Reader) -> Result<Instruction> {
     let mut step_imm = 0usize;
     read_instruction(r, &mut 1, true, None, &mut step_imm, &mut imm_over)
 }
+#[inline(always)]
 fn read_instruction(
     r: &mut Reader,
     depth: &mut usize,
@@ -597,8 +608,32 @@ fn read_instruction(
     imm_over: &mut bool,
 ) -> Result<Instruction> {
     let first = r.byte()?;
-    let mut opcode = first as u16;
     let immediate = match first {
+        0x00 | 0x01 | 0x05 | 0x0a | 0x0f | 0x1a | 0x1b | 0x45..=0xc4 | 0xd1 | 0xd3 | 0xd4 => {
+            Immediate::None
+        }
+        0x0b => {
+            *depth -= 1;
+            Immediate::None
+        }
+        0x0c
+        | 0x0d
+        | 0x10
+        | 0x12
+        | 0x14
+        | 0x15
+        | 0x20..=0x26
+        | 0x3f
+        | 0x40
+        | 0xd2
+        | 0xd5
+        | 0xd6
+        | 0x08
+        | 0xe0
+        | 0xe2 => Immediate::Index(r.u32()?),
+        0x41 => Immediate::I32(r.signed(32)? as i32),
+        0x42 => Immediate::I64(r.signed(64)?),
+        0x28..=0x3e => memarg(r)?,
         0x02..=0x04 => {
             *depth += 1;
             if matches!(r.peek()?, 0x63 | 0x64) {
@@ -607,13 +642,31 @@ fn read_instruction(
                 Immediate::Block(r.signed(33)?)
             }
         }
-        0x0b => {
-            *depth -= 1;
-            Immediate::None
-        }
-        0x0c | 0x0d | 0x10 | 0x12 | 0x14 | 0x15 | 0x20..=0x26 | 0xd2 | 0xd5 | 0xd6 | 0x08 => {
-            Immediate::Index(r.u32()?)
-        }
+        0x11 | 0x13 | 0xe1 | 0xe6 => Immediate::Pair(r.u32()?, r.u32()?),
+        0x43 => Immediate::F32(u32::from_le_bytes(r.take(4)?.try_into().unwrap())),
+        0x44 => Immediate::F64(u64::from_le_bytes(r.take(8)?.try_into().unwrap())),
+        0xd0 => Immediate::Heap(heap(r)?),
+        _ => return read_instruction_cold(first, r, depth, keep, imm_budget, step_imm, imm_over),
+    };
+    Ok(Instruction {
+        opcode: first as u16,
+        immediate,
+    })
+}
+
+#[cold]
+#[inline(never)]
+fn read_instruction_cold(
+    first: u8,
+    r: &mut Reader,
+    depth: &mut usize,
+    keep: bool,
+    imm_budget: Option<&mut ImmBudget<'_>>,
+    step_imm: &mut usize,
+    imm_over: &mut bool,
+) -> Result<Instruction> {
+    let mut opcode = first as u16;
+    let immediate = match first {
         0x0e => {
             let n = count(r)?;
             *step_imm = n;
@@ -646,7 +699,6 @@ fn read_instruction(
                 Immediate::None
             }
         }
-        0x11 | 0x13 => Immediate::Pair(r.u32()?, r.u32()?),
         0x1c => {
             let n = count(r)?;
             *step_imm = n;
@@ -678,13 +730,6 @@ fn read_instruction(
                 Immediate::None
             }
         }
-        0x28..=0x3e => memarg(r)?,
-        0x3f | 0x40 => Immediate::Index(r.u32()?),
-        0x41 => Immediate::I32(r.signed(32)? as i32),
-        0x42 => Immediate::I64(r.signed(64)?),
-        0x43 => Immediate::F32(u32::from_le_bytes(r.take(4)?.try_into().unwrap())),
-        0x44 => Immediate::F64(u64::from_le_bytes(r.take(8)?.try_into().unwrap())),
-        0xd0 => Immediate::Heap(heap(r)?),
         0xfc => {
             let sub = r.u32()?;
             if sub > 22 || sub == 18 {
@@ -790,8 +835,6 @@ fn read_instruction(
                 _ => return Err(r.error("unknown GC opcode")),
             }
         }
-        0xe0 | 0xe2 => Immediate::Index(r.u32()?),
-        0xe1 | 0xe6 => Immediate::Pair(r.u32()?, r.u32()?),
         0xe3..=0xe5 => {
             let ty = r.u32()?;
             let tag = if first == 0xe4 { Some(r.u32()?) } else { None };
@@ -889,7 +932,6 @@ fn read_instruction(
                 Immediate::None
             }
         }
-        0x0a => Immediate::None,
         0xfe => {
             let sub = r.u32()?;
             opcode = 0xfe00 | sub as u16;
@@ -903,9 +945,6 @@ fn read_instruction(
                 }
                 _ => return Err(r.error("unknown atomic opcode")),
             }
-        }
-        0x00 | 0x01 | 0x05 | 0x0f | 0x1a | 0x1b | 0x45..=0xc4 | 0xd1 | 0xd3 | 0xd4 => {
-            Immediate::None
         }
         _ => return Err(r.error("unknown opcode")),
     };

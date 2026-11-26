@@ -61,43 +61,47 @@ impl<'a> Reader<'a> {
         self.unsigned(if self.memory64 { 64 } else { 32 })
     }
     /// Returns the current absolute byte offset within the outer module buffer.
+    #[inline(always)]
     pub fn offset(&self) -> usize {
         self.base + self.pos
     }
     /// Returns the number of unread bytes remaining in this reader's slice.
+    #[inline(always)]
     pub fn remaining(&self) -> usize {
         self.bytes.len() - self.pos
     }
     /// Constructs a [`ErrorKind::Decode`] error annotated with the reader's current absolute offset.
+    #[cold]
+    #[inline(never)]
     pub fn error(&self, msg: &str) -> Error {
         Error::new(ErrorKind::Decode, msg).at(self.offset())
     }
     /// Reads and consumes a single byte.
+    #[inline(always)]
     pub fn byte(&mut self) -> Result<u8> {
-        let b = *self
-            .bytes
-            .get(self.pos)
-            .ok_or_else(|| self.error("unexpected end of input"))?;
+        let Some(&b) = self.bytes.get(self.pos) else {
+            return Err(self.error("unexpected end of input"));
+        };
         self.pos += 1;
         Ok(b)
     }
     /// Returns the next byte without advancing the cursor.
+    #[inline(always)]
     pub fn peek(&self) -> Result<u8> {
-        self.bytes
-            .get(self.pos)
-            .copied()
-            .ok_or_else(|| self.error("unexpected end of input"))
+        match self.bytes.get(self.pos) {
+            Some(&b) => Ok(b),
+            None => Err(self.error("unexpected end of input")),
+        }
     }
     /// Consumes and returns a slice of exactly `n` bytes.
+    #[inline]
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .ok_or_else(|| self.error("length overflow"))?;
-        let s = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or_else(|| self.error("length exceeds input"))?;
+        let Some(end) = self.pos.checked_add(n) else {
+            return Err(self.error("length overflow"));
+        };
+        let Some(s) = self.bytes.get(self.pos..end) else {
+            return Err(self.error("length exceeds input"));
+        };
         self.pos = end;
         Ok(s)
     }
@@ -121,18 +125,33 @@ impl<'a> Reader<'a> {
         }
     }
     /// Reads an unsigned LEB128 integer constrained to `bits` width (`1..=64`).
-    #[inline]
+    #[inline(always)]
     pub fn unsigned(&mut self, bits: u32) -> Result<u64> {
-        // One-byte encodings, the common case.
-        if (7..=64).contains(&bits)
-            && let Some(&b) = self.bytes.get(self.pos)
-            && b < 0x80
+        // One- and two-byte encodings cover >98% of Wasm indices and offsets.
+        if (14..=64).contains(&bits) {
+            if let Some(&b0) = self.bytes.get(self.pos) {
+                if b0 < 0x80 {
+                    self.pos += 1;
+                    return Ok(b0 as u64);
+                }
+                if let Some(&b1) = self.bytes.get(self.pos + 1)
+                    && b1 < 0x80
+                {
+                    self.pos += 2;
+                    return Ok(((b0 & 0x7f) as u64) | ((b1 as u64) << 7));
+                }
+            }
+        } else if (7..14).contains(&bits)
+            && let Some(&b0) = self.bytes.get(self.pos)
+            && b0 < 0x80
         {
             self.pos += 1;
-            return Ok(b as u64);
+            return Ok(b0 as u64);
         }
         self.unsigned_slow(bits)
     }
+    #[cold]
+    #[inline(never)]
     fn unsigned_slow(&mut self, bits: u32) -> Result<u64> {
         if bits == 0 || bits > 64 {
             return Err(self.error("unsupported integer width"));
@@ -154,17 +173,33 @@ impl<'a> Reader<'a> {
         Err(self.error("unterminated LEB"))
     }
     /// Reads a signed LEB128 integer constrained to `bits` width (`1..=64`).
-    #[inline]
+    #[inline(always)]
     pub fn signed(&mut self, bits: u32) -> Result<i64> {
-        if (7..=64).contains(&bits)
-            && let Some(&b) = self.bytes.get(self.pos)
-            && b < 0x80
+        if (14..=64).contains(&bits) {
+            if let Some(&b0) = self.bytes.get(self.pos) {
+                if b0 < 0x80 {
+                    self.pos += 1;
+                    return Ok((((b0 << 1) as i8) >> 1) as i64);
+                }
+                if let Some(&b1) = self.bytes.get(self.pos + 1)
+                    && b1 < 0x80
+                {
+                    self.pos += 2;
+                    let raw = ((b0 & 0x7f) as u64) | ((b1 as u64) << 7);
+                    return Ok(((raw << 50) as i64) >> 50);
+                }
+            }
+        } else if (7..14).contains(&bits)
+            && let Some(&b0) = self.bytes.get(self.pos)
+            && b0 < 0x80
         {
             self.pos += 1;
-            return Ok((((b << 1) as i8) >> 1) as i64);
+            return Ok((((b0 << 1) as i8) >> 1) as i64);
         }
         self.signed_slow(bits)
     }
+    #[cold]
+    #[inline(never)]
     fn signed_slow(&mut self, bits: u32) -> Result<i64> {
         if bits == 0 || bits > 64 {
             return Err(self.error("unsupported integer width"));
@@ -199,6 +234,7 @@ impl<'a> Reader<'a> {
         Err(self.error("unterminated LEB"))
     }
     /// Reads an unsigned 32-bit LEB128 integer.
+    #[inline(always)]
     pub fn u32(&mut self) -> Result<u32> {
         Ok(self.unsigned(32)? as u32)
     }

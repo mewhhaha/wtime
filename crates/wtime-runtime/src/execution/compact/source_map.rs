@@ -182,8 +182,7 @@ impl SourceMap {
                 2..=4 => {
                     let (end, other) = module
                         .data
-                        .control
-                        .get(function.body, pc)
+                        .control_get(function.body, pc)
                         .ok_or(Declined::Verification)?;
                     if end >= terminal
                         || end < pc

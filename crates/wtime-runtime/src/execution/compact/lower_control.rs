@@ -127,8 +127,7 @@ impl ControlPlans {
                     arities(&instruction.immediate, module, allowed, &mut remaining_work)?;
                 let (end, other) = module
                     .data
-                    .control
-                    .get(function.body, pc)
+                    .control_get(function.body, pc)
                     .ok_or(Declined::Plan)?;
                 if end < pc
                     || end >= code.instructions.len()

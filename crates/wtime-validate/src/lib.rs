@@ -102,11 +102,15 @@ fn index(i: &Instruction) -> Result<usize> {
 /// exactly the expected types. Returns false, changing nothing, for anything
 /// else, which then takes the general path with all its checks and errors.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn fast_instruction(
     s: &mut Stack,
     locals: &[ValType],
+    funcs: &[usize],
+    func_types: &[FuncType],
     globals: &[GlobalType],
     memories: &[MemoryType],
+    sign_ext: bool,
     i: &Instruction,
 ) -> bool {
     let Some(c) = s.controls.last() else {
@@ -121,6 +125,7 @@ fn fast_instruction(
     let two =
         |s: &Stack, t: ValType| n >= floor + 2 && s.values[n - 1] == t && s.values[n - 2] == t;
     match (i.opcode, &i.immediate) {
+        (0x01, _) => true,
         (0x20..=0x22, Immediate::Index(x)) => {
             let x = *x as usize;
             let (Some(&t), Some(true)) = (locals.get(x), s.initialized.get(x)) else {
@@ -142,6 +147,14 @@ fn fast_instruction(
             s.values.push(ValType::I64);
             true
         }
+        (0x43, Immediate::F32(_)) => {
+            s.values.push(ValType::F32);
+            true
+        }
+        (0x44, Immediate::F64(_)) => {
+            s.values.push(ValType::F64);
+            true
+        }
         (0x46..=0x4f | 0x6a..=0x78, _) if two(s, ValType::I32) => {
             s.values.truncate(n - 1);
             true
@@ -154,6 +167,62 @@ fn fast_instruction(
             s.values.truncate(n - 2);
             s.values.push(ValType::I32);
             true
+        }
+        (0x92..=0x98, _) if two(s, ValType::F32) => {
+            s.values.truncate(n - 1);
+            true
+        }
+        (0xa0..=0xa6, _) if two(s, ValType::F64) => {
+            s.values.truncate(n - 1);
+            true
+        }
+        (0x5b..=0x60, _) if two(s, ValType::F32) => {
+            s.values.truncate(n - 2);
+            s.values.push(ValType::I32);
+            true
+        }
+        (0x61..=0x66, _) if two(s, ValType::F64) => {
+            s.values.truncate(n - 2);
+            s.values.push(ValType::I32);
+            true
+        }
+        (0x10, Immediate::Index(fi)) => {
+            let Some(&ti) = funcs.get(*fi as usize) else {
+                return false;
+            };
+            let Some(ft) = func_types.get(ti) else {
+                return false;
+            };
+            let np = ft.params.len();
+            if n < floor + np {
+                return false;
+            }
+            if s.values[n - np..] != ft.params[..] {
+                return false;
+            }
+            let nr = ft.results.len();
+            let base = n - np;
+            if base.saturating_add(nr) > s.max_stack_height {
+                return false;
+            }
+            if nr > 0 {
+                s.types.charge(nr);
+                if s.types.exhausted() {
+                    return false;
+                }
+            }
+            s.values.truncate(base);
+            s.values.extend_from_slice(&ft.results);
+            true
+        }
+        (0x1b, _) if n >= floor + 3 && s.values[n - 1] == ValType::I32 => {
+            let t = s.values[n - 2];
+            if t == s.values[n - 3] && !matches!(t, ValType::Ref(_)) {
+                s.values.truncate(n - 2);
+                true
+            } else {
+                false
+            }
         }
         (0x23, Immediate::Index(x)) => {
             let Some(t) = globals.get(*x as usize) else {
@@ -215,18 +284,39 @@ fn fast_instruction(
             s.values.truncate(n - 1);
             true
         }
-        // Unary operators: (operand, result).
-        (0x45 | 0x50 | 0xa7 | 0xac | 0xad, _) => {
+        // Unary operators & scalar conversions: (operand, result).
+        (0x45 | 0x50 | 0x67..=0x69 | 0x79..=0x7b | 0x8b..=0x91 | 0x99..=0x9f | 0xa7..=0xbf, _) => {
             let (a, r) = match i.opcode {
-                0x45 => (ValType::I32, ValType::I32),
+                0x45 | 0x67..=0x69 => (ValType::I32, ValType::I32),
                 0x50 | 0xa7 => (ValType::I64, ValType::I32),
-                _ => (ValType::I32, ValType::I64),
+                0x79..=0x7b => (ValType::I64, ValType::I64),
+                0x8b..=0x91 => (ValType::F32, ValType::F32),
+                0x99..=0x9f => (ValType::F64, ValType::F64),
+                0xa8 | 0xa9 | 0xbc => (ValType::F32, ValType::I32),
+                0xaa | 0xab => (ValType::F64, ValType::I32),
+                0xac | 0xad => (ValType::I32, ValType::I64),
+                0xae | 0xaf => (ValType::F32, ValType::I64),
+                0xb0 | 0xb1 | 0xbd => (ValType::F64, ValType::I64),
+                0xb2 | 0xb3 | 0xbe => (ValType::I32, ValType::F32),
+                0xb4 | 0xb5 => (ValType::I64, ValType::F32),
+                0xb6 => (ValType::F64, ValType::F32),
+                0xb7 | 0xb8 => (ValType::I32, ValType::F64),
+                0xb9 | 0xba | 0xbf => (ValType::I64, ValType::F64),
+                _ => (ValType::F32, ValType::F64),
             };
             if !(n > floor && s.values[n - 1] == a) {
                 return false;
             }
             s.values[n - 1] = r;
             true
+        }
+        (0xc0..=0xc4, _) if sign_ext => {
+            let a = if i.opcode <= 0xc1 {
+                ValType::I32
+            } else {
+                ValType::I64
+            };
+            n > floor && s.values[n - 1] == a
         }
         _ => false,
     }
@@ -757,15 +847,25 @@ fn validate_module_shell<'a>(c: &mut Context<'a>) -> Result<()> {
             c.constant(offset, t.index_type.val_type())?
         }
         for x in &e.init {
-            if !features.reference_types
-                && x.len() == 2
+            if x.len() == 2
                 && x[0].opcode == 0xd2
                 && x[1].opcode == 0x0b
+                && (!features.reference_types
+                    || (e.ty.heap == HeapType::Func && c.limits.max_stack_height >= 1))
             {
                 check(
                     index(&x[0])? < c.funcs.len(),
                     "element function index out of bounds",
                 )?;
+                if features.reference_types {
+                    c.types.charge(2);
+                    if c.types.exhausted() {
+                        return Err(Error::new(
+                            ErrorKind::ResourceLimit,
+                            "type validation work budget exhausted",
+                        ));
+                    }
+                }
             } else {
                 c.constant(x, ValType::Ref(e.ty))?;
             }
@@ -1337,23 +1437,37 @@ impl Context<'_> {
             stack_peak: 0,
             maximum_nesting: 1,
         };
+        let max_stack = self.limits.max_stack_height;
+        let sign_ext = self.features.sign_extension;
+        let funcs = &self.funcs;
+        let func_types = &self.m.types;
+        let globals = &self.globals;
+        let memories = &self.memories;
         for (n, i) in b.instructions.iter().enumerate() {
-            // Absolute module offset for error reports; a body built without
-            // offsets reports its own start.
-            let at = b
-                .offsets
-                .get(n)
-                .map_or(b.span.start, |&offset| offset as usize);
-            if !fast_instruction(s, locals, &self.globals, &self.memories, i) {
-                self.instruction(s, locals, i).map_err(|e| e.at(at))?;
+            if !fast_instruction(s, locals, funcs, func_types, globals, memories, sign_ext, i) {
+                self.instruction(s, locals, i).map_err(|e| {
+                    let at = b
+                        .offsets
+                        .get(n)
+                        .map_or(b.span.start, |&offset| offset as usize);
+                    e.at(at)
+                })?;
             }
-            bounds.stack_peak = bounds.stack_peak.max(s.values.len());
-            bounds.maximum_nesting = bounds.maximum_nesting.max(s.controls.len());
-            budget(
-                s.values.len() <= self.limits.max_stack_height
-                    && s.controls.len() <= self.limits.max_stack_height,
-                "validation stack limit exceeded",
-            )?;
+            let vlen = s.values.len();
+            if vlen > bounds.stack_peak {
+                bounds.stack_peak = vlen;
+                budget(vlen <= max_stack, "validation stack limit exceeded")?;
+            }
+            let clen = s.controls.len();
+            if clen > bounds.maximum_nesting {
+                bounds.maximum_nesting = clen;
+                budget(clen <= max_stack, "validation stack limit exceeded")?;
+            } else if max_stack == 0 && clen > 0 {
+                return Err(Error::new(
+                    ErrorKind::ResourceLimit,
+                    "validation stack limit exceeded",
+                ));
+            }
         }
         check(s.controls.is_empty(), "unterminated function")?;
         Ok(bounds)
