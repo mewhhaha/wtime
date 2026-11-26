@@ -2,6 +2,89 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.6] - 2026-11-26
+
+Multi-tenant & side-channel hardening sweep (all opt-in with zero overhead on
+default local execution), full 236-opcode fixed-width Wasm SIMD128 support in
+`wtime-aot --backend c`, and multi-round compiler/runtime soundness and
+resource-cap hardening across `wtime-runtime`, `wtime-aot` (`x64`, `aarch64`,
+`c`), and `wtime-aot-rt`. Core crates remain `#![forbid(unsafe_code)]` with
+zero external production dependencies.
+
+### Core libraries & CLI (`wtime-types`, `wtime-runtime`, `wtime-cli`)
+- **Opt-in untrusted-worker profile**:
+  - Added `FeatureSet::untrusted_worker()` (stable core with `threads: false`
+    to disallow concurrent atomic counter-thread timers),
+    `ResourceLimits::untrusted_worker()` (16 MiB module cap, 64 MiB memory,
+    32 MiB GC, 16 MiB continuations, 65,536 tables/objects, 1,024 call depth,
+    16,384 stack height, 10M default fuel, `compile_threads = 1`),
+    `Config::untrusted_worker()`, and `wtime-cli --profile untrusted-worker`
+    (preserving explicit `--fuel` overrides).
+  - Documented explicit architectural-vs-OS isolation boundaries on `Config`
+    and `Store` and added [`docs/architecture/security-model.md`](docs/architecture/security-model.md).
+- **GC, continuation, and `register-executor` resource-cap hardening**:
+  - Borrowed `&SubType` in `gc_type` instead of cloning `StructType::fields`
+    per struct access; eliminated `max_gc_bytes` double-charging and temporary
+    allocations in in-place `array.init_data`/`array.init_elem`, using fallible
+    `try_reserve_exact` and validated zero-alloc `copy_fields` for `array.copy`.
+  - Filtered continuation capture/bind/install root vectors to traceable
+    reference values only, pre-checked GC object and byte budgets before
+    allocating, and switched to fallible reservations.
+  - Bounded `register-executor` fast-tier per-function `BlockMeta`,
+    `stack_types`, `static_labels`, and `CompileLabel` prefix copies with
+    fallible reservations (cleanly declining to `Decoded` on limit) and
+    declined uncached multi-instruction bodies when zero fuel remains.
+
+### Ahead-of-time compiler (`tools/wtime-aot`) & runtime (`tools/wtime-aot/rt`)
+- **Full 236-opcode fixed-width Wasm SIMD128 in `--backend c`**:
+  - Implemented all remaining 227 standard Wasm SIMD128 opcodes (including
+    `f32x4.convert_i32x4_u` / `0xfdfb`) with packed vector helpers,
+    rounding-mode isolation, and interpreter-oracle parity across all 236
+    opcodes.
+- **Opt-in clock policies (`--no-clock`, `--clock-coarsen-ns N`)**:
+  - Added `--no-clock` and `--clock-coarsen-ns N` across standalone `x64`,
+    standalone `aarch64`, and Goose (`wtime-aot-rt`, `ClockPolicy` /
+    `Policy::clock`): returns WASI `EACCES` (`2`) / `0` when denied and
+    truncates timestamps to multiples of `N` ns when coarsened.
+  - Standalone `x64`/`aarch64` ELFs omit `clock_gettime` syscalls completely
+    under `--no-clock` when `--timing-json` is absent, and Goose skips internal
+    `Instant::now()` / `SystemTime::now()` calls when `--timing-json` and
+    `--time-limit` are absent.
+- **Opt-in Spectre v1 hardening (`--spectre-mitigations`)**:
+  - Added `--spectre-mitigations` to `wtime-aot` and `wtime-aot build`, bound
+    into all top-level build and incremental cache keys (`x64-inc` v12,
+    `a64-inc` v7) and fail-closed on `--backend rust`.
+  - Emits `lfence` (`x64`), `dsb nsh; isb` (`aarch64`), and `WT_SPEC_BARRIER()`
+    (`c`) after linear memory, extra-memory, `memory64`, table, `call_indirect`,
+    `call_ref`, `br_table`, and all 9 shared native bulk memory/table helper
+    bounds checks (`memory.copy`/`fill`/`init`, extra-memory `copy`/`fill`,
+    `table.init`/`copy`/`grow`/`fill`), disabling guard-page elision and Stage 2
+    loop BCE/vectorization.
+  - Scrubs committed linear memory, extra memories, active dynamic tables, used
+    exception-slab bytes, and `Ctx` (followed by a barrier) before `munmap`/`free`
+    in `blot_aot_drop` and failing `blot_aot_new` cleanup across `x64`,
+    `aarch64`, and `c`.
+  - Published exact Linux `seccomp-bpf` syscall tables and measured native
+    `x86_64` Spectre overhead benchmarks in `docs/architecture/security-model.md`
+    and `docs/wtime-aot/x64-abi.md`.
+- **Multi-round AOT & Goose sandbox hardening**:
+  - `x64`: handled `CallCatch`/`CallIndirectCatch` effects in LICM, GVN/BCE,
+    and load forwarding; unified multi-memory growth tracking; fixed extra-memory
+    `Op::StoreMem` spilled/rematerialized pointer double-basing by `R14`; fixed
+    SIMD spill-aliasing (`prep_bin_swap`, `emit_ucmp`, `i8x16.lt_u`, `extmul`,
+    `i64x2.mul`); guarded `memory64` page shifts, strict `u64` parsing, and
+    `readlinkat` truncation.
+  - `aarch64` & `c`: bounded AArch64 `regalloc` backward liveness memory/work
+    with `CompileBudget` LIFO reservations; preserved store/table-set address
+    scratch and `AddScaled` operands across large spills; fixed `v128.bitselect`,
+    `pmin`/`pmax`, and shuffle spill-aliasing; rolled back all mappings on
+    `blot_aot_new` failure; enforced `!in_call` in C Blot ABI 8; hardened cache
+    reads and staged build cleanup.
+  - `wtime-aot-rt` Goose host: charged `goose.write` output limits before
+    reading guest memory with fallible reservations, bounded stdin reads with
+    EINTR-safe `INPUT_LIMIT`, and hardened file opens via verified parent-dirfd
+    paths (`O_NOFOLLOW|O_NONBLOCK|O_NOCTTY`) and post-open allowlist checks.
+
 ## [0.1.5] - 2026-11-25
 
 Wasm 3.0 `table64` & `function-references` (`call_ref`, `return_call_ref`,
