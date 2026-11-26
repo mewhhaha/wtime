@@ -25,7 +25,9 @@ use std::collections::BinaryHeap;
 
 use super::asm::{Reg, VReg};
 use crate::x64::ir::{FloatBinOp, IntBinOp, IrFunc, Op, SimdLaneKind, Term, Ty, ValRange};
-use crate::x64::module::{CompileBudget, MAX_FRAME_BYTES};
+use crate::x64::module::{
+    CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS,
+};
 
 pub const CALL_GP_ARGS: [Reg; 8] = [
     Reg::X0,
@@ -477,6 +479,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut block_end = vec![0u32; n_ord];
     let mut def_pos = vec![u32::MAX; n_vals];
     let mut def_block = vec![u32::MAX; n_vals];
+    let mut cross_block = vec![false; n_vals];
     let mut last_use = vec![0u32; n_vals];
     let mut val_remat: Vec<Option<A64RematConst>> = vec![None; n_vals];
     let mut clobbers: Vec<(u32, u32, u32)> = Vec::new();
@@ -502,7 +505,11 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         pos += 2;
         for inst in &bb.insts {
             inst.op.for_each_use(&ir.val_pool, |v| {
-                last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                let vi = v.0 as usize;
+                last_use[vi] = last_use[vi].max(pos);
+                if def_block[vi] != oi as u32 {
+                    cross_block[vi] = true;
+                }
             });
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
@@ -562,10 +569,18 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 ..
             } => {
                 for &v in ir.pool_slice(args) {
-                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                    let vi = v.0 as usize;
+                    last_use[vi] = last_use[vi].max(pos);
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
                 }
                 for &v in ir.pool_slice(catch_args) {
-                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos + 1);
+                    let vi = v.0 as usize;
+                    last_use[vi] = last_use[vi].max(pos + 1);
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
                 }
                 has_calls = true;
                 clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
@@ -589,12 +604,24 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 catch_args,
                 ..
             } => {
-                last_use[idx.0 as usize] = last_use[idx.0 as usize].max(pos);
+                let ii = idx.0 as usize;
+                last_use[ii] = last_use[ii].max(pos);
+                if def_block[ii] != oi as u32 {
+                    cross_block[ii] = true;
+                }
                 for &v in ir.pool_slice(args) {
-                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                    let vi = v.0 as usize;
+                    last_use[vi] = last_use[vi].max(pos);
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
                 }
                 for &v in ir.pool_slice(catch_args) {
-                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos + 1);
+                    let vi = v.0 as usize;
+                    last_use[vi] = last_use[vi].max(pos + 1);
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
                 }
                 has_calls = true;
                 clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
@@ -613,7 +640,11 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             }
             Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
                 bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                    let vi = v.0 as usize;
+                    last_use[vi] = last_use[vi].max(pos);
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
                 });
                 let arg_tys: Vec<Ty> = ir
                     .pool_slice(args)
@@ -628,7 +659,11 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             }
             _ => {
                 bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                    let vi = v.0 as usize;
+                    last_use[vi] = last_use[vi].max(pos);
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
                 });
             }
         }
@@ -636,97 +671,165 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         block_end[oi] = pos;
     }
 
-    // 3. Exact backward dataflow liveness over all values to extend intervals across loops/branches.
-    let words = n_vals.div_ceil(64).max(1);
-    let mut live_use = vec![0u64; n_ord * words];
-    let mut live_def = vec![0u64; n_ord * words];
-    let mut live_in = vec![0u64; n_ord * words];
-    let mut live_out = vec![0u64; n_ord * words];
-    for (oi, &bid) in block_order.iter().enumerate() {
-        let bb = &ir.blocks[bid as usize];
-        let base = oi * words;
-        for &p in &bb.params {
-            let v = p.0 as usize;
-            live_def[base + (v >> 6)] |= 1u64 << (v & 63);
-        }
-        for inst in &bb.insts {
-            inst.op.for_each_use(&ir.val_pool, |v| {
-                let vi = v.0 as usize;
-                if (live_def[base + (vi >> 6)] & (1u64 << (vi & 63))) == 0 {
-                    live_use[base + (vi >> 6)] |= 1u64 << (vi & 63);
-                }
-            });
-            if let Some(r) = inst.res {
-                let vi = r.0 as usize;
-                live_def[base + (vi >> 6)] |= 1u64 << (vi & 63);
-            }
-            match inst.op {
-                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
-                    for &r in ir.pool_slice(rets) {
-                        let vi = r.0 as usize;
-                        live_def[base + (vi >> 6)] |= 1u64 << (vi & 63);
-                    }
-                }
-                _ => {}
-            }
-        }
-        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-            let vi = v.0 as usize;
-            if (live_def[base + (vi >> 6)] & (1u64 << (vi & 63))) == 0 {
-                live_use[base + (vi >> 6)] |= 1u64 << (vi & 63);
-            }
-        });
-    }
-    let mut changed = true;
-    while changed {
-        if let Some(bg) = budget {
-            bg.check_deadline()?;
-        }
-        changed = false;
-        for oi in (0..n_ord).rev() {
-            let bid = block_order[oi] as usize;
-            let base = oi * words;
-            for &sid in &succs[bid] {
-                let soi = ord_of[sid as usize];
-                if soi == u32::MAX {
-                    continue;
-                }
-                let sbase = (soi as usize) * words;
-                for w in 0..words {
-                    let nv = live_out[base + w] | live_in[sbase + w];
-                    if nv != live_out[base + w] {
-                        live_out[base + w] = nv;
-                        changed = true;
-                    }
-                }
-            }
-            for w in 0..words {
-                let nv = live_use[base + w] | (live_out[base + w] & !live_def[base + w]);
-                if nv != live_in[base + w] {
-                    live_in[base + w] = nv;
-                    changed = true;
-                }
-            }
+    // 3. Exact backward dataflow liveness over cross-block values, bounded by
+    //    `MAX_LIVENESS_BYTES`, `MAX_LIVENESS_WORK_UNITS`, and `CompileBudget`.
+    let mut cb_id = vec![u32::MAX; n_vals];
+    let mut cb_vals: Vec<u32> = Vec::new();
+    for vi in 0..n_vals {
+        if cross_block[vi] && def_pos[vi] != u32::MAX {
+            cb_id[vi] = cb_vals.len() as u32;
+            cb_vals.push(vi as u32);
         }
     }
     let mut iv_start = def_pos.clone();
     let mut iv_end = last_use;
-    for oi in 0..n_ord {
-        let base = oi * words;
-        let bs = block_start[oi];
-        let be = block_end[oi];
-        for w in 0..words {
-            let mut bits = live_in[base + w] | live_out[base + w];
-            while bits != 0 {
-                let tz = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let vi = (w << 6) + tz;
-                if vi < n_vals && def_pos[vi] != u32::MAX {
-                    if (live_in[base + w] & (1u64 << tz)) != 0 && bs < iv_start[vi] {
-                        iv_start[vi] = bs;
+    let n_cb = cb_vals.len();
+    if n_cb > 0 {
+        let words = n_cb.div_ceil(64);
+        let matrix_words = n_ord
+            .checked_mul(words)
+            .ok_or("aarch64: liveness table size overflow")?;
+        let matrix_bytes = matrix_words
+            .checked_mul(4 * std::mem::size_of::<u64>())
+            .ok_or("aarch64: liveness table size overflow")?;
+        if matrix_bytes > MAX_LIVENESS_BYTES {
+            return Err(format!(
+                "aarch64: function {} liveness matrix ({matrix_bytes} B) exceeds cap {MAX_LIVENESS_BYTES} B",
+                ir.func_index
+            ));
+        }
+        // Declare `_liveness_guard` BEFORE the four matrices so LIFO drop order guarantees all
+        // liveness buffers are freed before releasing the budget reservation.
+        let _liveness_guard = match budget {
+            Some(b) => Some(b.reserve_liveness(matrix_bytes)?),
+            None => None,
+        };
+        let alloc_zero_u64 = |len: usize| -> Result<Vec<u64>, String> {
+            let mut v = Vec::new();
+            v.try_reserve_exact(len)
+                .map_err(|_| "aarch64: liveness table allocation failed".to_string())?;
+            v.resize(len, 0u64);
+            Ok(v)
+        };
+        let mut live_use = alloc_zero_u64(matrix_words)?;
+        let mut live_def = alloc_zero_u64(matrix_words)?;
+        let mut live_in = alloc_zero_u64(matrix_words)?;
+        let mut live_out = alloc_zero_u64(matrix_words)?;
+        for (oi, &bid) in block_order.iter().enumerate() {
+            let bb = &ir.blocks[bid as usize];
+            let base = oi * words;
+            for &p in &bb.params {
+                let ci = cb_id[p.0 as usize];
+                if ci != u32::MAX {
+                    let ci = ci as usize;
+                    live_def[base + (ci >> 6)] |= 1u64 << (ci & 63);
+                }
+            }
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    let ci = cb_id[v.0 as usize];
+                    if ci != u32::MAX {
+                        let ci = ci as usize;
+                        if (live_def[base + (ci >> 6)] & (1u64 << (ci & 63))) == 0 {
+                            live_use[base + (ci >> 6)] |= 1u64 << (ci & 63);
+                        }
                     }
-                    if (live_out[base + w] & (1u64 << tz)) != 0 && be > iv_end[vi] {
-                        iv_end[vi] = be;
+                });
+                if let Some(r) = inst.res {
+                    let ci = cb_id[r.0 as usize];
+                    if ci != u32::MAX {
+                        let ci = ci as usize;
+                        live_def[base + (ci >> 6)] |= 1u64 << (ci & 63);
+                    }
+                }
+                match inst.op {
+                    Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                        for &r in ir.pool_slice(rets) {
+                            let ci = cb_id[r.0 as usize];
+                            if ci != u32::MAX {
+                                let ci = ci as usize;
+                                live_def[base + (ci >> 6)] |= 1u64 << (ci & 63);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                let ci = cb_id[v.0 as usize];
+                if ci != u32::MAX {
+                    let ci = ci as usize;
+                    if (live_def[base + (ci >> 6)] & (1u64 << (ci & 63))) == 0 {
+                        live_use[base + (ci >> 6)] |= 1u64 << (ci & 63);
+                    }
+                }
+            });
+        }
+        let mut work_units: usize = 0;
+        let mut changed = true;
+        while changed {
+            if let Some(bg) = budget {
+                bg.check_deadline()?;
+            }
+            changed = false;
+            for oi in (0..n_ord).rev() {
+                let bid = block_order[oi] as usize;
+                let base = oi * words;
+                for &sid in &succs[bid] {
+                    let soi = ord_of[sid as usize];
+                    if soi == u32::MAX {
+                        continue;
+                    }
+                    work_units = work_units.saturating_add(words);
+                    if work_units > MAX_LIVENESS_WORK_UNITS {
+                        return Err(format!(
+                            "aarch64: function {} liveness work ({work_units}) exceeds cap {MAX_LIVENESS_WORK_UNITS}",
+                            ir.func_index
+                        ));
+                    }
+                    let sbase = (soi as usize) * words;
+                    for w in 0..words {
+                        let nv = live_out[base + w] | live_in[sbase + w];
+                        if nv != live_out[base + w] {
+                            live_out[base + w] = nv;
+                            changed = true;
+                        }
+                    }
+                }
+                work_units = work_units.saturating_add(words);
+                if work_units > MAX_LIVENESS_WORK_UNITS {
+                    return Err(format!(
+                        "aarch64: function {} liveness work ({work_units}) exceeds cap {MAX_LIVENESS_WORK_UNITS}",
+                        ir.func_index
+                    ));
+                }
+                for w in 0..words {
+                    let nv = live_use[base + w] | (live_out[base + w] & !live_def[base + w]);
+                    if nv != live_in[base + w] {
+                        live_in[base + w] = nv;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for oi in 0..n_ord {
+            let base = oi * words;
+            let bs = block_start[oi];
+            let be = block_end[oi];
+            for w in 0..words {
+                let mut bits = live_in[base + w] | live_out[base + w];
+                while bits != 0 {
+                    let tz = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let ci = (w << 6) + tz;
+                    if ci < n_cb {
+                        let vi = cb_vals[ci] as usize;
+                        if (live_in[base + w] & (1u64 << tz)) != 0 && bs < iv_start[vi] {
+                            iv_start[vi] = bs;
+                        }
+                        if (live_out[base + w] & (1u64 << tz)) != 0 && be > iv_end[vi] {
+                            iv_end[vi] = be;
+                        }
                     }
                 }
             }

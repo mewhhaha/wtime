@@ -17,6 +17,10 @@ use std::sync::{Arc, atomic::Ordering};
 const MAX_FN_INSNS: usize = 262_144;
 const MAX_FN_SLOTS: usize = 32_768;
 const MAX_BLOCK_OPS: usize = 64;
+const MAX_FAST_BLOCKS: usize = 65_536;
+const MAX_FAST_STACK_TYPES: usize = 262_144;
+const MAX_FAST_STATIC_LABELS: usize = 65_536;
+const MAX_FAST_PREFIX_COPIES: usize = 262_144;
 const BLOCK_META_NONE: u32 = u32::MAX;
 const PAGE_BITS: u32 = 16;
 
@@ -1400,8 +1404,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
 
     // Check block signatures and compute basic-block starts.
     let fuel_blocks = module.data.register_fast_fuel;
-    let mut is_block_start = vec![false; n + 1];
-    let mut is_check_block = vec![false; n + 1];
+    let mut is_block_start = Vec::new();
+    is_block_start.try_reserve_exact(n + 1).ok()?;
+    is_block_start.resize(n + 1, false);
+    let mut is_check_block = Vec::new();
+    is_check_block.try_reserve_exact(n + 1).ok()?;
+    is_check_block.resize(n + 1, false);
     let mut has_loops_or_calls = false;
     is_block_start[0] = true;
     is_check_block[0] = true;
@@ -1454,7 +1462,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     let mem0_is_64 = declared_memory(module, 0).is_some_and(|m| m.index_type == IndexType::I64);
     let mem0_unshared = declared_memory(module, 0).is_some_and(|m| !m.shared);
 
-    let mut ops: Vec<RegOp> = Vec::with_capacity(n);
+    let mut ops: Vec<RegOp> = Vec::new();
+    ops.try_reserve_exact(n).ok()?;
     let mut consts: Vec<u64> = Vec::new();
     let mut v128_consts: Vec<[u64; 2]> = Vec::new();
     let mut simd_masks: Vec<[u8; 16]> = Vec::new();
@@ -1470,15 +1479,19 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     let mut static_labels: Vec<StaticLabel> = Vec::new();
 
     // Map Wasm source_pc -> emitted RegOp ip (for jump targets).
-    let mut pc_to_ip: Vec<u32> = vec![u32::MAX; n + 1];
+    let mut pc_to_ip: Vec<u32> = Vec::new();
+    pc_to_ip.try_reserve_exact(n + 1).ok()?;
+    pc_to_ip.resize(n + 1, u32::MAX);
     // (ip_of_branch_op, target_source_pc)
     let mut branch_patches: Vec<(usize, usize)> = Vec::new();
     // (table_targets_index, target_source_pc)
     let mut table_patches: Vec<(usize, usize)> = Vec::new();
 
     let mut max_slots: usize = local_reg_slots_usize + bounds.stack_peak;
-    let mut vstack: Vec<VSlot> = Vec::with_capacity(bounds.stack_peak);
+    let mut vstack: Vec<VSlot> = Vec::new();
+    vstack.try_reserve_exact(bounds.stack_peak).ok()?;
     let mut labels: Vec<CompileLabel> = Vec::new();
+    let mut prefix_copies: usize = 0;
     let mut dead = false;
 
     let mut in_block = false;
@@ -1493,18 +1506,48 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             .map_or(local_reg_slots, |s| s.slot_off + s.ty.slots())
     };
 
+    let copy_prefix = |vstack: &[VSlot],
+                       base_height: usize,
+                       prefix_copies: &mut usize|
+     -> Option<Vec<FastType>> {
+        let next = prefix_copies.checked_add(base_height)?;
+        if next > MAX_FAST_PREFIX_COPIES {
+            return None;
+        }
+        let mut prefix = Vec::new();
+        prefix.try_reserve_exact(base_height).ok()?;
+        prefix.extend(vstack[..base_height].iter().map(|s| s.ty));
+        *prefix_copies = next;
+        Some(prefix)
+    };
+
     let push_meta = |source_pc: usize,
                      vstack: &[VSlot],
                      labels: &[CompileLabel],
                      blocks: &mut Vec<BlockMeta>,
                      stack_types: &mut Vec<FastType>,
                      static_labels: &mut Vec<StaticLabel>|
-     -> u32 {
-        let stack_start = stack_types.len() as u32;
+     -> Option<u32> {
+        if blocks.len() >= MAX_FAST_BLOCKS
+            || stack_types
+                .len()
+                .checked_add(vstack.len())
+                .is_none_or(|n| n > MAX_FAST_STACK_TYPES)
+            || static_labels
+                .len()
+                .checked_add(labels.len())
+                .is_none_or(|n| n > MAX_FAST_STATIC_LABELS)
+        {
+            return None;
+        }
+        blocks.try_reserve(1).ok()?;
+        stack_types.try_reserve(vstack.len()).ok()?;
+        static_labels.try_reserve(labels.len()).ok()?;
+        let stack_start = u32::try_from(stack_types.len()).ok()?;
         for s in vstack {
             stack_types.push(s.ty);
         }
-        let labels_start = static_labels.len() as u32;
+        let labels_start = u32::try_from(static_labels.len()).ok()?;
         for l in labels {
             static_labels.push(StaticLabel {
                 start: l.start as u32,
@@ -1515,16 +1558,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 loop_: l.loop_,
             });
         }
-        let idx = blocks.len() as u32;
+        let idx = u32::try_from(blocks.len()).ok()?;
         blocks.push(BlockMeta {
             source_pc: source_pc as u32,
             fuel: 0,
             stack_start,
-            stack_len: vstack.len() as u16,
+            stack_len: u16::try_from(vstack.len()).ok()?,
             labels_start,
-            labels_len: labels.len() as u16,
+            labels_len: u16::try_from(labels.len()).ok()?,
         });
-        idx
+        Some(idx)
     };
 
     let close_block = |in_block: &mut bool,
@@ -1640,6 +1683,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     let param_slots = params.iter().map(|t| t.slots()).sum();
                     let result_slots = results.iter().map(|t| t.slots()).sum();
                     let (end, other) = module.data.control.get(body, pc)?;
+                    labels.try_reserve(1).ok()?;
                     labels.push(CompileLabel {
                         start: pc + 1,
                         end,
@@ -1698,8 +1742,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                         &mut blocks,
                                         &mut stack_types,
                                         &mut static_labels,
-                                    );
-                                    blocks[meta as usize].labels_len += 1;
+                                    )?;
+                                    if static_labels.len() >= MAX_FAST_STATIC_LABELS {
+                                        return None;
+                                    }
+                                    static_labels.try_reserve(1).ok()?;
+                                    blocks[meta as usize].labels_len =
+                                        blocks[meta as usize].labels_len.checked_add(1)?;
                                     static_labels.push(StaticLabel {
                                         start: label.start as u32,
                                         end: label.end as u32,
@@ -1761,7 +1810,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 cur_block_ip = Some(ops.len());
                 cur_block_meta = meta;
                 if is_check_block[pc] || hit_max_ops {
@@ -1789,7 +1838,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                )
+                )?
             };
             in_block = false;
             cur_block_meta = BLOCK_META_NONE;
@@ -1888,7 +1937,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 } else {
                     slot_top(&vstack)
                 };
-                let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
+                let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
+                labels.try_reserve(1).ok()?;
                 labels.push(CompileLabel {
                     start: pc + 1,
                     end,
@@ -1935,7 +1985,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 } else {
                     slot_top(&vstack)
                 };
-                let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
+                let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
+                labels.try_reserve(1).ok()?;
                 labels.push(CompileLabel {
                     start: pc + 1,
                     end,
@@ -2313,7 +2364,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
                 let arg_base = if arg_count > 0 {
                     vstack[arg_start].slot_off
@@ -2328,7 +2379,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 let call_idx = call_sites.len() as u32;
                 call_sites.push(CallSite {
                     func_idx: fi,
@@ -2384,7 +2435,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 let idx_slot = vstack.pop()?;
                 let index_reg = idx_slot.slot_off;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
@@ -2401,7 +2452,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 let call_idx = call_indirect_sites.len() as u32;
                 call_indirect_sites.push(CallIndirectSite {
                     type_idx,
@@ -2457,7 +2508,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
                 let arg_base = if arg_count > 0 {
                     vstack[arg_start].slot_off
@@ -2507,7 +2558,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                     &mut stack_types,
                     &mut static_labels,
-                );
+                )?;
                 let idx_slot = vstack.pop()?;
                 let index_reg = idx_slot.slot_off;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
@@ -3399,7 +3450,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             } else {
                                 slot_top(&vstack)
                             };
-                            let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
+                            let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
+                            labels.try_reserve(1).ok()?;
                             labels.push(CompileLabel {
                                 start: pc + 2,
                                 end,
@@ -3661,7 +3713,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             } else {
                                 slot_top(&vstack)
                             };
-                            let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
+                            let prefix = copy_prefix(&vstack, base_height, &mut prefix_copies)?;
+                            labels.try_reserve(1).ok()?;
                             labels.push(CompileLabel {
                                 start: pc + 2,
                                 end,
@@ -5269,6 +5322,30 @@ pub(crate) fn run(
             .fetch_add(1, Ordering::Relaxed)
             + 1;
         if count < threshold {
+            return Ok(FastOutcome::Declined);
+        }
+    }
+
+    // Avoid compiling an uncached multi-instruction body when zero fuel remains
+    // (op 0 was already charged by `execution.rs`, so a multi-op body will bail
+    // immediately to `Decoded`).
+    if *fuel == Some(0) {
+        let entry_mod = &store.instances[entry_inst].module;
+        let already_compiled = entry_mod
+            .data
+            .register_fast
+            .get(entry_body)
+            .and_then(|s| s.get())
+            .is_some();
+        if !already_compiled
+            && entry_mod
+                .data
+                .inner
+                .module()
+                .codes
+                .get(entry_body)
+                .is_none_or(|c| c.instructions.len() > 1)
+        {
             return Ok(FastOutcome::Declined);
         }
     }
@@ -10786,5 +10863,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fast_compile_declines_quadratic_metadata_and_zero_remaining_fuel() {
+        // Push 512 i32s onto the operand stack, then run 600 empty block/end pairs
+        // (512 * 600 = 307,200 > MAX_FAST_PREFIX_COPIES and MAX_FAST_STACK_TYPES),
+        // drop the 512 values, and return 42.
+        const DEPTH: usize = 512;
+        const BLOCKS: usize = 600;
+        let mut insns = Vec::with_capacity(DEPTH * 2 + BLOCKS * 3 + 4);
+        for _ in 0..DEPTH {
+            insns.extend_from_slice(&[0x41, 0x01]); // i32.const 1
+        }
+        for _ in 0..BLOCKS {
+            insns.extend_from_slice(&[0x02, 0x40, 0x0b]); // block; end
+        }
+        for _ in 0..DEPTH {
+            insns.push(0x1a); // drop
+        }
+        insns.extend_from_slice(&[0x41, 0x2a, 0x0b]); // i32.const 42; end
+
+        let wasm = wasm_mod(&[
+            sec(1, &[1, 0x60, 0, 1, 0x7f]), // type 0: () -> i32
+            sec(3, &[1, 0]),                // func 0 -> type 0
+            sec(7, &[1, 1, b'f', 0x00, 0]), // export "f" -> func 0
+            sec(10, &{
+                let mut c = vec![1];
+                c.extend_from_slice(&body(&[], &insns));
+                c
+            }),
+        ]);
+
+        for fuel in [None, Some(50_000)] {
+            let mut cfg = Config::default();
+            cfg.limits.fuel = fuel;
+            let engine = Engine::with_execution_policy(cfg, ExecutionPolicy::Register).unwrap();
+            let module = engine.compile(&wasm).unwrap();
+            assert!(
+                !is_admitted(&module, 0),
+                "quadratic metadata amplification must cleanly decline register fast tier (fuel={fuel:?})"
+            );
+            let mut store = Store::new(&engine);
+            let inst = Linker::new(&engine)
+                .instantiate(&mut store, &module)
+                .unwrap();
+            let External::Func(f) = inst.export(&store, "f").unwrap() else {
+                panic!()
+            };
+            assert_eq!(
+                store.invoke(f, &[]).unwrap(),
+                RunOutcome::Returned(vec![Value::I32(42)])
+            );
+        }
+
+        // With `fuel = Some(1)`, op 0 is charged by `execution.rs` leaving 0 remaining fuel;
+        // an uncached multi-instruction function must decline before populating `register_fast`.
+        let small_wasm = wasm_mod(&[
+            sec(1, &[1, 0x60, 0, 1, 0x7f]),
+            sec(3, &[1, 0]),
+            sec(7, &[1, 1, b'f', 0x00, 0]),
+            sec(10, &{
+                let mut c = vec![1];
+                c.extend_from_slice(&body(&[], &[0x41, 0x01, 0x41, 0x02, 0x6a, 0x0b]));
+                c
+            }),
+        ]);
+        let mut cfg = Config::default();
+        cfg.limits.fuel = Some(1);
+        let engine = Engine::with_execution_policy(cfg, ExecutionPolicy::Register).unwrap();
+        let module = engine.compile(&small_wasm).unwrap();
+        let mut store = Store::new(&engine);
+        let inst = Linker::new(&engine)
+            .instantiate(&mut store, &module)
+            .unwrap();
+        let External::Func(f) = inst.export(&store, "f").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            store.invoke(f, &[]).unwrap_err().kind,
+            ErrorKind::ResourceLimit
+        );
+        assert!(
+            module.data.register_fast[0].get().is_none(),
+            "zero-remaining-fuel call must decline without compiling uncached body"
+        );
     }
 }

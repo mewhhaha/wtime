@@ -4784,3 +4784,98 @@ fn a64_hardening_long_export_name_and_blot_new_cleanup_and_inc_cache_symlink() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[test]
+fn aarch64_regalloc_enforces_liveness_memory_cap_and_filters_cross_block() {
+    use crate::x64::ir::{Block, BlockId, Inst, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange};
+    use crate::x64::module::CompileBudget;
+
+    // Build an IrFunc with 1,025 reachable blocks and 32,768 cross-block SSA values:
+    // 1025 * (32768 / 64) * 32 B = 16,793,600 B > MAX_LIVENESS_BYTES (16 MiB).
+    // `aarch64::regalloc::allocate` must reject this up front before allocating the bitsets.
+    const N_VALS: u32 = 32_768;
+    const N_BLOCKS: u32 = 1_025;
+    let mut val_tys = Vec::with_capacity(N_VALS as usize * 2);
+    let mut blocks = Vec::with_capacity(N_BLOCKS as usize);
+
+    // Block 0 defines N_VALS constants and jumps to block 1.
+    let mut b0_insts = Vec::with_capacity(N_VALS as usize);
+    for i in 0..N_VALS {
+        val_tys.push(Ty::I32);
+        b0_insts.push(Inst {
+            res: Some(Val(i)),
+            op: Op::ConstI32(i as i32),
+        });
+    }
+    blocks.push(Block {
+        params: Vec::new(),
+        insts: b0_insts,
+        term: Term::Jump {
+            target: BlockId(1),
+            args: ValRange::EMPTY,
+        },
+        is_loop_header: false,
+        preds: 0,
+    });
+
+    // Empty forwarding chain 1 -> 2 -> ... -> N_BLOCKS - 1.
+    for b in 1..(N_BLOCKS - 1) {
+        blocks.push(Block {
+            params: Vec::new(),
+            insts: Vec::new(),
+            term: Term::Jump {
+                target: BlockId(b + 1),
+                args: ValRange::EMPTY,
+            },
+            is_loop_header: false,
+            preds: 1,
+        });
+    }
+
+    // Final block folds all N_VALS values so every value is cross-block live.
+    let mut last_insts = Vec::with_capacity(N_VALS as usize);
+    let mut acc = Val(0);
+    for i in 1..N_VALS {
+        let next = Val(val_tys.len() as u32);
+        val_tys.push(Ty::I32);
+        last_insts.push(Inst {
+            res: Some(next),
+            op: Op::I32Bin(IntBinOp::Add, acc, Val(i)),
+        });
+        acc = next;
+    }
+    let val_pool = vec![acc];
+    blocks.push(Block {
+        params: Vec::new(),
+        insts: last_insts,
+        term: Term::Return {
+            vals: ValRange { start: 0, len: 1 },
+        },
+        is_loop_header: false,
+        preds: 1,
+    });
+
+    let ir = IrFunc {
+        func_index: 0,
+        memory64: false,
+        params: Vec::new(),
+        result_tys: vec![Ty::I32],
+        val_tys,
+        blocks,
+        val_pool,
+        v128_consts: Vec::new(),
+        br_tables: Vec::new(),
+        needs_stack_check: false,
+        elided_callee_stack_bytes: 0,
+        early_pruned: 0,
+    };
+    let budget = CompileBudget::new(None);
+    let err = match super::regalloc::allocate(&ir, Some(&budget)) {
+        Ok(_) => panic!("oversized liveness matrix must be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("liveness matrix") && err.contains("exceeds cap"),
+        "unexpected error: {err}"
+    );
+}

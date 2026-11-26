@@ -365,12 +365,48 @@ impl Store {
             self.engine.config.limits.max_table_elements as usize,
         )
     }
-    fn segment_roots(frames: &[Frame], operands: &[Value]) -> Vec<Value> {
-        let mut roots = operands.to_vec();
-        for f in frames {
-            roots.extend(&f.locals)
+    fn is_traceable_ref(value: &Value) -> bool {
+        match value {
+            Value::Ref(r) => !matches!(r, RefValue::Null(_) | RefValue::I31(_)),
+            Value::I32(_) | Value::I64(_) | Value::F32(_) | Value::F64(_) | Value::V128(_) => false,
         }
+    }
+    fn check_continuation_gc_budget(&self, root_count: usize) -> Result<()> {
+        if self.gc.live() >= self.engine.config.limits.max_table_elements as usize {
+            return Err(err(
+                ErrorKind::ResourceLimit,
+                "guest heap object budget exceeded",
+            ));
+        }
+        self.gc.check_payload(root_count)
+    }
+    fn collect_segment_roots(
+        &self,
+        frames: &[Frame],
+        operands: &[Value],
+        check_gc_budget: bool,
+    ) -> Result<Vec<Value>> {
+        let count = operands
+            .iter()
+            .filter(|v| Self::is_traceable_ref(v))
+            .count()
+            + frames
+                .iter()
+                .flat_map(|f| f.locals.iter())
+                .filter(|v| Self::is_traceable_ref(v))
+                .count();
+        if check_gc_budget {
+            self.check_continuation_gc_budget(count)?;
+        }
+        let mut roots = Vec::new();
         roots
+            .try_reserve_exact(count)
+            .map_err(|_| err(ErrorKind::ResourceLimit, "continuation root allocation"))?;
+        roots.extend(operands.iter().copied().filter(Self::is_traceable_ref));
+        for f in frames {
+            roots.extend(f.locals.iter().copied().filter(Self::is_traceable_ref));
+        }
+        Ok(roots)
     }
     fn capture(
         frames: &mut Vec<Frame>,
@@ -433,8 +469,11 @@ impl Store {
             Body::Start(f) => {
                 let fi = self.check(f.0, &self.funcs)?;
                 if self.funcs[fi].host.is_some() {
+                    let roots = self.collect_segment_roots(frames, operands, false)?;
                     self.active_roots
-                        .push(Self::segment_roots(frames, operands));
+                        .try_reserve(1)
+                        .map_err(|_| err(ErrorKind::ResourceLimit, "active roots allocation"))?;
+                    self.active_roots.push(roots);
                     let result = self.invoke(f, &bound);
                     self.active_roots.pop();
                     match result? {
@@ -682,7 +721,7 @@ impl Store {
                         .saturating_mul(std::mem::size_of::<Prompt>()),
                 ),
         )?;
-        let roots = Self::segment_roots(frames, operands);
+        let roots = self.collect_segment_roots(frames, operands, true)?;
         let r = self.reserve_continuation(ty, roots)?;
         let segment = Segment {
             fuel: self.current_fuel,
@@ -762,8 +801,29 @@ impl Store {
                         ),
                 )?;
                 let arguments = args(operands, n)?;
-                let mut roots = self.gc.get(r)?.fields.clone();
-                roots.extend(&arguments);
+                let existing = &self.gc.get(r)?.fields;
+                let root_count = existing
+                    .iter()
+                    .filter(|v| Self::is_traceable_ref(v))
+                    .count()
+                    + arguments
+                        .iter()
+                        .filter(|v| Self::is_traceable_ref(v))
+                        .count();
+                self.check_continuation_gc_budget(root_count)?;
+                let mut roots = Vec::new();
+                roots
+                    .try_reserve_exact(root_count)
+                    .map_err(|_| err(ErrorKind::ResourceLimit, "continuation root allocation"))?;
+                roots.extend(
+                    self.gc
+                        .get(r)?
+                        .fields
+                        .iter()
+                        .copied()
+                        .filter(Self::is_traceable_ref),
+                );
+                roots.extend(arguments.iter().copied().filter(Self::is_traceable_ref));
                 let new = self.reserve_continuation(ty, roots)?;
                 let old = self.continuations.get_mut(&r).unwrap();
                 let body = old.body.take();
@@ -893,10 +953,11 @@ impl Store {
                         &prompts[p + 1..],
                     )),
                 )?;
-                let roots = Self::segment_roots(
+                let roots = self.collect_segment_roots(
                     &frames[prompts[p].frame_depth..],
                     &operands[prompts[p].operand_depth..],
-                );
+                    true,
+                )?;
                 let ids = (
                     type_ids(
                         &cont_signature.params,
@@ -969,10 +1030,11 @@ impl Store {
                         &prompts[p + 1..],
                     )),
                 )?;
-                let roots = Self::segment_roots(
+                let roots = self.collect_segment_roots(
                     &frames[prompts[p].frame_depth..],
                     &operands[prompts[p].operand_depth..],
-                );
+                    true,
+                )?;
                 let outgoing = self.reserve_continuation(out_ty, roots)?;
                 let segment = Self::capture(frames, operands, prompts, p, self.current_fuel);
                 self.release_local_slots(
@@ -1564,5 +1626,64 @@ mod tests {
             ErrorKind::Host
         );
         assert!(store.active_roots.is_empty());
+    }
+    #[test]
+    fn continuation_capture_filters_numeric_values_and_prechecks_gc_budget() {
+        let mut cfg = Config::default();
+        // Enough for the continuation object header + a few GC refs, far below 512 Values.
+        cfg.limits.max_gc_bytes =
+            std::mem::size_of::<gc::Object>() + 4 * std::mem::size_of::<Value>();
+        let engine = Engine::new(cfg).unwrap();
+        let mut store = Store::new(&engine);
+        let ty = CanonicalTypeId::test(1, 0);
+        let live_obj = store
+            .gc
+            .allocate(
+                gc::Object {
+                    ty,
+                    kind: gc::ObjectKind::Struct,
+                    fields: vec![],
+                    descriptor: None,
+                },
+                10,
+            )
+            .unwrap();
+
+        // 512 numeric locals + 256 numeric operands + 1 real GC ref:
+        // must only retain the 1 GC ref and succeed under the tight max_gc_bytes budget.
+        let mut locals = vec![Value::I64(7); 512];
+        locals[250] = Value::Ref(RefValue::Gc(live_obj));
+        let operands = vec![Value::I32(9); 256];
+        let frame = Frame {
+            #[cfg(feature = "register-executor")]
+            register: None,
+            #[cfg(feature = "compact-executor")]
+            compact: false,
+            function: Function {
+                host_type_instance: None,
+                host_type_module: None,
+                canonical: ty,
+                ty: Arc::new(FuncType::new(vec![], vec![])),
+                instance: 0,
+                body: 0,
+                host: None,
+            },
+            pc: 0,
+            base: 0,
+            locals,
+            labels: vec![],
+        };
+        let roots = store
+            .collect_segment_roots(&[frame], &operands, true)
+            .unwrap();
+        assert_eq!(roots, vec![Value::Ref(RefValue::Gc(live_obj))]);
+
+        // When actual traceable references exceed max_gc_bytes, `collect_segment_roots`
+        // must reject BEFORE allocating a large root vector.
+        let many_refs = vec![Value::Ref(RefValue::Gc(live_obj)); 64];
+        let err = store
+            .collect_segment_roots(&[], &many_refs, true)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ResourceLimit);
     }
 }
