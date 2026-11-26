@@ -2,6 +2,73 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.7] - 2026-11-26
+
+Major execution-performance release across both `wtime-aot` (native `x64` and
+`aarch64`) and the safe-Rust core runtime (`wtime-decode`, `wtime-validate`,
+`wtime-runtime`): branchless Spectre SLH, value-range BCE, VEX memory folding,
+dual global pinning, SSA loop live-range splitting & address rematerialization,
+AVX-512 (`x86-64-v4`) EVEX encoding & general counted-loop auto-vectorization,
+native `WTPGO1` profile-guided optimization (`--pgo-gen` / `--pgo-use`) with
+speculative devirtualization & hot-first `.text` layout, cold module prep &
+fast `register-executor` upgrades, and multi-pass soundness audit fixes. Core
+crates remain `#![forbid(unsafe_code)]` with zero external production
+dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Branchless Spectre v1 SLH, value-range BCE, VEX memory folding, dual global pinning, & AArch64 loop alignment**:
+  - Upgraded `--spectre-mitigations` on `x64` (`cmov` mask), `aarch64`
+    (`csel` mask), and `c` (branchless mask) to Speculative Load Hardening
+    (SLH) on linear-memory bounds checks while preserving full barriers on
+    control-flow/table dispatch and shared bulk helpers.
+  - Added SSA value-range bounds-check elimination (BCE) for monotonic/bounded
+    indices (`u32::from(u8/u16)` masks, shifts, proven bounds), x64 VEX/AVX2
+    memory-operand folding for loads into FP/SIMD binary operations, dual hot
+    Wasm global pinning (`R12` + `R13`) on `x64`, and 16-byte loop-header
+    alignment on `aarch64`.
+- **SSA loop live-range splitting & address rematerialization**:
+  - Added SSA `Op::Copy` loop live-range splitting and `RematAddr` address
+    rematerialization across both `--backend x64` and `--backend aarch64` to
+    eliminate hot-loop register spills and redundant address reloads.
+- **AVX-512 (`x86-64-v4`) EVEX backend & general counted-loop auto-vectorization**:
+  - Added native EVEX (`512-bit` ZMM) instruction encoding and `--target-cpu`
+    `x64-v4` / `native` AVX-512F+VL+BW+DQ dispatch on `x64` (with `vzeroupper`
+    cleanup and compressed `disp8*64` addressing).
+  - Added general counted-loop auto-vectorization lowering (`Op::VecElemLoop`
+    for elementwise array/scalar kernels and `Op::VecReduceLoop` for sum and
+    dot-product reductions) across `x64` (`v2`/`v3`/`v4`) and `aarch64` (NEON)
+    with full trap-before-write & overlap/wrap guards.
+- **Native `WTPGO1` profile-guided optimization (`--pgo-gen` / `--pgo-use`)**:
+  - Added two-pass native PGO (`--pgo-gen <profile>` / `--pgo-use <profile>`)
+    with binary `WTPGO1` profile emission and loading across `x64` and
+    `aarch64`, bound into build and incremental cache keys.
+  - Added per-callsite Boyer–Moore majority indirect-call target profiling,
+    speculative `call_indirect` devirtualization + inlining of dominant direct
+    targets (preserving signature checks and trap behavior), and hot-first
+    `.text` function layout ordering.
+- **AOT soundness & CI fixes**:
+  - Hardened `VecElemLoop`/`VecReduceLoop` constant-fold, wrap-around, and
+    aliasing checks; fixed `RematAddr` / `Copy` liveness & parallel-move
+    coalescing edge cases; guarded `x64` EVEX GNU `objdump` disassembly unit
+    check to `#[cfg(target_arch = "x86_64")]` for native ARM64 CI; and fixed
+    PGO profile validation and indirect-call speculative guard emission.
+
+### Core libraries (`wtime-decode`, `wtime-validate`, `wtime-runtime`)
+- **Cold module decode, validation, & instantiation speedups**:
+  - Reduced per-function allocation overhead in `wtime-decode` and
+    `wtime-validate` with flat `local_runs` representation, lazy `ControlMap`
+    construction, and a 64 MiB dense memory-initial-data cap (falling back
+    cleanly without oversized eager allocations).
+- **Experimental `register-executor` fast-tier upgrades** (opt-in, disabled by
+  default):
+  - Added pooled register banks to avoid per-call heap allocations, fused
+    hot-loop superinstructions, `FastType::Ref` admission with full GC root
+    scanning and survival across allocations/collections, and zero-frame
+    `try_invoke_leaf` dispatch for leaf calls.
+  - Hardened `register-executor` and validator bounds/resource checks,
+    preserving exact Wasm semantics, fuel accounting, and cancellation
+    contracts across all tiers.
+
 ## [0.1.6] - 2026-11-26
 
 Multi-tenant & side-channel hardening sweep (all opt-in with zero overhead on
