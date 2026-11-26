@@ -56,6 +56,10 @@ impl TypeEnvironment {
     pub(super) fn work(&self) -> usize {
         self.work.get()
     }
+    /// Returns `true` if charging `n` units would exceed the type work budget.
+    pub(super) fn would_exhaust(&self, n: usize) -> bool {
+        self.exhausted.get() || self.work.get().saturating_add(n) > self.limit
+    }
     /// Spends `n` units at once, as `n` spends would.
     pub(super) fn charge(&self, n: usize) {
         let total = self.work.get().saturating_add(n);

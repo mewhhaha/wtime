@@ -1114,7 +1114,7 @@ fn declared_func_type(module: &Module, index: u32) -> Option<&crate::FuncType> {
     let decoded = module.data.inner.decoded();
     let mut rem = index as usize;
     for imp in &decoded.imports {
-        if let ImportKind::Func(ti) = imp.kind {
+        if let ImportKind::Func(ti) | ImportKind::ExactFunc(ti) = imp.kind {
             if rem == 0 {
                 return decoded.types.get(ti.0 as usize);
             }
@@ -3460,13 +3460,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             None
                         };
                         if let Some((idx, off32)) = fused_shl2_op {
-                            let r_val = mat(
-                                val_v.src,
-                                base_tmp + 1,
-                                &mut max_slots,
-                                &mut ops,
-                                &mut consts,
-                            );
+                            let val_tmp = base_tmp.max(idx) + 1;
+                            let r_val =
+                                mat(val_v.src, val_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::StoreI32Shl2 {
                                 idx,
                                 val: r_val,
@@ -3474,13 +3470,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 src_off,
                             });
                         } else if let Some((base_reg, imm)) = fused_add_imm {
-                            let r_val = mat(
-                                val_v.src,
-                                base_tmp + 1,
-                                &mut max_slots,
-                                &mut ops,
-                                &mut consts,
-                            );
+                            let val_tmp = base_tmp.max(base_reg) + 1;
+                            let r_val =
+                                mat(val_v.src, val_tmp, &mut max_slots, &mut ops, &mut consts);
                             match insn.opcode {
                                 0x36 | 0x38 => ops.push(RegOp::StoreI32AddImm {
                                     addr: base_reg,
@@ -13329,6 +13321,111 @@ mod tests {
         assert_eq!(
             st.invoke(f_multi, &[Value::I32(1)]).unwrap_err().kind,
             ErrorKind::ResourceLimit
+        );
+    }
+
+    #[test]
+    fn fast_register_store_peephole_lhs_imm_no_clobber_and_exact_func_import() {
+        // 1) Regression for commutative LHS immediate in StoreI32Shl2 / StoreI32AddImm:
+        //    `i32.const 4; local.get 0; i32.const 1; i32.add; i32.mul; i32.const 99; i32.store`
+        //    and `i32.const 16; local.get 0; i32.const 1; i32.add; i32.add; i32.const 77; i32.store`
+        //    must not let `mat(val)` overwrite the popped `idx` / `base_reg` temp slot!
+        let type_sec = vec![1, 0x60, 1, 0x7f, 0];
+        let func_sec = vec![1, 0];
+        let mem_sec = vec![1, 0x00, 1];
+        let exp_sec = vec![2, 3, b'b', b'u', b'g', 0x00, 0, 1, b'm', 0x02, 0];
+        let b0 = body(
+            &[],
+            &[
+                // mem[((x + 1) * 4)] = 99
+                0x41, 0x04, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x6c, 0x41, 0xe3, 0x00, 0x36, 0x02, 0x00,
+                // mem[(16 + (x + 1))] = 77
+                0x41, 0x10, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x6a, 0x41, 0xcd, 0x00, 0x36, 0x02, 0x00,
+            ],
+        );
+        let mut code_sec = vec![1];
+        code_sec.extend_from_slice(&b0);
+        let wasm = wasm_mod(&[
+            sec(1, &type_sec),
+            sec(3, &func_sec),
+            sec(5, &mem_sec),
+            sec(7, &exp_sec),
+            sec(10, &code_sec),
+        ]);
+        let mut imgs = Vec::new();
+        for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+            let eng = Engine::with_execution_policy(Config::default(), policy).unwrap();
+            let m = eng.compile(&wasm).unwrap();
+            let mut st = Store::new(&eng);
+            let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+            let External::Func(f) = ins.export(&st, "bug").unwrap() else {
+                panic!()
+            };
+            let External::Memory(mem) = ins.export(&st, "m").unwrap() else {
+                panic!()
+            };
+            st.invoke(f, &[Value::I32(0)]).unwrap();
+            let bytes = st.read_memory(mem, 0, 512).unwrap();
+            assert_eq!(&bytes[4..8], &99i32.to_le_bytes());
+            assert_eq!(&bytes[17..21], &77i32.to_le_bytes());
+            imgs.push(bytes);
+        }
+        assert_eq!(imgs[0], imgs[1]);
+
+        // 2) Regression for `declared_func_type` with `ImportKind::ExactFunc`:
+        //    Import 0 is exact func type 0 `(i32) -> i32`, defined func 1 is type 1 `(i64) -> i64`.
+        //    Calling func 0 and taking `ref.func 1` must resolve exact signatures!
+        let exact_wasm = wasm_mod(&[
+            sec(1, &[2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 1, 0x7e, 1, 0x7e]),
+            // Import 0: env.f : exact func (0x20 <typeidx=0>)
+            sec(2, &[1, 3, b'e', b'n', b'v', 1, b'f', 0x20, 0x00]),
+            sec(3, &[1, 1]), // defined func 1 -> type 1: (i64) -> i64
+            sec(7, &[1, 1, b'g', 0x00, 1]),
+            sec(9, &[1, 0x03, 0x00, 1, 1]), // declarative elem for ref.func 1
+            sec(10, &{
+                let mut c = vec![1];
+                // call 0 with i32(41), extend to i64, add arg0, check !ref.is_null(ref.func 1)
+                c.extend_from_slice(&body(
+                    &[],
+                    &[
+                        0x41, 0x29, 0x10, 0x00, 0xac, 0x20, 0x00, 0x7c, 0xd2, 0x01, 0xd1, 0x45,
+                        0xac, 0x7c,
+                    ],
+                ));
+                c
+            }),
+        ]);
+        let mut cfg = Config::default();
+        cfg.features.custom_descriptors = true;
+        cfg.features.gc = true;
+        cfg.features.function_references = true;
+        let eng = Engine::with_execution_policy(cfg, ExecutionPolicy::Register).unwrap();
+        let m = eng.compile(&exact_wasm).unwrap();
+        assert!(
+            is_admitted(&m, 0),
+            "function referencing ExactFunc import and ref.func 1 must be admitted"
+        );
+        let mut st = Store::new(&eng);
+        let h = st
+            .create_host_func_with_caller(
+                wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                |_c, a| {
+                    let Value::I32(n) = a[0] else {
+                        return Err(trap("arg"));
+                    };
+                    Ok(vec![Value::I32(n + 1)])
+                },
+            )
+            .unwrap();
+        let mut lnk = Linker::new(&eng);
+        lnk.define("env", "f", External::Func(h)).unwrap();
+        let ins = lnk.instantiate(&mut st, &m).unwrap();
+        let External::Func(fg) = ins.export(&st, "g").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            st.invoke(fg, &[Value::I64(10)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I64(53)])
         );
     }
 }

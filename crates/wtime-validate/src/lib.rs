@@ -205,11 +205,12 @@ fn fast_instruction(
             if base.saturating_add(nr) > s.max_stack_height {
                 return false;
             }
-            if nr > 0 {
-                s.types.charge(nr);
-                if s.types.exhausted() {
+            let work = np.saturating_add(nr);
+            if work > 0 {
+                if s.types.would_exhaust(work) {
                     return false;
                 }
+                s.types.charge(work);
             }
             s.values.truncate(base);
             s.values.extend_from_slice(&ft.results);
@@ -851,7 +852,9 @@ fn validate_module_shell<'a>(c: &mut Context<'a>) -> Result<()> {
                 && x[0].opcode == 0xd2
                 && x[1].opcode == 0x0b
                 && (!features.reference_types
-                    || (e.ty.heap == HeapType::Func && c.limits.max_stack_height >= 1))
+                    || (e.ty.heap == HeapType::Func
+                        && (e.ty.nullable || features.function_references)
+                        && c.limits.max_stack_height >= 1))
             {
                 check(
                     index(&x[0])? < c.funcs.len(),
@@ -2736,6 +2739,71 @@ mod descriptor_regressions {
         ];
         let r = validate(b, &FeatureSet::default(), &ResourceLimits::default());
         assert!(r.is_ok(), "{r:?}");
+    }
+    #[test]
+    fn elem_ref_func_fast_path_rejects_non_nullable_without_function_references() {
+        let wasm = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type 0: () -> ()
+            0x03, 0x02, 0x01, 0x00, // func 0: type 0
+            0x09, 0x08, 0x01, 0x05, 0x64, 0x70, 0x01, 0xd2, 0x00,
+            0x0b, // passive elem (ref func) [ref.func 0]
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // body 0: end
+        ];
+        let mut features = FeatureSet::mvp();
+        features.reference_types = true;
+        features.bulk_memory = true;
+        features.function_references = false;
+        let err = validate(wasm, &features, &ResourceLimits::default()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+        features.function_references = true;
+        assert!(validate(wasm, &features, &ResourceLimits::default()).is_ok());
+    }
+    #[test]
+    fn fast_call_budget_exhaustion_reports_resource_limit_not_validation() {
+        let wasm = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+            0x01, 0x0a, 0x02, 0x60, 0x01, 0x7f, 0x02, 0x7f, 0x7f, 0x60, 0x00, 0x00, // types
+            0x03, 0x03, 0x02, 0x00, 0x01, // func 0 -> type 0, func 1 -> type 1
+            0x0a, 0x11, 0x02, // code section, 2 bodies
+            0x06, 0x00, 0x41, 0x00, 0x41, 0x00, 0x0b, // body 0
+            0x08, 0x00, 0x41, 0x01, 0x10, 0x00, 0x1a, 0x1a, 0x0b, // body 1: call 0
+        ];
+        let features = FeatureSet {
+            multi_value: true,
+            ..Default::default()
+        };
+        let mut saw_exhaust = false;
+        for limit in 1usize..=20 {
+            let limits = ResourceLimits {
+                max_type_work: limit,
+                ..Default::default()
+            };
+            if let Ok(mut inc) = validate_incremental(wasm, &features, &limits, |bi, _| {
+                (bi == 1).then_some(CachedBodyMetrics {
+                    total_locals: 0,
+                    insn_count: 5,
+                    imm_elems: 0,
+                    saw_data_count_op: false,
+                })
+            }) {
+                match inc.ensure_body_validated(1) {
+                    Err(err) => {
+                        assert_eq!(
+                            err.kind,
+                            ErrorKind::ResourceLimit,
+                            "call fast path must report ResourceLimit on type-work exhaustion (limit={limit}), got {err:?}"
+                        );
+                        saw_exhaust = true;
+                    }
+                    Ok(()) => break,
+                }
+            }
+        }
+        assert!(
+            saw_exhaust,
+            "must exercise exact ResourceLimit boundary on call fast path"
+        );
     }
 }
 
