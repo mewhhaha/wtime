@@ -5518,7 +5518,8 @@ fn x64_avx512_evex_and_general_counted_loop_autovec() {
         assert_eq!(a.code[4], 0x25);
         assert_eq!(a.code[6], 0xe4);
 
-        // If GNU `objdump` is present, verify exact EVEX disassembly & disp8*64 (`+ 0x40`)!
+        // If GNU `objdump` is present on an x86-64 host, verify exact EVEX disassembly & disp8*64 (`+ 0x40`)!
+        #[cfg(target_arch = "x86_64")]
         if let Ok(status) = std::process::Command::new("objdump")
             .arg("--version")
             .output()
