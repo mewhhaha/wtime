@@ -1,5 +1,5 @@
 {
-  "source_sha256": "3c6d7973b175122d888a276d15e6f85ee76ef2289323766c7dcffe5fb09ab4f5",
+  "source_sha256": "e07d596801c11eb6e06a2fc5c0151ac8bc0955768383c2cd4e361879cdbeb656",
   "source_stable": true,
   "executed": 4,
   "passed": true,
@@ -17,7 +17,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "20 + 22 = 42\n",
-      "stderr": "   Compiling wtime-runtime v0.1.6 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n     Running `target/evidence/debug/examples/embedding`\n"
+      "stderr": "   Compiling wtime-runtime v0.1.6 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n     Running `target/debug/examples/embedding`\n"
     },
     {
       "command": [
@@ -32,7 +32,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "suspended with 7; resumed with 9\n",
-      "stderr": "   Compiling wtime-runtime v0.1.6 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n     Running `target/evidence/debug/examples/suspension`\n"
+      "stderr": "   Compiling wtime-runtime v0.1.6 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s\n     Running `target/debug/examples/suspension`\n"
     },
     {
       "command": [
