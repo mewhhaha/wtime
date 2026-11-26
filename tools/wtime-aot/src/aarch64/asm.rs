@@ -1124,6 +1124,14 @@ impl A64Asm {
         self.emit(0xd400_0001 | ((imm16 as u32) << 5));
     }
 
+    pub fn dsb_nsh(&mut self) {
+        self.emit(0xd503_379f);
+    }
+
+    pub fn isb(&mut self) {
+        self.emit(0xd503_3fdf);
+    }
+
     pub fn nop(&mut self) {
         self.emit(0xd503_201f);
     }

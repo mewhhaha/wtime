@@ -129,6 +129,14 @@ impl FeatureSet {
             branch_hinting: true,
         }
     }
+    /// Returns a conservative feature profile for untrusted multi-tenant workers.
+    ///
+    /// Keeps standardized Wasm Core 3.0 features ([`Self::stable_core`]) while keeping
+    /// `threads` (shared memory and atomics) disabled so untrusted guests cannot construct
+    /// concurrent shared-memory timer channels, and keeping experimental Phase 3 proposals off.
+    pub const fn untrusted_worker() -> Self {
+        Self::stable_core()
+    }
 }
 impl Default for FeatureSet {
     fn default() -> Self {
@@ -236,6 +244,47 @@ impl Default for ResourceLimits {
             max_instructions: 10_000_000,
             fuel: None,
             compile_threads: 0,
+        }
+    }
+}
+impl ResourceLimits {
+    /// Returns tighter resource budgets suitable for untrusted multi-tenant workers.
+    ///
+    /// Bounds module size (16 MiB), linear memory (64 MiB), GC heap (32 MiB), continuations
+    /// (16 MiB), tables (65,536 elements), call depth (1,024), stack height (16,384),
+    /// per-invocation fuel (10,000,000 instructions), and single-threaded compilation
+    /// (`compile_threads = 1`) so untrusted inputs cannot fan out host worker threads.
+    pub const fn untrusted_worker() -> Self {
+        Self {
+            max_module_bytes: 16 * 1024 * 1024,
+            max_types: 10_000,
+            max_functions: 10_000,
+            max_memories: 4,
+            max_tables: 8,
+            max_globals: 1_000,
+            max_tags: 64,
+            max_locals: 4_096,
+            max_total_locals: 65_536,
+            max_stack_height: 16_384,
+            max_call_depth: 1_024,
+            max_memory_pages: 1_024,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_store_memory_bytes: 64 * 1024 * 1024,
+            max_store_table_elements: 65_536,
+            max_store_objects: 65_536,
+            max_table_elements: 65_536,
+            max_canonical_types: 65_536,
+            max_canonical_type_bytes: 16 * 1024 * 1024,
+            max_gc_bytes: 32 * 1024 * 1024,
+            max_continuation_bytes: 16 * 1024 * 1024,
+            max_gc_mark_work: 1_000_000,
+            max_type_work: 1_000_000,
+            max_rec_group_size: 1_024,
+            max_elements: 10_000,
+            max_data_segments: 10_000,
+            max_instructions: 1_000_000,
+            fuel: Some(10_000_000),
+            compile_threads: 1,
         }
     }
 }

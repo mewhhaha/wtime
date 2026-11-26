@@ -28,6 +28,13 @@ mod tests {
         assert!(FeatureSet::stable_core().multi_value);
         assert!(!FeatureSet::stable_core().stack_switching);
         assert!(FeatureSet::default().stack_switching);
+        assert!(!FeatureSet::untrusted_worker().threads);
+        assert!(FeatureSet::untrusted_worker().validate().is_ok());
+        let limits = ResourceLimits::untrusted_worker();
+        assert_eq!(limits.body_threads(10 * 1024 * 1024), 1);
+        assert_eq!(limits.compile_threads, 1);
+        assert_eq!(limits.fuel, Some(10_000_000));
+        assert!(limits.max_memory_bytes <= 64 * 1024 * 1024);
     }
     #[test]
     fn t006_source_types_preserve_exactness_and_recursion_groups() {

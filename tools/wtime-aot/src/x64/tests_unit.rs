@@ -141,6 +141,97 @@ pub fn code_sec(bodies: &[Vec<u8>]) -> Vec<u8> {
     section(10, &p)
 }
 
+pub(crate) fn spectre_mitigations_wasm() -> Vec<u8> {
+    wasm_module(&[
+        type_sec(&[(&[], &[0x7f]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 1]),
+        section(4, &[2, 0x70, 1, 6, 6, 0x6f, 1, 7, 7]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[("run", 0, 1), ("memory", 2, 0)]),
+        section(9, &[1, 0, 0x41, 0, 0x0b, 5, 0, 0, 0, 0, 0]),
+        code_sec(&[
+            enc_body(&[], &[0x41, 7]),
+            enc_body(
+                &[],
+                &[
+                    0x20, 0, 0x41, 42, 0x36, 2, 8, // store 42 at arg + 8
+                    0x02, 0x40, 0x02, 0x40, // nested blocks
+                    0x20, 0, 0x0e, 2, 0, 1, 1, // br_table inner, outer, default outer
+                    0x0b, 0x20, 0, 0x28, 2, 0, 0x0f, // inner: return mem[arg]
+                    0x0b, // outer: read memory, test externref for null and call through table 0
+                    0x20, 0, 0x28, 2, 0, 0x20, 0, 0x25, 1, 0xd1, 0x6a, 0x20, 0, 0x11, 0, 0, 0x6a,
+                ],
+            ),
+        ]),
+    ])
+}
+
+#[test]
+fn x64_spectre_mitigations_emit_fences_and_separate_incremental_cache_keys() {
+    let wasm = spectre_mitigations_wasm();
+    let root = crate::build::create_fresh_test_root("wtime-aot-x64-spectre");
+    for spectre_mitigations in [false, true] {
+        let opts = X64CompileOptions {
+            spectre_mitigations,
+            verify: true,
+            inc_cache_dir: Some(root.0.clone()),
+            cache_key_salt: Some([0x42; 32]),
+            ..Default::default()
+        };
+        let image = compile_wasm_to_x64_so(&wasm, &opts).unwrap();
+        // The second ELF64 program header describes the executable .text segment.
+        let read_u64 = |off| u64::from_le_bytes(image[off..off + 8].try_into().unwrap()) as usize;
+        let ph = read_u64(32) + 56;
+        let text_off = read_u64(ph + 8);
+        let text_len = read_u64(ph + 32);
+        let text = &image[text_off..text_off + text_len];
+        assert_eq!(
+            text.windows(3).any(|bytes| bytes == [0x0f, 0xae, 0xe8]),
+            spectre_mitigations
+        );
+        assert_eq!(compile_wasm_to_x64_so(&wasm, &opts).unwrap(), image);
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+            use std::io::Write as _;
+            use std::process::{Command, Stdio};
+
+            let path = root.0.join(format!("spectre-{spectre_mitigations}.so"));
+            std::fs::write(&path, image).unwrap();
+            let mut child = Command::new(driver)
+                .arg(path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"call run 0\ncall run 1\ncall run 5\ncall run 6\ncall run 10000\n")
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                std::str::from_utf8(&out.stdout).unwrap(),
+                "NEW_OK\n\
+                 CALL 0 0000000000000000 0 0\n\
+                 CALL 0 0000000000000008 0 0\n\
+                 CALL 1 deadbeefcafebabe 4 0\n\
+                 CALL 1 deadbeefcafebabe 3 0\n\
+                 CALL 1 deadbeefcafebabe 2 0\n"
+            );
+        }
+    }
+    // Each ABI hash yields a separate base file even with identical Wasm and salt.
+    let cache_entries = std::fs::read_dir(root.0.join("x64-inc"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "bin"))
+        .count();
+    assert_eq!(cache_entries, 2);
+}
+
 // ---- 1. Byte-level `asm.rs` unit tests (§4.3.1) ----
 
 #[test]

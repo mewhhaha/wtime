@@ -75,6 +75,8 @@ pub struct A64CompileOptions {
     /// Worker thread count (`0` = automatic up to available CPU cores).
     pub jobs: usize,
     pub deadline: Option<Instant>,
+    /// Emit speculation barriers and keep software bounds checks through lowering.
+    pub spectre_mitigations: bool,
     /// Optional per-function incremental cache directory (`<cache>/a64-inc`).
     pub inc_cache_dir: Option<PathBuf>,
     /// Generator build fingerprint bound into incremental cache keys.
@@ -88,6 +90,7 @@ impl Default for A64CompileOptions {
             optimize: true,
             jobs: 0,
             deadline: None,
+            spectre_mitigations: false,
             inc_cache_dir: None,
             gen_fingerprint: [0u8; 32],
         }
@@ -519,14 +522,16 @@ fn try_compile_a64_incremental(
             let mut scratch = Stage2Scratch::default();
             for &bi in &dirty_list {
                 let mut ir = lowered_irs[bi].take().unwrap();
-                optimize_func_stage2_with_scratch(
-                    &mut ir,
-                    module,
-                    &effects,
-                    Some(budget),
-                    &mut scratch,
-                )
-                .map_err(X64CompileError::Failed)?;
+                if !opts.spectre_mitigations {
+                    optimize_func_stage2_with_scratch(
+                        &mut ir,
+                        module,
+                        &effects,
+                        Some(budget),
+                        &mut scratch,
+                    )
+                    .map_err(X64CompileError::Failed)?;
+                }
                 verify_ir(&ir, module).map_err(X64CompileError::Failed)?;
                 let alloc =
                     allocate(&ir, Some(budget)).map_err(X64CompileError::AdmissionRejected)?;
@@ -559,14 +564,16 @@ fn try_compile_a64_incremental(
                         .take()
                         .unwrap();
                     let res = (|| -> Result<A64Asm, X64CompileError> {
-                        optimize_func_stage2_with_scratch(
-                            &mut ir,
-                            module,
-                            &effects,
-                            Some(budget),
-                            &mut scratch,
-                        )
-                        .map_err(X64CompileError::Failed)?;
+                        if !opts.spectre_mitigations {
+                            optimize_func_stage2_with_scratch(
+                                &mut ir,
+                                module,
+                                &effects,
+                                Some(budget),
+                                &mut scratch,
+                            )
+                            .map_err(X64CompileError::Failed)?;
+                        }
                         verify_ir(&ir, module).map_err(X64CompileError::Failed)?;
                         let alloc = allocate(&ir, Some(budget))
                             .map_err(X64CompileError::AdmissionRejected)?;
@@ -910,8 +917,9 @@ fn compile_wasm_to_aarch64_detailed(
         0
     };
 
-    let mut layout =
-        CtxLayout::compute(&module, ci_tables).map_err(X64CompileError::AdmissionRejected)?;
+    let mut layout = CtxLayout::compute(&module, ci_tables)
+        .map_err(X64CompileError::AdmissionRejected)?
+        .with_spectre_mitigations(opts.spectre_mitigations);
     layout.func_sig_ro_off = func_sig_ro_off;
     layout.func_addr_ro_off = func_addr_ro_off;
 
@@ -1084,6 +1092,7 @@ fn compile_wasm_to_aarch64_detailed(
     let abi_hash = compute_a64_abi_hash(
         &opts.gen_fingerprint,
         opts.optimize,
+        opts.spectre_mitigations,
         n_defs,
         &module,
         &layout,
@@ -1373,7 +1382,10 @@ fn compile_wasm_to_aarch64_detailed(
             let mut out = Vec::with_capacity(n_defs);
             let mut scratch = Stage2Scratch::default();
             for mut ir in irs {
-                if let Some(ref eff) = effects {
+                // Stage 2 can prove bounds from branches that have no barrier.
+                if !opts.spectre_mitigations
+                    && let Some(ref eff) = effects
+                {
                     optimize_func_stage2_with_scratch(
                         &mut ir,
                         &module,
@@ -1417,7 +1429,9 @@ fn compile_wasm_to_aarch64_detailed(
                         .take()
                         .unwrap();
                     let res = (|| -> Result<A64Asm, X64CompileError> {
-                        if let Some(eff) = eff_ref {
+                        if !opts.spectre_mitigations
+                            && let Some(eff) = eff_ref
+                        {
                             optimize_func_stage2_with_scratch(
                                 &mut ir,
                                 &module,

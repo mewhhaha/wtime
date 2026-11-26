@@ -1012,6 +1012,10 @@ impl Asm {
 
     // ---- Basic stack / control / misc ----
 
+    pub fn lfence(&mut self) {
+        self.code.extend_from_slice(&[0x0f, 0xae, 0xe8]);
+    }
+
     pub fn nop(&mut self) {
         self.emit_u8(0x90);
     }

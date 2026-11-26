@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 11;
+const FORMAT_VERSION: u32 = 12;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -223,6 +223,7 @@ pub fn compute_abi_hash(
     isa: TargetIsa,
     opt: bool,
     verify: bool,
+    spectre_mitigations: bool,
     n_defs: usize,
     module: &X64Module,
     layout: &CtxLayout,
@@ -238,6 +239,7 @@ pub fn compute_abi_hash(
         u8::from(isa.has_avx2),
         u8::from(opt),
         u8::from(verify),
+        u8::from(spectre_mitigations),
         u8::from(module.memory64),
         match module.target {
             super::module::X64Target::BlotCdylib => 0,

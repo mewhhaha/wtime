@@ -858,6 +858,12 @@ impl<'a> Lower<'a> {
         self.asm.ret();
     }
 
+    fn emit_speculation_barrier(&mut self) {
+        if self.layout.spectre_mitigations {
+            self.asm.lfence();
+        }
+    }
+
     fn emit_bounds_check(&mut self, addr: Gp, end_off: u64) {
         let oob = self.trap_oob_lbl();
         if let Some(cap) = self.layout.fixed_mem_bytes {
@@ -874,11 +880,13 @@ impl<'a> Lower<'a> {
                 self.asm.cmp_rr(true, addr, SCRATCH_GP1);
             }
             self.asm.jcc(Cond::A, oob);
+            self.emit_speculation_barrier();
             return;
         }
         if end_off == 0 {
             self.asm.cmp_rr(true, addr, Gp::R13);
             self.asm.jcc(Cond::A, oob);
+            self.emit_speculation_barrier();
             return;
         }
         if self.layout.memory64 {
@@ -891,6 +899,7 @@ impl<'a> Lower<'a> {
                     .lea(true, SCRATCH_GP1, Mem::base_disp(Gp::R13, neg_disp));
                 self.asm.cmp_rr(true, addr, SCRATCH_GP1);
                 self.asm.jcc(Cond::A, oob);
+                self.emit_speculation_barrier();
                 return;
             }
             // Wrap-proof 64-bit unsigned addition: CF=1 (Cond::B) => overflow trap!
@@ -904,6 +913,7 @@ impl<'a> Lower<'a> {
             self.asm.jcc(Cond::B, oob);
             self.asm.cmp_rr(true, SCRATCH_GP1, Gp::R13);
             self.asm.jcc(Cond::A, oob);
+            self.emit_speculation_barrier();
             return;
         }
         if let Ok(disp) = i32::try_from(end_off) {
@@ -914,6 +924,7 @@ impl<'a> Lower<'a> {
         }
         self.asm.cmp_rr(true, SCRATCH_GP1, Gp::R13);
         self.asm.jcc(Cond::A, oob);
+        self.emit_speculation_barrier();
     }
 
     fn mem_addr(&mut self, addr: Gp, offset: u64) -> Mem {
@@ -1192,6 +1203,7 @@ impl<'a> Lower<'a> {
                 .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
             self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
             self.asm.jcc(Cond::E, bad);
+            self.emit_speculation_barrier();
             self.asm.sub_ri(true, SCRATCH_GP2, 1);
             self.asm.lea_rip(
                 SCRATCH_GP1,
@@ -1228,6 +1240,7 @@ impl<'a> Lower<'a> {
                 );
             }
             self.asm.jcc(Cond::Ae, toob);
+            self.emit_speculation_barrier();
             self.asm.mov_rm(
                 true,
                 SCRATCH_GP1,
@@ -1240,6 +1253,7 @@ impl<'a> Lower<'a> {
             );
             self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
             self.asm.jcc(Cond::E, bad);
+            self.emit_speculation_barrier();
             self.asm.sub_ri(true, SCRATCH_GP2, 1);
             self.asm.lea_rip(
                 SCRATCH_GP1,
@@ -1249,6 +1263,7 @@ impl<'a> Lower<'a> {
                 .mov_rm(false, Gp::Rax, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
             self.asm.cmp_ri(false, Gp::Rax, ci.canon_sig as i32);
             self.asm.jcc(Cond::Ne, bad);
+            self.emit_speculation_barrier();
             self.asm.lea_rip(
                 SCRATCH_GP1,
                 RelocTarget::Rodata(self.layout.func_addr_ro_off),
@@ -1271,6 +1286,7 @@ impl<'a> Lower<'a> {
             self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
         }
         self.asm.jcc(Cond::Ae, toob);
+        self.emit_speculation_barrier();
         if ci.span == 0 {
             self.asm.jmp(bad);
             return false;
@@ -1280,12 +1296,14 @@ impl<'a> Lower<'a> {
         }
         self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
         self.asm.jcc(Cond::Ae, bad);
+        self.emit_speculation_barrier();
         self.asm
             .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
         self.asm
             .movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
         self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
         self.asm.jcc(Cond::E, bad);
+        self.emit_speculation_barrier();
         self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
         if is_tail_jump {
             self.asm.mov_rr(true, Gp::Rax, SCRATCH_GP1);
@@ -3704,6 +3722,7 @@ impl<'a> Lower<'a> {
                         self.asm.cmp_ri(false, ir, tlen as i32);
                     }
                     self.asm.jcc(Cond::Ae, toob);
+                    self.emit_speculation_barrier();
                     let d = self.gp_write_reg(r);
                     self.asm.mov_rm(true, d, Mem::indexed(Gp::R15, ir, 8, toff));
                     self.gp_commit(r, d);
@@ -3718,6 +3737,7 @@ impl<'a> Lower<'a> {
                             .cmp_rm(false, ir, Mem::base_disp(Gp::R15, desc_off + 8));
                     }
                     self.asm.jcc(Cond::Ae, toob);
+                    self.emit_speculation_barrier();
                     self.asm.mov_rr(false, SCRATCH_GP2, ir);
                     self.asm
                         .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
@@ -3739,6 +3759,7 @@ impl<'a> Lower<'a> {
                         self.asm.cmp_ri(false, ir, tlen as i32);
                     }
                     self.asm.jcc(Cond::Ae, toob);
+                    self.emit_speculation_barrier();
                     let vr = self.gp_read(val, SCRATCH_GP1);
                     self.asm
                         .mov_mr(true, Mem::indexed(Gp::R15, ir, 8, toff), vr);
@@ -3753,6 +3774,7 @@ impl<'a> Lower<'a> {
                             .cmp_rm(false, ir, Mem::base_disp(Gp::R15, desc_off + 8));
                     }
                     self.asm.jcc(Cond::Ae, toob);
+                    self.emit_speculation_barrier();
                     self.asm.mov_rr(false, SCRATCH_GP2, ir);
                     self.asm.shl_imm(true, SCRATCH_GP2, 3);
                     self.asm
@@ -3985,6 +4007,7 @@ impl<'a> Lower<'a> {
                 self.asm
                     .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
                 self.asm.jcc(Cond::A, oob);
+                self.emit_speculation_barrier();
                 // Effective host address into SCRATCH_GP1 = mem_base + addr + offset.
                 self.asm
                     .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
@@ -4031,6 +4054,7 @@ impl<'a> Lower<'a> {
                 self.asm
                     .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
                 self.asm.jcc(Cond::A, oob);
+                self.emit_speculation_barrier();
                 self.asm
                     .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
                 self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
@@ -4083,6 +4107,7 @@ impl<'a> Lower<'a> {
                 self.asm
                     .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
                 self.asm.jcc(Cond::A, oob);
+                self.emit_speculation_barrier();
                 self.asm
                     .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
                 self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
@@ -4140,6 +4165,7 @@ impl<'a> Lower<'a> {
                 self.asm
                     .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
                 self.asm.jcc(Cond::A, oob);
+                self.emit_speculation_barrier();
                 self.asm
                     .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
                 self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
@@ -5865,6 +5891,7 @@ impl<'a> Lower<'a> {
                 }
                 self.asm.cmp_ri(false, SCRATCH_GP2, tbl_lbls.len() as i32);
                 self.asm.jcc(Cond::Ae, def_lbl);
+                self.emit_speculation_barrier();
                 let jt_off = self.asm.add_jump_table(&tbl_lbls);
                 self.asm
                     .lea_rip(SCRATCH_GP1, RelocTarget::LocalRodata(jt_off));

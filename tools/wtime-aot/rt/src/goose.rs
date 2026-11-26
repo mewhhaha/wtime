@@ -42,8 +42,34 @@ pub const OUTPUT_LIMIT: u64 = 256 << 20;
 /// Maximum standard input bytes buffered before guest execution (256 MiB).
 pub const INPUT_LIMIT: u64 = 256 << 20;
 
-/// What the module may reach outside itself beyond its input, output,
-/// arguments and the clock. Nothing by default: the operator grants
+/// Resolution and availability of the clocks exposed to the guest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClockPolicy {
+    /// Expose timestamps at full nanosecond resolution.
+    #[default]
+    Full,
+    /// Round timestamps down to multiples of this many nanoseconds.
+    /// A zero quantum uses full resolution.
+    CoarsenNs(u64),
+    /// Deny access to the clocks.
+    Deny,
+}
+
+impl ClockPolicy {
+    fn timestamp(self, now: impl FnOnce() -> u64) -> u64 {
+        match self {
+            Self::Deny => 0,
+            Self::Full | Self::CoarsenNs(0) => now(),
+            Self::CoarsenNs(quantum) => {
+                let timestamp = now();
+                timestamp - (timestamp % quantum)
+            }
+        }
+    }
+}
+
+/// The guest's access to files, environment variables and clocks.
+/// Clocks are available by default. The operator grants
 /// directories and environment variables (`--allow-files`, `--allow-env`).
 /// A denied file is reported as missing (or unwritable), a denied variable
 /// as unset, as the module would see them on a machine without them.
@@ -59,15 +85,18 @@ pub struct Policy {
     /// fails with `ResourceLimit: output limit` and a larger file looks
     /// unreadable.
     pub output_limit: u64,
+    /// Access to monotonic and wall clocks.
+    pub clock: ClockPolicy,
 }
 
 impl Default for Policy {
-    /// Nothing granted.
+    /// Full clock resolution with no file or environment access.
     fn default() -> Policy {
         Policy {
             directories: Vec::new(),
             variables: Some(Vec::new()),
             output_limit: OUTPUT_LIMIT,
+            clock: ClockPolicy::Full,
         }
     }
 }
@@ -417,7 +446,7 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
             parsed.map(Out::Float).map_err(|text| fail(g, text))
         },
         ("env", "bench_clock") | ("env", "gs_os_clock_ns") => {
-            |g, _| Ok(Out::Integer(monotonic_ns(g)))
+            |g, _| Ok(Out::Integer(monotonic_ns(g) as i64))
         }
         ("env", "bench_barrier") => |g, values| match values.first() {
             Some(Val::F32(_) | Val::F64(_)) => Ok(Out::Float(float(g, values, 0)?)),
@@ -437,7 +466,7 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
         ("env", "gs_os_arg") => os_arg,
         ("env", "gs_os_getenv") => os_getenv,
         ("env", "gs_os_resource_dir") => |_, _| Ok(Out::Integer(0)),
-        ("env", "gs_os_time_ns") => |_, _| Ok(Out::Integer(wall_ns())),
+        ("env", "gs_os_time_ns") => |g, _| Ok(Out::Integer(wall_ns(g) as i64)),
         ("env", "gs_find_any") => find_any,
         ("env", "gs_find_pair") => find_pair,
         ("env", "system") => |_, _| Ok(Out::Integer(-1)),
@@ -461,8 +490,11 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
         },
         ("wasi_snapshot_preview1", "environ_get") => |_, _| Ok(Out::Integer(0)),
         ("wasi_snapshot_preview1", "clock_time_get") => |g, values| {
+            if g.state().policy.clock == ClockPolicy::Deny {
+                return Ok(Out::Integer(2)); // EACCES
+            }
             let value = match integer(g, values, 0)? {
-                0 => wall_ns(),
+                0 => wall_ns(g),
                 1 => monotonic_ns(g),
                 _ => return Ok(Out::Integer(28)),
             };
@@ -1057,21 +1089,28 @@ fn fd_read(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
 
 // Clocks.
 
-fn monotonic_ns(guest: &mut dyn Guest) -> i64 {
+fn monotonic_ns(guest: &mut dyn Guest) -> u64 {
     // Monotonic from an arbitrary origin, as CLOCK_MONOTONIC is.
-    guest.state().clock_origin.elapsed().as_nanos() as i64 + 1_000_000_000
+    let state = guest.state();
+    state
+        .policy
+        .clock
+        .timestamp(|| (state.clock_origin.elapsed().as_nanos() + 1_000_000_000) as u64)
 }
 
-fn wall_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos() as i64)
+fn wall_ns(guest: &mut dyn Guest) -> u64 {
+    guest.state().policy.clock.timestamp(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos() as u64)
+    })
 }
 
 // The driver.
 
 const USAGE: &str = "usage: <program> [--timing-json path] [--allow-files DIR]... [--allow-env NAME|*]... \
-[--time-limit SECONDS] [--memory-limit-pages N] [--output-limit BYTES] [--stack-limit-mib N] [-- program arguments]";
+[--time-limit SECONDS] [--memory-limit-pages N] [--output-limit BYTES] [--stack-limit-mib N] \
+[--no-clock] [--clock-coarsen-ns N] [-- program arguments]";
 
 /// Runs a compiled Goose program as `wtime-goose` runs the module it came
 /// from (`module` is the module's path, the program's first argument when
@@ -1115,6 +1154,13 @@ pub fn main<G: Guest + 'static>(
             }
             "--timing-json" => {
                 timing_json = Some(value("--timing-json").to_string_lossy().into_owned())
+            }
+            "--no-clock" => policy.clock = ClockPolicy::Deny,
+            "--clock-coarsen-ns" => {
+                match value("--clock-coarsen-ns").to_string_lossy().parse::<u64>() {
+                    Ok(quantum) if quantum > 0 => policy.clock = ClockPolicy::CoarsenNs(quantum),
+                    _ => usage("--clock-coarsen-ns takes a positive number of nanoseconds"),
+                }
             }
             "--allow-files" => {
                 let directory = value("--allow-files");
@@ -1294,8 +1340,87 @@ fn run<G: Guest>(
 
 #[cfg(test)]
 mod tests {
-    use super::Policy;
+    use super::{ClockPolicy, Guest, Policy, State, handler};
+    use crate::{LinearMemory, Memory, R, Val};
     use std::path::Path;
+
+    struct DummyGuest {
+        mem: Memory,
+        state: State,
+    }
+
+    impl Guest for DummyGuest {
+        fn memory(&mut self) -> Option<&mut dyn LinearMemory> {
+            Some(&mut self.mem)
+        }
+        fn state(&mut self) -> &mut State {
+            &mut self.state
+        }
+        fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> {
+            None
+        }
+        fn start(&mut self) -> R<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clock_policy_applies_to_env_and_wasi_clocks() {
+        const QUANTUM: u64 = 1_000_000;
+        const SENTINEL: [u8; 8] = [0xff; 8];
+
+        assert_eq!(Policy::default().clock, ClockPolicy::Full);
+        let mut guest = DummyGuest {
+            mem: Memory::new(1, Some(1), false).unwrap(),
+            state: State::new(vec![], vec![]),
+        };
+        let assert_timestamp = |clock, timestamp: u64| match clock {
+            ClockPolicy::Deny => assert_eq!(timestamp, 0),
+            ClockPolicy::Full | ClockPolicy::CoarsenNs(0) => assert!(timestamp > 0),
+            ClockPolicy::CoarsenNs(quantum) => {
+                assert!(timestamp > 0);
+                assert!(timestamp.is_multiple_of(quantum));
+            }
+        };
+        let wasi_clock = handler("wasi_snapshot_preview1", "clock_time_get").unwrap();
+        for clock in [
+            ClockPolicy::Full,
+            ClockPolicy::CoarsenNs(QUANTUM),
+            ClockPolicy::CoarsenNs(0),
+            ClockPolicy::Deny,
+        ] {
+            guest.state.policy.clock = clock;
+            for name in ["bench_clock", "gs_os_clock_ns", "gs_os_time_ns"] {
+                let timestamp = handler("env", name).unwrap()(&mut guest, &[])
+                    .unwrap()
+                    .i64()
+                    .unwrap();
+                assert_timestamp(clock, timestamp as u64);
+            }
+            for clock_id in [0, 1] {
+                guest.mem.write(0, &SENTINEL).unwrap();
+                let args = [Val::I32(clock_id), Val::I64(0), Val::I32(0)];
+                let errno = wasi_clock(&mut guest, &args).unwrap().i32().unwrap();
+                let bytes = guest.mem.read(0, 8).unwrap();
+                if clock == ClockPolicy::Deny {
+                    assert_eq!(errno, 2);
+                    assert_eq!(bytes, SENTINEL);
+                } else {
+                    assert_eq!(errno, 0);
+                    assert_timestamp(clock, u64::from_le_bytes(bytes.try_into().unwrap()));
+                }
+            }
+        }
+        guest.state.policy.clock = ClockPolicy::Deny;
+        let invalid_pointer = [Val::I32(0), Val::I64(0), Val::I32(-1)];
+        assert_eq!(
+            wasi_clock(&mut guest, &invalid_pointer)
+                .unwrap()
+                .i32()
+                .unwrap(),
+            2
+        );
+    }
 
     #[test]
     fn files_stay_inside_granted_directories() {
@@ -1370,27 +1495,8 @@ mod tests {
 
     #[test]
     fn find_any_and_find_pair_zero_copy_semantics() {
-        use super::{Guest, State, find_any, find_pair};
-        use crate::{LinearMemory, Memory, R, Trap, Val};
-
-        struct DummyGuest {
-            mem: Memory,
-            state: State,
-        }
-        impl Guest for DummyGuest {
-            fn memory(&mut self) -> Option<&mut dyn LinearMemory> {
-                Some(&mut self.mem)
-            }
-            fn state(&mut self) -> &mut State {
-                &mut self.state
-            }
-            fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> {
-                None
-            }
-            fn start(&mut self) -> R<()> {
-                Ok(())
-            }
-        }
+        use super::{find_any, find_pair};
+        use crate::Trap;
 
         let mut g = DummyGuest {
             mem: Memory::new(1, Some(1), false).unwrap(),
@@ -1489,28 +1595,9 @@ mod tests {
 
     #[test]
     fn goose_write_charges_output_limit_before_reading_and_bounds_stdin_and_fd_policy() {
-        use super::{Guest, Policy, State, handler, read_bounded_bytes, verify_open_fd_allowed};
-        use crate::{LinearMemory, Memory, R, Trap, Val};
+        use super::{read_bounded_bytes, verify_open_fd_allowed};
+        use crate::Trap;
         use std::io::Read;
-
-        struct DummyGuest {
-            mem: Memory,
-            state: State,
-        }
-        impl Guest for DummyGuest {
-            fn memory(&mut self) -> Option<&mut dyn LinearMemory> {
-                Some(&mut self.mem)
-            }
-            fn state(&mut self) -> &mut State {
-                &mut self.state
-            }
-            fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> {
-                None
-            }
-            fn start(&mut self) -> R<()> {
-                Ok(())
-            }
-        }
 
         // 1. `goose.write` must fail with `ResourceLimit: output limit` BEFORE attempting to
         //    read/allocate guest memory (even when the requested length exceeds memory or limit=0).

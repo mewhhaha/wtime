@@ -328,6 +328,146 @@ fn assert_static_elf64_exec(path: &Path) {
 }
 
 #[test]
+fn standalone_x64_clock_policy() {
+    let bin = Path::new(env!("CARGO_BIN_EXE_wtime-aot"));
+    let root = TempRoot::new("wtime-aot-x64-clock");
+    let wasm = root.path("clock.wasm");
+    let exe = root.path("clock");
+
+    let imports = [
+        ("wasi_snapshot_preview1", "clock_time_get", 0),
+        ("env", "gs_os_clock_ns", 1),
+        ("env", "gs_os_time_ns", 1),
+        ("env", "bench_clock", 1),
+        ("goose", "print_i64", 2),
+        ("goose", "newline", 3),
+    ];
+    let mut import_section = vec![imports.len() as u8];
+    for (module, name, ty) in imports {
+        enc_str(&mut import_section, module);
+        enc_str(&mut import_section, name);
+        import_section.extend_from_slice(&[0, ty]);
+    }
+
+    let mut body = Vec::new();
+    let print_line = [0x10, 4, 0x10, 5]; // print_i64; newline
+    for (clock_id, ptr) in [(0, 0), (1, 8)] {
+        // Initialize the WASI output slot to -1 so a denied write is observable.
+        body.extend_from_slice(&[0x41, ptr, 0x42, 0x7f, 0x37, 3, 0]); // i64.store
+        body.extend_from_slice(&[
+            0x41, clock_id, 0x42, 0, 0x41, ptr, 0x10, 0,
+            0xad, // clock_time_get; i64.extend_i32_u
+        ]);
+        body.extend_from_slice(&print_line);
+        body.extend_from_slice(&[0x41, ptr, 0x29, 3, 0]); // i64.load
+        body.extend_from_slice(&print_line);
+    }
+    for function in 1..=3 {
+        body.extend_from_slice(&[0x10, function]);
+        body.extend_from_slice(&print_line);
+    }
+    let mut code = vec![1];
+    code.extend(enc_body(&[], &body));
+    fs::write(
+        &wasm,
+        wasm_module(&[
+            section(
+                1,
+                &[
+                    4, // four types
+                    0x60, 3, 0x7f, 0x7e, 0x7f, 1, 0x7f, // clock_time_get
+                    0x60, 0, 1, 0x7e, // env clocks
+                    0x60, 1, 0x7e, 0, // print_i64
+                    0x60, 0, 0, // newline and _start
+                ],
+            ),
+            section(2, &import_section),
+            section(3, &[1, 3]),
+            section(5, &[1, 1, 1, 1]),
+            section(7, b"\x02\x06_start\x00\x06\x06memory\x02\x00"),
+            section(10, &code),
+        ]),
+    )
+    .unwrap();
+    let build = Command::new(bin)
+        .arg(&wasm)
+        .arg("-o")
+        .arg(&exe)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = |args: &[&str]| {
+        let output = Command::new(&exe).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: Vec<i64> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+        let [
+            wall_errno,
+            wasi_wall,
+            mono_errno,
+            wasi_mono,
+            env_mono,
+            env_wall,
+            bench,
+        ] = values.try_into().unwrap();
+        (
+            [wall_errno, mono_errno],
+            [wasi_wall, wasi_mono, env_mono, env_wall, bench],
+        )
+    };
+
+    let (errno, timestamps) = run(&[]);
+    assert_eq!(errno, [0, 0]);
+    assert!(timestamps.iter().all(|&ns| ns > 0));
+
+    let denied = ([2, 2], [-1, -1, 0, 0, 0]);
+    assert_eq!(run(&["--no-clock"]), denied);
+    let timing = root.path("timing.json");
+    assert_eq!(
+        run(&["--no-clock", "--timing-json", timing.to_str().unwrap()]),
+        denied
+    );
+    assert!(timing.is_file());
+
+    let (errno, timestamps) = run(&["--clock-coarsen-ns", "1000000"]);
+    assert_eq!(errno, [0, 0]);
+    assert!(timestamps[0] > 0 && timestamps[3] > 0);
+    assert!(
+        timestamps
+            .iter()
+            .all(|&ns| ns >= 0 && (ns as u64).is_multiple_of(1_000_000))
+    );
+    assert_eq!(
+        run(&["--clock-coarsen-ns", "18446744073709551614"]),
+        ([0, 0], [0; 5])
+    );
+
+    for args in [
+        &["--clock-coarsen-ns", "0"][..],
+        &["--clock-coarsen-ns", "18446744073709551615"],
+        &["--clock-coarsen-ns", "18446744073709551616"],
+        &["--clock-coarsen-ns", "bad"],
+        &["--clock-coarsen-ns"],
+    ] {
+        let output = Command::new(&exe).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
 fn standalone_x64_static_exec_wasi_goose_simd_memory64_and_traps() {
     use std::io::Write as _;
     use std::process::Stdio;

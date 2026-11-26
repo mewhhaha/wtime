@@ -9,7 +9,7 @@ use wtime_runtime::{Config, Engine, External, Linker, RunOutcome, Store, Value};
 use wtime_types::{Error, ErrorKind, FeatureSet};
 
 const HELP: &str = "\
-wtime-cli [--profile mvp|stable-core|all-phase3-core] [--fuel N] [--] <COMMAND> MODULE.wasm [ARGS...]
+wtime-cli [--profile mvp|stable-core|all-phase3-core|untrusted-worker] [--fuel N] [--] <COMMAND> MODULE.wasm [ARGS...]
 
 Commands:
   check   MODULE.wasm                      Validate a binary WebAssembly module.
@@ -18,8 +18,8 @@ Commands:
   run     MODULE.wasm EXPORT [TYPE:VAL...] Instantiate and invoke an exported function.
 
 Options:
-  --profile PROFILE  Feature profile: mvp, stable-core (default), or all-phase3-core.
-  --fuel N           Instruction fuel budget (default: unlimited).
+  --profile PROFILE  Feature profile: mvp, stable-core (default), all-phase3-core, or untrusted-worker.
+  --fuel N           Instruction fuel budget (overrides profile default).
   -h, --help         Print this help message.
   -V, --version      Print version information.
 
@@ -134,6 +134,7 @@ fn parse_args(raw: Vec<String>) -> Result<Action, CliError> {
         return Ok(Action::Help);
     }
     let mut config = Config::default();
+    let mut explicit_fuel: Option<u64> = None;
     let mut positional = Vec::new();
     let mut idx = 0usize;
     let mut after_sep = false;
@@ -156,12 +157,13 @@ fn parse_args(raw: Vec<String>) -> Result<Action, CliError> {
                     let Some(argument) = raw.get(idx + 1) else {
                         return Err(CliError::usage("missing value for --profile"));
                     };
-                    config.features = match argument.as_str() {
-                        "mvp" => FeatureSet::mvp(),
-                        "stable-core" => FeatureSet::stable_core(),
-                        "all-phase3-core" => FeatureSet::all_phase3_core(),
+                    match argument.as_str() {
+                        "mvp" => config.features = FeatureSet::mvp(),
+                        "stable-core" => config.features = FeatureSet::stable_core(),
+                        "all-phase3-core" => config.features = FeatureSet::all_phase3_core(),
+                        "untrusted-worker" => config = Config::untrusted_worker(),
                         _ => return Err(CliError::usage(format!("unknown profile {argument}"))),
-                    };
+                    }
                     idx += 2;
                     continue;
                 }
@@ -169,7 +171,7 @@ fn parse_args(raw: Vec<String>) -> Result<Action, CliError> {
                     let Some(argument) = raw.get(idx + 1) else {
                         return Err(CliError::usage("missing value for --fuel"));
                     };
-                    config.limits.fuel = Some(
+                    explicit_fuel = Some(
                         argument
                             .parse()
                             .map_err(|_| CliError::usage("invalid fuel budget"))?,
@@ -182,6 +184,9 @@ fn parse_args(raw: Vec<String>) -> Result<Action, CliError> {
         }
         positional.push(arg.clone());
         idx += 1;
+    }
+    if let Some(fuel) = explicit_fuel {
+        config.limits.fuel = Some(fuel);
     }
 
     if positional.len() < 2 {
@@ -441,5 +446,49 @@ mod tests {
         }
         let mut w = BrokenPipeWriter;
         assert_eq!(write_stdout_line(&mut w, "hello").ok(), Some(false));
+    }
+
+    #[test]
+    fn untrusted_worker_profile_sets_tight_limits_and_respects_explicit_fuel() {
+        let parsed = parse_args(vec![
+            "--profile".into(),
+            "untrusted-worker".into(),
+            "check".into(),
+            "mod.wasm".into(),
+        ])
+        .ok();
+        let Some(Action::Command { config, .. }) = parsed else {
+            panic!("expected command action");
+        };
+        assert!(!config.features.threads);
+        assert_eq!(config.limits.compile_threads, 1);
+        assert_eq!(config.limits.fuel, Some(10_000_000));
+        assert_eq!(config.limits.max_memory_bytes, 64 * 1024 * 1024);
+
+        // Explicit `--fuel` must win regardless of whether it precedes or follows `--profile`.
+        for args in [
+            vec![
+                "--fuel".into(),
+                "500".into(),
+                "--profile".into(),
+                "untrusted-worker".into(),
+                "check".into(),
+                "mod.wasm".into(),
+            ],
+            vec![
+                "--profile".into(),
+                "untrusted-worker".into(),
+                "--fuel".into(),
+                "500".into(),
+                "check".into(),
+                "mod.wasm".into(),
+            ],
+        ] {
+            let Some(Action::Command { config, .. }) = parse_args(args).ok() else {
+                panic!("expected command action");
+            };
+            assert_eq!(config.limits.fuel, Some(500));
+            assert_eq!(config.limits.compile_threads, 1);
+        }
     }
 }

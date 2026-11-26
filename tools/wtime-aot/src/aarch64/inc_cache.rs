@@ -33,7 +33,7 @@ use crate::x64::{CtxLayout, NUM_HELPERS, RodataConsts};
 use super::asm::{A64Asm, A64Reloc, A64RelocKind, A64RelocTarget};
 
 const MAGIC: &[u8; 8] = b"WTA64INC";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20;
 
 static NEXT_A64_INC_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +76,7 @@ pub struct A64IncCacheData {
 pub fn compute_a64_abi_hash(
     gen_fingerprint: &[u8; 32],
     opt: bool,
+    spectre_mitigations: bool,
     n_defs: usize,
     module: &X64Module,
     layout: &CtxLayout,
@@ -91,6 +92,7 @@ pub fn compute_a64_abi_hash(
         TargetIsa::default(),
         opt,
         true,
+        spectre_mitigations,
         n_defs,
         module,
         layout,

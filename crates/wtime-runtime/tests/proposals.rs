@@ -374,3 +374,36 @@ fn gc_large_struct_field_access_avoids_type_clone() {
         [Value::I32(ITERS)]
     );
 }
+
+#[test]
+fn untrusted_worker_config_rejects_threads_and_enforces_fuel() {
+    let engine = Engine::new(Config::untrusted_worker()).unwrap();
+    // Shared memory module (flags=0x03 min=1 max=1) must be rejected because `threads` is off.
+    let shared_mem_wasm = include_bytes!("fixtures/feature_profiles/threads.wasm");
+    assert_eq!(
+        engine.compile(shared_mem_wasm).unwrap_err().kind,
+        ErrorKind::DisabledFeature
+    );
+
+    // Infinite loop module must stop cleanly with ResourceLimit under the default worker fuel cap.
+    let mut loop_wasm = b"\0asm\x01\0\0\0".to_vec();
+    sec(&mut loop_wasm, 1, &[1, 0x60, 0, 0]);
+    sec(&mut loop_wasm, 3, &[1, 0]);
+    sec(&mut loop_wasm, 7, &[1, 4, b's', b'p', b'i', b'n', 0, 0]);
+    // body: loop br 0 end end
+    sec(
+        &mut loop_wasm,
+        10,
+        &[1, 7, 0, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b],
+    );
+    let mut cfg = Config::untrusted_worker();
+    cfg.limits.fuel = Some(1_000);
+    let e = Engine::new(cfg).unwrap();
+    let m = e.compile(&loop_wasm).unwrap();
+    let mut s = Store::new(&e);
+    let inst = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+    assert_eq!(
+        invoke(&mut s, inst, "spin", &[]).unwrap_err().kind,
+        ErrorKind::ResourceLimit
+    );
+}

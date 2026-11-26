@@ -20,10 +20,10 @@ use crate::x64::{
     CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
     GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE,
     HELPER_STANDALONE_FS, HELPER_STANDALONE_RESERVE_COPY, INTERNAL_EXN_SIGNAL, OFF_EXEC_ARGC,
-    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_ENVP, OFF_EXEC_EXIT_CODE, OFF_EXEC_MEM_LIMIT,
-    OFF_EXEC_OUTPUT_LIMIT, OFF_EXEC_POLICY_PTR, OFF_EXEC_PROG_NAME, OFF_EXEC_RESERVING,
-    OFF_EXEC_TIMING_PATH, OFF_EXEC_WRITTEN, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES,
-    OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, TRAP_EXIT, TRAP_HOST,
+    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_CLOCK_QUANTUM, OFF_EXEC_ENVP,
+    OFF_EXEC_EXIT_CODE, OFF_EXEC_MEM_LIMIT, OFF_EXEC_OUTPUT_LIMIT, OFF_EXEC_POLICY_PTR,
+    OFF_EXEC_PROG_NAME, OFF_EXEC_RESERVING, OFF_EXEC_TIMING_PATH, OFF_EXEC_WRITTEN, OFF_MEM_BASE,
+    OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, TRAP_EXIT, TRAP_HOST,
 };
 
 use super::asm::{A64Asm, A64RelocTarget, Cond, Label, Reg, VReg};
@@ -85,6 +85,22 @@ fn emit_clock_ns(a: &mut A64Asm, clk_id: u32, ts_off: u16) {
     a.mov_imm64(Reg::X2, 1_000_000_000);
     a.mul(true, Reg::X0, Reg::X0, Reg::X2);
     a.add_r(true, Reg::X0, Reg::X0, Reg::X1);
+}
+
+/// Loads the clock quantum into `X9` and sets Z if clocks are denied.
+fn emit_check_clock_policy(a: &mut A64Asm) {
+    a.ldr_uimm(true, Reg::X9, CTX_REG, OFF_EXEC_CLOCK_QUANTUM as u32);
+    a.mov_imm64(Reg::X10, u64::MAX);
+    a.cmp_r(true, Reg::X9, Reg::X10);
+}
+
+/// Rounds the timestamp in `X0` down to a multiple of the quantum in `X9`.
+fn emit_coarsen_clock_ns(a: &mut A64Asm) {
+    let lbl_done = a.new_label();
+    a.cbz(true, Reg::X9, lbl_done);
+    a.udiv(true, Reg::X10, Reg::X0, Reg::X9);
+    a.mul(true, Reg::X0, Reg::X10, Reg::X9);
+    a.bind(lbl_done);
 }
 
 /// Loops `SYS_WRITE` on partial writes and `-EINTR` (`-4`).
@@ -198,7 +214,8 @@ fn emit_parse_u64(a: &mut A64Asm, fail_usage: Label) {
 
 /// Emits standalone Linux AArch64 `_start` entry point (`ET_EXEC`) with optional 8 GiB + 64 KiB
 /// guard-page BCE (`layout.use_guard_pages`), host flag parsing (`--allow-files`, `--allow-env`,
-/// `--output-limit`, `--memory-limit-pages`, `--timing-json`, `--`), monotonic clock origin,
+/// `--output-limit`, `--memory-limit-pages`, `--timing-json`, `--no-clock`,
+/// `--clock-coarsen-ns`, `--`), monotonic clock origin,
 /// canonical trap message output, and `TRAP_EXIT` exit-code propagation.
 pub fn emit_a64_standalone_start(
     module: &X64Module,
@@ -219,7 +236,7 @@ pub fn emit_a64_standalone_start(
     a.lsl_imm(true, Reg::X4, Reg::X4, 3);
     a.add_r(true, Reg::X22, Reg::X21, Reg::X4);
 
-    // Allocate Ctx via mmap.
+    // Allocate zeroed Ctx via mmap. The default clock quantum is zero (full resolution).
     a.movz(true, Reg::X0, 0, 0);
     a.mov_imm64(Reg::X1, layout.total_bytes as u64);
     a.mov_imm32(Reg::X2, 3); // PROT_READ | PROT_WRITE
@@ -413,6 +430,34 @@ pub fn emit_a64_standalone_start(
 
     a.bind(lbl_not_tj);
     a.ldr_reg_scaled(true, Reg::X0, Reg::X21, Reg::X23, false);
+    emit_streq_const(&mut a, b"--no-clock");
+    let lbl_not_no_clock = a.new_label();
+    let lbl_set_clock = a.new_label();
+    a.cbz(false, Reg::X0, lbl_not_no_clock);
+    a.mov_imm64(Reg::X0, u64::MAX);
+    a.b(lbl_set_clock);
+
+    a.bind(lbl_not_no_clock);
+    a.ldr_reg_scaled(true, Reg::X0, Reg::X21, Reg::X23, false);
+    emit_streq_const(&mut a, b"--clock-coarsen-ns");
+    let lbl_not_coarsen = a.new_label();
+    a.cbz(false, Reg::X0, lbl_not_coarsen);
+    a.add_imm(true, Reg::X23, Reg::X23, 1);
+    a.cmp_r(true, Reg::X23, Reg::X20);
+    a.b_cond(Cond::Hs, fail_usage);
+    a.ldr_reg_scaled(true, Reg::X0, Reg::X21, Reg::X23, false);
+    emit_parse_u64(&mut a, fail_usage);
+    a.cbz(true, Reg::X0, fail_usage);
+    a.mov_imm64(Reg::X4, u64::MAX);
+    a.cmp_r(true, Reg::X0, Reg::X4);
+    a.b_cond(Cond::Eq, fail_usage);
+    a.bind(lbl_set_clock);
+    a.str_uimm(true, Reg::X0, CTX_REG, OFF_EXEC_CLOCK_QUANTUM as u32);
+    a.add_imm(true, Reg::X23, Reg::X23, 1);
+    a.b(lbl_arg_lp);
+
+    a.bind(lbl_not_coarsen);
+    a.ldr_reg_scaled(true, Reg::X0, Reg::X21, Reg::X23, false);
     emit_streq_const(&mut a, b"--memory-limit-pages");
     let lbl_not_ml = a.new_label();
     a.cbz(false, Reg::X0, lbl_not_ml);
@@ -597,7 +642,14 @@ pub fn emit_a64_standalone_start(
     );
     a.bind(lbl_arg_done);
 
-    // Record monotonic clock origin for `env::gs_os_clock_ns` / `wasi::clock_time_get`.
+    // Record the monotonic clock origin if guest clocks or timing JSON need it.
+    let lbl_record_origin = a.new_label();
+    let lbl_skip_origin = a.new_label();
+    emit_check_clock_policy(&mut a);
+    a.b_cond(Cond::Ne, lbl_record_origin);
+    a.ldr_uimm(true, Reg::X0, CTX_REG, OFF_EXEC_TIMING_PATH as u32);
+    a.cbz(true, Reg::X0, lbl_skip_origin);
+    a.bind(lbl_record_origin);
     emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
     emit_store_off(
         &mut a,
@@ -608,6 +660,7 @@ pub fn emit_a64_standalone_start(
         OFF_EXEC_CLOCK_ORIGIN,
         SGP3,
     );
+    a.bind(lbl_skip_origin);
 
     // Reserve & commit linear memory (8 GiB + 64 KiB PROT_NONE guard region for standalone memory32,
     // or clamped memory64 limit).
@@ -2296,26 +2349,31 @@ pub fn emit_a64_standalone_import_trampoline(
             a.mov_imm32(SGP1, u32::from(TRAP_HOST));
             a.ret();
         }
-        ("env", "gs_os_clock_ns") | ("env", "bench_clock") => {
-            a.sub_imm(true, Reg::SP, Reg::SP, 32);
-            emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
-            emit_load_off(
-                &mut a,
-                Ty::I64,
-                Some(Reg::X3),
-                None,
-                CTX_REG,
-                OFF_EXEC_CLOCK_ORIGIN,
-                SGP3,
-            );
-            a.sub_r(true, Reg::X0, Reg::X0, Reg::X3);
-            a.add_imm(true, Reg::SP, Reg::SP, 32);
+        ("env", "gs_os_clock_ns" | "bench_clock" | "gs_os_time_ns") => {
+            let lbl_allowed = a.new_label();
+            emit_check_clock_policy(&mut a);
+            a.b_cond(Cond::Ne, lbl_allowed);
+            a.movz(false, Reg::X0, 0, 0);
             a.movz(false, SGP1, 0, 0);
             a.ret();
-        }
-        ("env", "gs_os_time_ns") => {
+            a.bind(lbl_allowed);
             a.sub_imm(true, Reg::SP, Reg::SP, 32);
-            emit_clock_ns(&mut a, CLOCK_REALTIME, 0);
+            if fname == "gs_os_time_ns" {
+                emit_clock_ns(&mut a, CLOCK_REALTIME, 0);
+            } else {
+                emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
+                emit_load_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X3),
+                    None,
+                    CTX_REG,
+                    OFF_EXEC_CLOCK_ORIGIN,
+                    SGP3,
+                );
+                a.sub_r(true, Reg::X0, Reg::X0, Reg::X3);
+            }
+            emit_coarsen_clock_ns(&mut a);
             a.add_imm(true, Reg::SP, Reg::SP, 32);
             a.movz(false, SGP1, 0, 0);
             a.ret();
@@ -3087,6 +3145,9 @@ pub fn emit_a64_standalone_import_trampoline(
             a.ret();
         }
         ("wasi_snapshot_preview1", "clock_time_get") => {
+            let lbl_denied = a.new_label();
+            emit_check_clock_policy(&mut a);
+            a.b_cond(Cond::Eq, lbl_denied);
             zext_param(&mut a, Reg::X0, 0);
             zext_param(&mut a, Reg::X2, 2);
             let lbl_oob = a.new_label();
@@ -3116,6 +3177,7 @@ pub fn emit_a64_standalone_import_trampoline(
             );
             a.sub_r(true, Reg::X0, Reg::X0, Reg::X3);
             a.bind(lbl_store);
+            emit_coarsen_clock_ns(&mut a);
             a.ldr_uimm(true, Reg::X2, Reg::SP, 16);
             a.add_imm(true, Reg::SP, Reg::SP, 32);
             a.add_r(true, Reg::X3, MEM_BASE_REG, Reg::X2);
@@ -3129,6 +3191,10 @@ pub fn emit_a64_standalone_import_trampoline(
             a.ret();
             a.bind(lbl_oob);
             a.mov_imm32(Reg::X0, 21);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_denied);
+            a.mov_imm32(Reg::X0, 2); // EACCES
             a.movz(false, SGP1, 0, 0);
             a.ret();
         }

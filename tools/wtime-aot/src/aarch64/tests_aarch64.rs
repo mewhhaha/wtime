@@ -349,8 +349,8 @@ impl A64Vm {
         let rm = ((insn >> 16) & 31) as u8;
         let sf = (insn >> 31) != 0;
 
-        if insn == 0xd503_201f {
-            // NOP
+        if matches!(insn, 0xd503_201f | 0xd503_379f | 0xd503_3fdf) {
+            // NOP and speculation barriers have no functional effect in the VM.
         } else if (insn & 0xffe0_001f) == 0xd400_0001 {
             // SVC #imm16 (Linux AArch64 syscall)
             let nr = self.x[8];
@@ -2317,6 +2317,29 @@ fn verify_disasm_aarch64(label: &str, elf_bytes: &[u8]) {
     }
 }
 
+#[test]
+fn aarch64_spectre_mitigations_emit_barrier_pairs_and_preserve_results() {
+    let wasm = crate::x64::tests_unit::spectre_mitigations_wasm();
+    let mut barrier = 0xd503_379fu32.to_le_bytes().to_vec();
+    barrier.extend_from_slice(&0xd503_3fdfu32.to_le_bytes());
+    for spectre_mitigations in [false, true] {
+        let img = compile_wasm_to_aarch64_for_test(
+            &wasm,
+            &A64CompileOptions {
+                spectre_mitigations,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            img.text.windows(8).step_by(4).any(|bytes| bytes == barrier),
+            spectre_mitigations
+        );
+        let calls = [0, 1, 5, 6, 65536].map(|arg| ("run", Value::I32(arg)));
+        assert_aarch64_image_matches_oracle("spectre mitigations", &wasm, &calls, 16, &img);
+    }
+}
+
 /// Runs `(name, arg)` through both `wtime-runtime` and the compiled AArch64 ELF64 binary
 /// (via `blot_aot_new` + `blot_aot_call_export` inside `A64Vm`) and asserts bit-exact parity!
 fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_check_len: usize) {
@@ -2332,7 +2355,16 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
     )
     .unwrap_or_else(|e| panic!("aarch64 compile failed for {label}: {e:?}"));
     verify_disasm_aarch64(label, &img.elf);
+    assert_aarch64_image_matches_oracle(label, wasm, calls, mem_check_len, &img);
+}
 
+fn assert_aarch64_image_matches_oracle(
+    label: &str,
+    wasm: &[u8],
+    calls: &[(&str, Value)],
+    mem_check_len: usize,
+    img: &A64CompiledImage,
+) {
     // 1. Reference `wtime-runtime` instance.
     let cfg = Config {
         features: x64_validate_features(),
@@ -2345,7 +2377,7 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
     let inst = linker.instantiate(&mut store, &compiled).unwrap();
 
     // 2. Emulated AArch64 instance calling real `blot_aot_new` & `blot_aot_call_export`!
-    let mut vm = A64Vm::new(&img);
+    let mut vm = A64Vm::new(img);
     let exp_map: BTreeMap<String, u64> = img.export_vaddrs.iter().cloned().collect();
     let fn_new = exp_map["blot_aot_new"];
     let fn_call = exp_map["blot_aot_call_export"];

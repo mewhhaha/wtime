@@ -146,6 +146,23 @@ typedef __UINTPTR_TYPE__ uintptr_t;
 #define WT_PAGE 65536ULL
 #define WT_MEMORY_LIMIT_PAGES (1ULL << 20)
 
+#ifdef WT_SPECTRE_MITIGATIONS
+#if defined(__x86_64__)
+#define WT_SPEC_BARRIER() __asm__ __volatile__("lfence" ::: "memory")
+#elif defined(__aarch64__)
+#define WT_SPEC_BARRIER() __asm__ __volatile__("dsb nsh; isb" ::: "memory")
+#else
+#define WT_SPEC_BARRIER() __asm__ __volatile__("" ::: "memory")
+#endif
+#else
+#define WT_SPEC_BARRIER() ((void)0)
+#endif
+
+static inline void wt_secure_zero(void *p, size_t n) {
+    volatile uint8_t *vp = (volatile uint8_t *)p;
+    while (n--) *vp++ = 0;
+}
+
 enum {
     TRAP_NONE = 0,
     TRAP_UNREACHABLE = 1,
@@ -420,30 +437,35 @@ static inline int64_t wt_i64_trunc_sat_f64_u(double a) {
 static inline uint8_t wt_l8(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint8_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 1ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     *out = mb[at];
     return 0;
 }
 static inline uint8_t wt_l16(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint16_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 2ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(out, mb + at, 2);
     return 0;
 }
 static inline uint8_t wt_l32(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint32_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 4ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(out, mb + at, 4);
     return 0;
 }
 static inline uint8_t wt_l64(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint64_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 8ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(out, mb + at, 8);
     return 0;
 }
 static inline uint8_t wt_l128(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, wt_v128 *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 16ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(out, mb + at, 16);
     return 0;
 }
@@ -451,30 +473,35 @@ static inline uint8_t wt_l128(const uint8_t *restrict mb, size_t ml, uint32_t a,
 static inline uint8_t wt_s8(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint8_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 1ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     mb[at] = v;
     return 0;
 }
 static inline uint8_t wt_s16(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint16_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 2ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(mb + at, &v, 2);
     return 0;
 }
 static inline uint8_t wt_s32(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint32_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 4ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(mb + at, &v, 4);
     return 0;
 }
 static inline uint8_t wt_s64(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint64_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 8ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(mb + at, &v, 8);
     return 0;
 }
 static inline uint8_t wt_s128(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, wt_v128 v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 16ULL > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     memcpy(mb + at, &v, 16);
     return 0;
 }
@@ -485,22 +512,24 @@ typedef uint64_t wt_u64u __attribute__((aligned(1), may_alias));
 typedef wt_v128  wt_u128u __attribute__((aligned(1), may_alias));
 #define wt_s32_u(p, v) (*(wt_u32u *)(p) = (uint32_t)(v))
 #define wt_l32_u(p)    (*(const wt_u32u *)(p))
-#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; (dst) = *(const uty *)((mb) + _at); } while (0)
-#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; *(uty *)((mb) + _at) = (v); } while (0)
+#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); (dst) = *(const uty *)((mb) + _at); } while (0)
+#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); *(uty *)((mb) + _at) = (v); } while (0)
 #else
 static inline void wt_s32_u(uint8_t *restrict p, uint32_t v) { memcpy(p, &v, 4); }
 static inline uint32_t wt_l32_u(const uint8_t *restrict p) { uint32_t v; memcpy(&v, p, 4); return v; }
-#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; memcpy(&(dst), (mb) + _at, (size_t)(sz)); } while (0)
-#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; uty _v = (v); memcpy((mb) + _at, &_v, (size_t)(sz)); } while (0)
+#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); memcpy(&(dst), (mb) + _at, (size_t)(sz)); } while (0)
+#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); uty _v = (v); memcpy((mb) + _at, &_v, (size_t)(sz)); } while (0)
 #endif
 
 static inline uint8_t wt_mcopy(uint8_t *restrict mb, size_t ml, uint32_t dst, uint32_t src, uint32_t n) {
     if (WT_UNLIKELY((uint64_t)dst + (uint64_t)n > (uint64_t)ml || (uint64_t)src + (uint64_t)n > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     if (n != 0) memmove(mb + dst, mb + src, n);
     return 0;
 }
 static inline uint8_t wt_mfill(uint8_t *restrict mb, size_t ml, uint32_t dst, uint8_t val, uint32_t n) {
     if (WT_UNLIKELY((uint64_t)dst + (uint64_t)n > (uint64_t)ml)) return TRAP_OOB;
+    WT_SPEC_BARRIER();
     if (n != 0) memset(mb + dst, val, n);
     return 0;
 }
@@ -1909,6 +1938,7 @@ fn try_emit_coalesced_mem_run(
         e.line(&format!(
             "  if (WT_LIKELY(wt_ca + {bytes}ULL <= (uint64_t)({ml_expr}))) {{"
         ));
+        e.line("    WT_SPEC_BARRIER();");
         e.line(&format!("    memcpy(mb + wt_ca, wt_cs_{id}, {bytes}u);"));
         e.line("  } else {");
         e.line(&format!(
@@ -1935,6 +1965,7 @@ fn try_emit_coalesced_mem_run(
         e.line(&format!(
             "  if (WT_LIKELY(wt_ca + {bytes}ULL <= (uint64_t)({ml_expr}))) {{"
         ));
+        e.line("    WT_SPEC_BARRIER();");
         for (k, expr) in vals.iter().enumerate() {
             e.line(&format!("    wt_s32_u(mb + wt_ca + {}u, {expr});", k * 4));
         }
@@ -1968,6 +1999,7 @@ fn try_emit_coalesced_mem_run(
         e.line(&format!(
             "  if (WT_UNLIKELY(wt_ca + {max_end}ULL > (uint64_t)({ml_expr}))) {go}"
         ));
+        e.line("  WT_SPEC_BARRIER();");
         for &(off, dst, is_f32) in &items {
             if is_f32 {
                 e.line(&format!(
@@ -3533,13 +3565,45 @@ fn emit_c_insn(
             };
             let (idx, _) = e.pop()?;
             e.materialize(|_| true, None)?;
+            if !targets.is_empty() {
+                // Use an explicit jump table with a fenced lookup in hardened builds.
+                e.line("#ifdef WT_SPECTRE_MITIGATIONS");
+                e.line("{");
+                e.line(&format!("uint32_t wt_idx = (uint32_t)({idx});"));
+                e.line("static void *const volatile wt_targets[] = {");
+                for k in 0..targets.len() {
+                    e.line(&format!("&&wt_bt{pc}_{k},"));
+                }
+                e.line("};");
+                e.line(&format!("if (wt_idx < {}u) {{", targets.len()));
+                e.line("WT_SPEC_BARRIER();");
+                e.line("goto *wt_targets[wt_idx];");
+                e.line("}");
+                e.line(&format!("goto wt_bt{pc}_default;"));
+                e.line("#else");
+            }
             e.line(&format!("switch ((uint32_t)({idx})) {{"));
+            if !targets.is_empty() {
+                e.line("#endif");
+            }
             for (k, &d) in targets.iter().enumerate() {
+                e.line("#ifdef WT_SPECTRE_MITIGATIONS");
+                e.line(&format!("wt_bt{pc}_{k}: {{"));
+                e.line("#else");
                 e.line(&format!("case {k}u: {{"));
+                e.line("#endif");
                 e.branch(d as usize)?;
                 e.line("}");
             }
+            if !targets.is_empty() {
+                e.line("#ifdef WT_SPECTRE_MITIGATIONS");
+                e.line(&format!("wt_bt{pc}_default: {{"));
+                e.line("#else");
+            }
             e.line("default: {");
+            if !targets.is_empty() {
+                e.line("#endif");
+            }
             e.branch(default as usize)?;
             e.line("}");
             e.line("}");
@@ -3705,6 +3769,7 @@ fn emit_c_insn(
             let go = e.trap_table_oob_goto();
             e.line(&format!("tu0 = (uint32_t)({idx});"));
             e.line(&format!("if (WT_UNLIKELY(tu0 >= {len}u)) {go}"));
+            e.line("WT_SPEC_BARRIER();");
             e.push(ValType::EXTERNREF, &format!("ctx->t{t}[tu0]"))?;
         }
         0x26 => {
@@ -3718,6 +3783,7 @@ fn emit_c_insn(
             let go = e.trap_table_oob_goto();
             e.line(&format!("tu0 = (uint32_t)({idx});"));
             e.line(&format!("if (WT_UNLIKELY(tu0 >= {len}u)) {go}"));
+            e.line("WT_SPEC_BARRIER();");
             e.line(&format!("ctx->t{t}[tu0] = {val};"));
         }
         0xd0 => {
@@ -3790,6 +3856,7 @@ fn emit_c_insn(
                     "tu0 = (uint32_t)({dst}); tu1 = (uint32_t)({src});"
                 ));
                 e.line(&format!("if (WT_UNLIKELY((uint64_t)tu0 + {k}ULL > (uint64_t)({ml}) || (uint64_t)tu1 + {k}ULL > (uint64_t)({ml}))) {go}"));
+                e.line("WT_SPEC_BARRIER();");
                 e.line(&format!("memmove(mb + tu0, mb + tu1, {k}u);"));
             } else {
                 e.line(&format!("if (WT_UNLIKELY(wt_mcopy(mb, {ml}, (uint32_t)({dst}), (uint32_t)({src}), (uint32_t)({n})))) {go}"));
@@ -3809,6 +3876,7 @@ fn emit_c_insn(
                 e.line(&format!(
                     "if (WT_UNLIKELY((uint64_t)tu0 + {k}ULL > (uint64_t)({ml}))) {go}"
                 ));
+                e.line("WT_SPEC_BARRIER();");
                 e.line(&format!("memset(mb + tu0, (uint8_t)({val}), {k}u);"));
             } else {
                 e.line(&format!("if (WT_UNLIKELY(wt_mfill(mb, {ml}, (uint32_t)({dst}), (uint8_t)({val}), (uint32_t)({n})))) {go}"));
@@ -4229,6 +4297,7 @@ struct GeneratedC {
 fn generate_c_sources(
     wasm: &[u8],
     opt: COpt,
+    spectre_mitigations: bool,
     timings: bool,
     deadline: Option<Instant>,
 ) -> Res<GeneratedC> {
@@ -4427,7 +4496,7 @@ fn generate_c_sources(
         .unwrap();
         writeln!(
             types_h,
-            "static inline {ret_ty} wt_ci{ci_id}({}) {{\n  uint32_t u = (uint32_t)idx;\n  if (WT_UNLIKELY(u >= {tlen}u)) return {oob};\n  if (WT_UNLIKELY(u < {min_slot}u || u - {min_slot}u >= {span}u)) return {bad};\n  Ci{ci_id}Fn fn = WT_CI{ci_id}_TBL[u - {min_slot}u];\n  if (WT_UNLIKELY(!fn)) return {bad};\n  return fn({});\n}}\n",
+            "static inline {ret_ty} wt_ci{ci_id}({}) {{\n  uint32_t u = (uint32_t)idx;\n  if (WT_UNLIKELY(u >= {tlen}u)) return {oob};\n  if (WT_UNLIKELY(u < {min_slot}u || u - {min_slot}u >= {span}u)) return {bad};\n  WT_SPEC_BARRIER();\n#ifdef WT_SPECTRE_MITIGATIONS\n  const volatile Ci{ci_id}Fn *table = WT_CI{ci_id}_TBL;\n#else\n  const Ci{ci_id}Fn *table = WT_CI{ci_id}_TBL;\n#endif\n  Ci{ci_id}Fn fn = table[u - {min_slot}u];\n  if (WT_UNLIKELY(!fn)) return {bad};\n  WT_SPEC_BARRIER();\n  return fn({});\n}}\n",
             c_ci_params(&module, ci_id, true)?,
             call_args.join(", ")
         )
@@ -4605,7 +4674,11 @@ fn generate_c_sources(
     }
 
     Ok(GeneratedC {
-        rt_h: WTIME_AOT_RT_H.to_string(),
+        rt_h: if spectre_mitigations {
+            format!("#define WT_SPECTRE_MITIGATIONS 1\n{WTIME_AOT_RT_H}")
+        } else {
+            WTIME_AOT_RT_H.to_string()
+        },
         types_h,
         extra_headers,
         shards,
@@ -5029,7 +5102,7 @@ fn emit_rt_exports_c(
         } else {
             writeln!(
                 s,
-                "{ret_ty} wt_ci{ci_id}({}) {{\n  switch ((uint32_t)idx) {{",
+                "{ret_ty} wt_ci{ci_id}({}) {{\n#ifdef WT_SPECTRE_MITIGATIONS\n  volatile uint32_t u = (uint32_t)idx;\n  if (u >= {tlen}u) return {oob};\n  WT_SPEC_BARRIER();\n#else\n  switch ((uint32_t)idx) {{\n#endif",
                 c_ci_params(module, ci_id, true)?
             )
             .unwrap();
@@ -5050,11 +5123,15 @@ fn emit_rt_exports_c(
                 } else {
                     format!("f{f}({})", a.join(", "))
                 };
-                writeln!(s, "  case {slot}u: return {call};").unwrap();
+                writeln!(
+                    s,
+                    "#ifdef WT_SPECTRE_MITIGATIONS\n  if (u == {slot}u) {{ WT_SPEC_BARRIER(); return {call}; }}\n#else\n  case {slot}u: return {call};\n#endif"
+                )
+                .unwrap();
             }
             writeln!(
                 s,
-                "  default: return ((uint32_t)idx >= {tlen}u) ? ({oob}) : ({bad});\n  }}\n}}\n"
+                "#ifdef WT_SPECTRE_MITIGATIONS\n  return {bad};\n#else\n  default: return ((uint32_t)idx >= {tlen}u) ? ({oob}) : ({bad});\n  }}\n#endif\n}}\n"
             )
             .unwrap();
         }
@@ -5102,7 +5179,7 @@ fn emit_rt_exports_c(
     for (off_expr, start, len) in &active_segs {
         writeln!(
             s,
-            "  {{ uint64_t o = (uint64_t)(uint32_t)({off_expr}); if (o + {len}ULL > (uint64_t)ctx->mem.len) return TRAP_OOB; {} }}",
+            "  {{ uint64_t o = (uint64_t)(uint32_t)({off_expr}); if (o + {len}ULL > (uint64_t)ctx->mem.len) return TRAP_OOB; WT_SPEC_BARRIER(); {} }}",
             if *len > 0 { format!("memcpy(mb + o, WT_DATA + {start}u, {len}u);") } else { String::new() }
         )
         .unwrap();
@@ -5280,6 +5357,10 @@ fn emit_rt_exports_c(
          }\n\n\
          WT_EXPORT void blot_aot_drop(BlotHandle *h) {\n\
          \x20 if (!h || h->ctx.in_call) return;\n\
+         #ifdef WT_SPECTRE_MITIGATIONS\n\
+         \x20 if (h->mem) wt_secure_zero(h->mem, h->ctx.mem.len);\n\
+         \x20 wt_secure_zero(&h->ctx, sizeof(h->ctx));\n\
+         #endif\n\
          \x20 free(h->mem);\n\
          \x20 free(h);\n\
          }\n\n",
@@ -5565,7 +5646,7 @@ fn top_c_call(module: &Module, f: usize, extra_args: &[String]) -> String {
 /// Emits the C99 project into `out` (for inspection or external builds).
 #[allow(dead_code)]
 pub fn generate_c(wasm: &[u8], out: &Path, opt: COpt) -> Res<()> {
-    generate_c_with_deadline(wasm, out, opt, None)
+    generate_c_with_deadline(wasm, out, opt, false, None)
 }
 
 /// Emits the C99 project into `out` while cooperatively polling `deadline`.
@@ -5573,10 +5654,11 @@ pub fn generate_c_with_deadline(
     wasm: &[u8],
     out: &Path,
     opt: COpt,
+    spectre_mitigations: bool,
     deadline: Option<Instant>,
 ) -> Res<()> {
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
-    let generated = generate_c_sources(wasm, opt, timings, deadline)?;
+    let generated = generate_c_sources(wasm, opt, spectre_mitigations, timings, deadline)?;
     if let Some(dl) = deadline
         && Instant::now() >= dl
     {
@@ -7107,7 +7189,7 @@ pub fn build_c_blot_cdylib(
     let cc_info = detect_cc_with_deadline(target_cpu, Some(&cache), deadline)?;
     let cc_target = cc_target_fingerprint_with_deadline(&cc_info, target_cpu, deadline)?;
     build_c_blot_cdylib_with_info(
-        wasm, &cache, target_cpu, jobs, opt, &cc_info, &cc_target, deadline, out_so,
+        wasm, &cache, target_cpu, jobs, opt, false, &cc_info, &cc_target, deadline, out_so,
     )
 }
 
@@ -7118,6 +7200,7 @@ pub fn build_c_blot_cdylib_with_info(
     target_cpu: &str,
     jobs: Option<u32>,
     opt: COpt,
+    spectre_mitigations: bool,
     cc_info: &CcInfo,
     cc_target: &str,
     deadline: Option<Instant>,
@@ -7138,7 +7221,7 @@ pub fn build_c_blot_cdylib_with_info(
     let obj_cache = crate::build::ensure_private_dir(&cache.join("c-obj"))?;
     let work_root = crate::build::ensure_private_dir(&cache.join("work"))?;
     check_dl("cgen source generation")?;
-    let generated = generate_c_sources(wasm, opt, timings, deadline)?;
+    let generated = generate_c_sources(wasm, opt, spectre_mitigations, timings, deadline)?;
     check_dl("cgen source generation")?;
 
     let work_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -7695,6 +7778,48 @@ mod tests {
         }
         wasm.extend(section(10, &code));
         wasm
+    }
+
+    #[test]
+    fn c_backend_spectre_mitigations_are_opt_in() {
+        let wasm = crate::x64::tests_unit::spectre_mitigations_wasm();
+        let root = crate::build::create_fresh_test_root("wtime-aot-cgen-spectre");
+        let cache = root.0.join("cache");
+        for spectre_mitigations in [false, true] {
+            let generated =
+                generate_c_sources(&wasm, COpt::O2, spectre_mitigations, false, None).unwrap();
+            assert_eq!(
+                generated
+                    .rt_h
+                    .starts_with("#define WT_SPECTRE_MITIGATIONS 1\n"),
+                spectre_mitigations
+            );
+        }
+        let cc_info = match detect_cc_with_deadline("native", Some(&cache), None) {
+            Ok(info) => info,
+            Err(err)
+                if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") =>
+            {
+                panic!("host C compiler probe failed: {err}");
+            }
+            Err(_) => return,
+        };
+        let cc_target = cc_target_fingerprint_with_deadline(&cc_info, "native", None).unwrap();
+        let so = root.0.join("hardened.so");
+        build_c_blot_cdylib_with_info(
+            &wasm,
+            &cache,
+            "native",
+            Some(1),
+            COpt::O2,
+            true,
+            &cc_info,
+            &cc_target,
+            Some(Instant::now() + Duration::from_secs(120)),
+            &so,
+        )
+        .unwrap();
+        assert!(so.is_file());
     }
 
     #[test]

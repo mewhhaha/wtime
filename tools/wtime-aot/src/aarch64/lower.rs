@@ -551,6 +551,13 @@ impl<'a> LowerA64<'a> {
         self.asm.ret();
     }
 
+    fn emit_speculation_barrier(&mut self) {
+        if self.layout.spectre_mitigations {
+            self.asm.dsb_nsh();
+            self.asm.isb();
+        }
+    }
+
     fn emit_bounds_check(&mut self, addr: Reg, end_off: u64) {
         let oob = self.trap_oob_lbl();
         if !self.layout.memory64 {
@@ -572,11 +579,13 @@ impl<'a> LowerA64<'a> {
                 self.asm.cmp_r(true, SGP2, SGP3);
             }
             self.asm.b_cond(Cond::Hi, oob);
+            self.emit_speculation_barrier();
             return;
         }
         if end_off == 0 {
             self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
             self.asm.b_cond(Cond::Hi, oob);
+            self.emit_speculation_barrier();
             return;
         }
         if self.layout.memory64 {
@@ -591,6 +600,7 @@ impl<'a> LowerA64<'a> {
                 }
                 self.asm.cmp_r(true, SGP2, SGP3);
                 self.asm.b_cond(Cond::Hi, oob);
+                self.emit_speculation_barrier();
                 return;
             }
             self.asm.mov_imm64(SGP3, end_off);
@@ -598,6 +608,7 @@ impl<'a> LowerA64<'a> {
             self.asm.b_cond(Cond::Hs, oob); // carry set => 64-bit unsigned overflow!
             self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
             self.asm.b_cond(Cond::Hi, oob);
+            self.emit_speculation_barrier();
             return;
         }
         if end_off < 4096 {
@@ -608,6 +619,7 @@ impl<'a> LowerA64<'a> {
         }
         self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
         self.asm.b_cond(Cond::Hi, oob);
+        self.emit_speculation_barrier();
     }
 
     /// Computes effective host address `MEM_BASE_REG + zext(addr) + offset` into `SGP3`
@@ -932,6 +944,7 @@ impl<'a> LowerA64<'a> {
                 SGP3,
             );
             self.asm.cbz(true, SGP2, bad);
+            self.emit_speculation_barrier();
             self.asm.sub_imm(true, SGP2, SGP2, 1);
             self.asm
                 .adr_reloc(SGP1, A64RelocTarget::Rodata(self.layout.func_addr_ro_off));
@@ -963,6 +976,7 @@ impl<'a> LowerA64<'a> {
             );
             self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
             self.asm.b_cond(Cond::Hs, toob);
+            self.emit_speculation_barrier();
             emit_load_off(
                 &mut self.asm,
                 Ty::I64,
@@ -974,6 +988,7 @@ impl<'a> LowerA64<'a> {
             );
             self.asm.ldr_reg_scaled(true, SGP2, SGP1, SGP2, true);
             self.asm.cbz(true, SGP2, bad);
+            self.emit_speculation_barrier();
             self.asm.sub_imm(true, SGP2, SGP2, 1);
             self.asm
                 .adr_reloc(SGP1, A64RelocTarget::Rodata(self.layout.func_sig_ro_off));
@@ -981,6 +996,7 @@ impl<'a> LowerA64<'a> {
             self.asm.mov_imm32(SGP1, ci.canon_sig);
             self.asm.cmp_r(false, SGP3, SGP1);
             self.asm.b_cond(Cond::Ne, bad);
+            self.emit_speculation_barrier();
             self.asm
                 .adr_reloc(SGP1, A64RelocTarget::Rodata(self.layout.func_addr_ro_off));
             self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
@@ -993,6 +1009,7 @@ impl<'a> LowerA64<'a> {
         self.asm.mov_imm32(SGP3, ci.table_len);
         self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
         self.asm.b_cond(Cond::Hs, toob);
+        self.emit_speculation_barrier();
         if ci.span == 0 {
             self.asm.b(bad);
             return false;
@@ -1004,10 +1021,12 @@ impl<'a> LowerA64<'a> {
         self.asm.mov_imm32(SGP3, ci.span);
         self.asm.cmp_r(false, SGP2, SGP3);
         self.asm.b_cond(Cond::Hs, bad);
+        self.emit_speculation_barrier();
         self.asm
             .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
         self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
         self.asm.cbz(true, SGP3, bad);
+        self.emit_speculation_barrier();
         self.asm.add_r(true, SGP1, SGP1, SGP3);
         if !is_tail_jump {
             self.asm.blr(SGP1);
@@ -2060,6 +2079,7 @@ impl<'a> LowerA64<'a> {
                     self.asm.mov_imm32(SGP2, len);
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
+                    self.emit_speculation_barrier();
                     self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP2);
                     let d = self.gp_write_reg(r);
                     self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
@@ -2077,6 +2097,7 @@ impl<'a> LowerA64<'a> {
                     );
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
+                    self.emit_speculation_barrier();
                     emit_load_off(
                         &mut self.asm,
                         Ty::I64,
@@ -2099,6 +2120,7 @@ impl<'a> LowerA64<'a> {
                     self.asm.mov_imm32(SGP2, len);
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
+                    self.emit_speculation_barrier();
                     let vr = self.gp_read(val, SGP1);
                     let idx_r = if self.loc(idx) != A64Loc::Gp(ir) {
                         self.asm.mov_r(true, SGP2, vr);
@@ -2122,6 +2144,7 @@ impl<'a> LowerA64<'a> {
                     );
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
+                    self.emit_speculation_barrier();
                     emit_load_off(
                         &mut self.asm,
                         Ty::I64,
@@ -2969,6 +2992,7 @@ impl<'a> LowerA64<'a> {
                 self.asm.b_cond(Cond::Hs, oob);
                 self.asm.cmp_r(true, SGP3, SGP2);
                 self.asm.b_cond(Cond::Hi, oob);
+                self.emit_speculation_barrier();
                 emit_load_off(
                     &mut self.asm,
                     Ty::I64,
@@ -3156,6 +3180,7 @@ impl<'a> LowerA64<'a> {
                 self.asm.b_cond(Cond::Hs, oob);
                 self.asm.cmp_r(true, SGP3, SGP2);
                 self.asm.b_cond(Cond::Hi, oob);
+                self.emit_speculation_barrier();
                 emit_load_off(
                     &mut self.asm,
                     Ty::I64,
@@ -3236,6 +3261,7 @@ impl<'a> LowerA64<'a> {
                 self.asm.b_cond(Cond::Hs, oob);
                 self.asm.cmp_r(true, SGP3, SGP2);
                 self.asm.b_cond(Cond::Hi, oob);
+                self.emit_speculation_barrier();
                 emit_load_off(
                     &mut self.asm,
                     Ty::I64,
@@ -3309,6 +3335,7 @@ impl<'a> LowerA64<'a> {
                 self.asm.b_cond(Cond::Hs, oob);
                 self.asm.cmp_r(true, SGP3, SGP2);
                 self.asm.b_cond(Cond::Hi, oob);
+                self.emit_speculation_barrier();
                 emit_load_off(
                     &mut self.asm,
                     Ty::I64,
@@ -4543,6 +4570,7 @@ impl<'a> LowerA64<'a> {
                 self.asm.mov_imm32(SGP2, n);
                 self.asm.cmp_r(false, ir, SGP2);
                 self.asm.b_cond(Cond::Hs, def_lbl);
+                self.emit_speculation_barrier();
                 let jt_off = self.asm.add_jump_table(targets);
                 self.asm
                     .adr_reloc(SGP2, A64RelocTarget::LocalRodata(jt_off));

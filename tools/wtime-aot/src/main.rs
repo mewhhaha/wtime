@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -36,6 +36,10 @@ fn main() {
             Err(build::BuildError::AdmissionRejected(error)) => {
                 eprintln!("wtime-aot build: {error}");
                 exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
+            }
+            Err(build::BuildError::Usage(error)) => {
+                eprintln!("wtime-aot build: {error}");
+                exit(2);
             }
             Err(build::BuildError::Failed(error)) => {
                 eprintln!("wtime-aot build: {error}");
@@ -49,6 +53,7 @@ fn main() {
     let mut flat64 = false;
     let mut target = codegen::Target::GooseBin;
     let mut backend = build::Backend::Rust;
+    let mut spectre_mitigations = false;
     let mut c_opt = cgen::COpt::Auto;
     let mut c_opt_explicit = false;
     let mut target_cpu = String::from("native");
@@ -72,6 +77,7 @@ fn main() {
                     exit(2);
                 }
             },
+            "--spectre-mitigations" => spectre_mitigations = true,
             "--c-opt" => match args.next().as_deref().map(cgen::COpt::parse) {
                 Some(Ok(v)) => {
                     c_opt = v;
@@ -133,6 +139,10 @@ fn main() {
             }
         }
     }
+    if spectre_mitigations && backend == build::Backend::Rust {
+        eprintln!("wtime-aot: {}", build::SPECTRE_RUST_ERROR);
+        exit(2);
+    }
     let (Some(module), Some(out)) = (module, out) else {
         eprintln!("{USAGE}");
         exit(2)
@@ -164,6 +174,10 @@ fn main() {
                 eprintln!("wtime-aot: {error}");
                 exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
             }
+            Err(build::BuildError::Usage(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(2);
+            }
             Err(build::BuildError::Failed(error)) => {
                 eprintln!("wtime-aot: {error}");
                 exit(1);
@@ -174,6 +188,7 @@ fn main() {
             isa,
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
+            spectre_mitigations,
             ..Default::default()
         };
         let elf_bytes = match x64::compile_wasm_to_x64_so(&bytes, &opts) {
@@ -216,6 +231,10 @@ fn main() {
                 eprintln!("wtime-aot: {error}");
                 exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
             }
+            Err(build::BuildError::Usage(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(2);
+            }
             Err(build::BuildError::Failed(error)) => {
                 eprintln!("wtime-aot: {error}");
                 exit(1);
@@ -226,6 +245,7 @@ fn main() {
             optimize: true,
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
+            spectre_mitigations,
             ..Default::default()
         };
         let elf_bytes = match aarch64::compile_wasm_to_aarch64(&bytes, &opts) {
@@ -262,7 +282,9 @@ fn main() {
             eprintln!("wtime-aot: --backend c currently requires --blot-cdylib");
             exit(2);
         }
-        if let Err(error) = cgen::generate_c_with_deadline(&bytes, &out, c_opt, Some(deadline)) {
+        if let Err(error) =
+            cgen::generate_c_with_deadline(&bytes, &out, c_opt, spectre_mitigations, Some(deadline))
+        {
             eprintln!("wtime-aot: {error}");
             exit(1);
         }

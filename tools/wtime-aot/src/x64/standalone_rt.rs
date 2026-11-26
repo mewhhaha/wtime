@@ -11,12 +11,12 @@ use super::{
     CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
     GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE,
     HELPER_STANDALONE_FS, HELPER_STANDALONE_RESERVE_COPY, INTERNAL_EXN_SIGNAL, OFF_EXEC_ARGC,
-    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_ENVP, OFF_EXEC_EXIT_CODE, OFF_EXEC_MEM_LIMIT,
-    OFF_EXEC_OUTPUT_LIMIT, OFF_EXEC_POLICY_PTR, OFF_EXEC_PROG_NAME, OFF_EXEC_RESERVING,
-    OFF_EXEC_TIMING_PATH, OFF_EXEC_WRITTEN, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
-    OFF_HANDLE_ALLOC_BYTES, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES,
-    OFF_STACK_FLOOR, RodataConsts, TRAP_EXIT, TRAP_HOST, TRAP_MESSAGES, TRAP_OOB,
-    TRAP_UNSUPPORTED_ISA,
+    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_CLOCK_QUANTUM, OFF_EXEC_ENVP,
+    OFF_EXEC_EXIT_CODE, OFF_EXEC_MEM_LIMIT, OFF_EXEC_OUTPUT_LIMIT, OFF_EXEC_POLICY_PTR,
+    OFF_EXEC_PROG_NAME, OFF_EXEC_RESERVING, OFF_EXEC_TIMING_PATH, OFF_EXEC_WRITTEN,
+    OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_MEM_BASE, OFF_MEM_LEN,
+    OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, RodataConsts, TRAP_EXIT, TRAP_HOST,
+    TRAP_MESSAGES, TRAP_OOB, TRAP_UNSUPPORTED_ISA,
 };
 
 const SYS_READ: u32 = 0;
@@ -115,6 +115,35 @@ fn emit_clock_ns(a: &mut Asm, clock_id: u32, ts_off: i32) {
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, ts_off));
     a.imul_rri(true, Gp::Rax, Gp::Rax, 1_000_000_000);
     a.add_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, ts_off + 8));
+}
+
+/// Loads the clock quantum into `R9` and sets ZF if clocks are denied.
+fn emit_check_clock_policy(a: &mut Asm) {
+    a.mov_rm(
+        true,
+        Gp::R9,
+        Mem::base_disp(Gp::R15, OFF_EXEC_CLOCK_QUANTUM),
+    );
+    a.cmp_ri(true, Gp::R9, -1);
+}
+
+/// Rounds the timestamp in `Rax` down to a multiple of the quantum in `R9`.
+fn emit_coarsen_clock_ns(a: &mut Asm) {
+    let lbl_done = a.new_label();
+    a.test_rr(true, Gp::R9, Gp::R9);
+    a.jcc(Cond::E, lbl_done);
+    a.mov_rr(true, Gp::Rcx, Gp::Rax);
+    a.xor_rr(false, Gp::Rdx, Gp::Rdx);
+    a.div_r(true, Gp::R9); // Rdx = timestamp % quantum
+    a.sub_rr(true, Gp::Rcx, Gp::Rdx);
+    a.mov_rr(true, Gp::Rax, Gp::Rcx);
+    a.bind(lbl_done);
+}
+
+fn emit_skip_without_timing(a: &mut Asm, lbl_skip: Label) {
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_EXEC_TIMING_PATH));
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_skip);
 }
 
 /// Helper: writes `[Rsi .. +Rdx]` to `fd` (handles partial writes/EINTR).
@@ -248,15 +277,19 @@ pub fn emit_standalone_entry(
     //   [rsp + 128..136] = output_limit (default 256 MiB)
     //   [rsp + 136..144] = policy_ptr (0 until --allow-files / --allow-env)
     //   [rsp + 144..224] = /proc/self/fd/<fd> formatting scratch (80 B)
+    //   [rsp + 224..232] = clock quantum (0 = full resolution)
+    const CLOCK_QUANTUM_SLOT: i32 = 224;
     a.and_ri(true, Gp::Rsp, -16);
     a.sub_ri(true, Gp::Rsp, 256);
     a.stmxcsr(Mem::base_disp(Gp::Rsp, 72));
     a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 24), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 40), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 48), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 56), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 64), Gp::R13);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 136), Gp::Rax);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, CLOCK_QUANTUM_SLOT), Gp::Rax);
     a.mov_ri64(Gp::Rax, DEFAULT_OUTPUT_LIMIT);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 128), Gp::Rax);
     // envp = &argv[argc + 1]
@@ -277,7 +310,8 @@ pub fn emit_standalone_entry(
 
     // ---- Step 0: Parse optional host CLI flags before `--` ----
     // Recognizes `--timing-json PATH`, `--memory-limit-pages N`, `--allow-files DIR`,
-    // `--allow-env NAME|*`, `--output-limit N`, `--time-limit S`, `--stack-limit-mib N`, and `--`.
+    // `--allow-env NAME|*`, `--output-limit N`, `--time-limit S`, `--stack-limit-mib N`,
+    // `--no-clock`, `--clock-coarsen-ns N`, and `--`.
     let lbl_arg_loop = a.new_label();
     let lbl_arg_rest = a.new_label();
     let lbl_arg_done = a.new_label();
@@ -357,6 +391,36 @@ pub fn emit_standalone_entry(
     a.jmp(lbl_arg_loop);
 
     a.bind(lbl_not_tj);
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_streq_const(&mut a, b"--no-clock");
+    let lbl_not_no_clock = a.new_label();
+    let lbl_set_clock = a.new_label();
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_not_no_clock);
+    a.mov_ri64(Gp::Rax, u64::MAX);
+    a.jmp(lbl_set_clock);
+
+    a.bind(lbl_not_no_clock);
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_streq_const(&mut a, b"--clock-coarsen-ns");
+    let lbl_not_coarsen = a.new_label();
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_not_coarsen);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.cmp_rr(true, Gp::Rbx, Gp::R12);
+    a.jcc(Cond::Ae, lbl_fail_usage);
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_parse_u64(&mut a, lbl_fail_usage);
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_fail_usage);
+    a.cmp_ri(true, Gp::Rax, -1);
+    a.jcc(Cond::E, lbl_fail_usage);
+    a.bind(lbl_set_clock);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, CLOCK_QUANTUM_SLOT), Gp::Rax);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.jmp(lbl_arg_loop);
+
+    a.bind(lbl_not_coarsen);
     a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
     emit_streq_const(&mut a, b"--memory-limit-pages");
     let lbl_not_ml = a.new_label();
@@ -603,8 +667,18 @@ pub fn emit_standalone_entry(
         a.jcc(Cond::Ne, lbl_fail_isa);
     }
 
-    // ---- Step 2: Record t0_ns ----
+    // ---- Step 2: Record t0_ns if guest clocks or timing JSON need it ----
+    let lbl_record_origin = a.new_label();
+    let lbl_store_origin = a.new_label();
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, CLOCK_QUANTUM_SLOT));
+    a.cmp_ri(true, Gp::Rax, -1);
+    a.jcc(Cond::Ne, lbl_record_origin);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 40));
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_store_origin);
+    a.bind(lbl_record_origin);
     emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
+    a.bind(lbl_store_origin);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rax);
 
     // ---- Step 3: Allocate Ctx + Guest Stack + Linear Memory ----
@@ -639,6 +713,12 @@ pub fn emit_standalone_entry(
     );
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 40));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_TIMING_PATH), Gp::Rax);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, CLOCK_QUANTUM_SLOT));
+    a.mov_mr(
+        true,
+        Mem::base_disp(Gp::R15, OFF_EXEC_CLOCK_QUANTUM),
+        Gp::Rax,
+    );
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 48));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_MEM_LIMIT), Gp::Rax);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 112));
@@ -896,13 +976,16 @@ pub fn emit_standalone_entry(
     a.ldmxcsr_rip(RelocTarget::Rodata(ro.mxcsr_wasm));
     a.call_reloc(RelocTarget::Helper(HELPER_INITIALIZE));
 
-    // Switch back briefly to record t1_ns
+    // Switch back briefly to record t1_ns when timing was requested.
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -8));
     a.mov_rr(false, Gp::Rbx, Gp::R11); // save init trap code in Rbx
+    let lbl_after_init_timing = a.new_label();
+    emit_skip_without_timing(&mut a, lbl_after_init_timing);
     emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 24), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 32), Gp::Rax);
+    a.bind(lbl_after_init_timing);
 
     let lbl_after_start = a.new_label();
     a.test_rr(false, Gp::Rbx, Gp::Rbx);
@@ -924,6 +1007,7 @@ pub fn emit_standalone_entry(
         }
         a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
         a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -8));
+        emit_skip_without_timing(&mut a, lbl_after_start);
         emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
         a.mov_mr(true, Mem::base_disp(Gp::Rsp, 32), Gp::Rax);
     }
@@ -1081,6 +1165,7 @@ pub fn emit_standalone_entry(
         a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
         a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -8));
         a.mov_ri32(Gp::Rbx, u32::from(TRAP_OOB));
+        emit_skip_without_timing(&mut a, lbl_after_start);
         emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
         a.mov_mr(true, Mem::base_disp(Gp::Rsp, 32), Gp::Rax);
         let lbl_have_t1 = a.new_label();
@@ -1700,21 +1785,26 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
             a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
             a.ret();
         }
-        ("env", "gs_os_clock_ns") | ("env", "bench_clock") => {
-            a.sub_ri(true, Gp::Rsp, 24);
-            emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
-            a.sub_rm(
-                true,
-                Gp::Rax,
-                Mem::base_disp(Gp::R15, OFF_EXEC_CLOCK_ORIGIN),
-            );
-            a.add_ri(true, Gp::Rsp, 24);
+        ("env", "gs_os_clock_ns" | "bench_clock" | "gs_os_time_ns") => {
+            let lbl_allowed = a.new_label();
+            emit_check_clock_policy(&mut a);
+            a.jcc(Cond::Ne, lbl_allowed);
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
             a.xor_rr(false, Gp::R11, Gp::R11);
             a.ret();
-        }
-        ("env", "gs_os_time_ns") => {
+            a.bind(lbl_allowed);
             a.sub_ri(true, Gp::Rsp, 24);
-            emit_clock_ns(&mut a, CLOCK_REALTIME, 0);
+            if fname == "gs_os_time_ns" {
+                emit_clock_ns(&mut a, CLOCK_REALTIME, 0);
+            } else {
+                emit_clock_ns(&mut a, CLOCK_MONOTONIC, 0);
+                a.sub_rm(
+                    true,
+                    Gp::Rax,
+                    Mem::base_disp(Gp::R15, OFF_EXEC_CLOCK_ORIGIN),
+                );
+            }
+            emit_coarsen_clock_ns(&mut a);
             a.add_ri(true, Gp::Rsp, 24);
             a.xor_rr(false, Gp::R11, Gp::R11);
             a.ret();
@@ -2482,6 +2572,9 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
         }
         ("wasi_snapshot_preview1", "clock_time_get") => {
             // (clock_id: Rdi, precision: Rsi, out_ptr: Rdx) -> i32
+            let lbl_denied = a.new_label();
+            emit_check_clock_policy(&mut a);
+            a.jcc(Cond::E, lbl_denied);
             zext_param(&mut a, Gp::Rdi, 0);
             zext_param(&mut a, Gp::Rdx, 2);
             let lbl_oob = a.new_label();
@@ -2506,6 +2599,7 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
                 Mem::base_disp(Gp::R15, OFF_EXEC_CLOCK_ORIGIN),
             );
             a.bind(lbl_store);
+            emit_coarsen_clock_ns(&mut a);
             a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, 16));
             a.add_ri(true, Gp::Rsp, 40);
             a.mov_mr(true, Mem::indexed(Gp::R14, Gp::Rdx, 1, 0), Gp::Rax);
@@ -2518,6 +2612,10 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
             a.ret();
             a.bind(lbl_oob);
             a.mov_ri32(Gp::Rax, 21);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+            a.bind(lbl_denied);
+            a.mov_ri32(Gp::Rax, 2); // EACCES
             a.xor_rr(false, Gp::R11, Gp::R11);
             a.ret();
         }

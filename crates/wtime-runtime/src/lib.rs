@@ -102,6 +102,28 @@ pub struct Config {
     /// Host resource, memory, work, and fuel budgets.
     pub limits: ResourceLimits,
 }
+impl Config {
+    /// Returns a conservative configuration for running untrusted multi-tenant workers.
+    ///
+    /// Combines [`FeatureSet::untrusted_worker`] (disabling `threads` / shared memory) with
+    /// [`ResourceLimits::untrusted_worker`] (tight memory, GC, table, call-depth, module-size,
+    /// fuel, and single-threaded compilation caps). No ambient host capabilities (clocks,
+    /// filesystem, or network) are linked by `wtime-runtime` unless explicitly registered on a
+    /// [`Linker`].
+    ///
+    /// # Isolation boundary
+    ///
+    /// A [`Store`] enforces WebAssembly architectural isolation within a process; it is not a
+    /// CPU microarchitectural side-channel boundary between mutually hostile tenants sharing an
+    /// address space. For untrusted multi-tenant worker platforms, run each tenant in a separate
+    /// OS-sandboxed process or microVM (see `docs/architecture/security-model.md`).
+    pub fn untrusted_worker() -> Self {
+        Self {
+            features: FeatureSet::untrusted_worker(),
+            limits: ResourceLimits::untrusted_worker(),
+        }
+    }
+}
 /// Explicit execution request. Unimplemented tiers fail during configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExecutionPolicy {
@@ -690,7 +712,15 @@ impl ValueRootToken {
     }
 }
 
-/// Isolated WebAssembly execution state owning all instances, memories, tables, globals, GC heap objects, and host resources.
+/// Isolated WebAssembly execution state owning all instances, memories, tables, globals, GC heap
+/// objects, and host resources.
+///
+/// # Security boundary
+///
+/// `Store` provides architectural WebAssembly isolation (subject to the host imports linked into
+/// it and configured [`ResourceLimits`]). It does not provide an OS address-space or CPU
+/// transient-execution (Spectre) boundary between mutually hostile tenants inside the same
+/// process; see `docs/architecture/security-model.md` for multi-tenant deployment guidance.
 pub struct Store {
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     register_activation: register_activation_diagnostics::Diagnostics,

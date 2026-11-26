@@ -223,3 +223,30 @@ All four Blot backends (`x64`, `aarch64`, `c`, `rust`) expose the same 18 C-ABI 
   trapping return.
 - **No cross-frame unwinding**: panics, C++ exceptions, and `longjmp` must never
   unwind across generated frames.
+
+## 4. Opt-In Hardening & Multi-Tenant Controls
+
+See [`docs/architecture/security-model.md`](../architecture/security-model.md) for the full dual-use
+(local vs. multi-tenant worker platform) threat model and exact Linux `seccomp-bpf` syscall tables.
+
+- **Tenant lifecycle (`blot_aot_call_reset` is not a scrub)**: `blot_aot_call_reset` invokes the
+  guest module's `blot:reset` export and does not wipe linear memories, extra memories, tables,
+  globals, exception slabs, or the guest stack. Between distinct tenants, always destroy the
+  process or call `blot_aot_drop` and instantiate a fresh handle.
+- **Opt-in `--spectre-mitigations`** (off by default; bound into all build and incremental cache
+  keys):
+  - `--backend x64`: disables unchecked guard-page bounds elision (`use_guard_pages = false`) and
+    emits `lfence` on the in-bounds path after linear memory (`memory32`, `memory64`, extra
+    memories), table (`table.get`/`set`), indirect call (`call_indirect`/`call_ref`), and
+    `br_table` bounds checks.
+  - `--backend aarch64`: disables guard-page bounds elision and emits `dsb nsh; isb` after memory,
+    table, indirect call, and `br_table` bounds checks.
+  - `--backend c`: defines `WT_SPECTRE_MITIGATIONS`, inserts `WT_SPEC_BARRIER()` on memory, table,
+    `call_indirect`, and `br_table` checks, and volatile-zeroes committed memory and `Ctx` in
+    `blot_aot_drop`.
+  - `--backend rust`: rejects `--spectre-mitigations` fail-closed (safe Rust cannot emit hardware
+    speculation barriers).
+- **Standalone clock controls**: standalone `x64`, `aarch64`, and Goose (`wtime-aot-rt`) runners
+  accept `--no-clock` (returns WASI `EACCES` / `0`; standalone `x64` and `aarch64` ELFs also omit
+  `clock_gettime` syscalls completely when `--timing-json` is absent) and `--clock-coarsen-ns N`
+  (truncates guest-visible timestamps to multiples of `N` nanoseconds).

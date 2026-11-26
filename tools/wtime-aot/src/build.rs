@@ -49,7 +49,9 @@ static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+
+pub(crate) const SPECTRE_RUST_ERROR: &str = "--spectre-mitigations requires hardware speculation barriers, which safe Rust cannot emit; use --backend x64, --backend aarch64, or --backend c";
 
 /// Codegen/compiler backend used by `wtime-aot build`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,10 +63,11 @@ pub enum Backend {
 }
 
 /// Typed build error distinguishing clean `--backend x64` admission rejections (CLI exit code `4`)
-/// from usage/I/O/timeout/compiler errors (CLI exit code `1`).
+/// from invalid mitigation options (CLI exit code `2`) and other build errors (CLI exit code `1`).
 #[derive(Clone, Debug)]
 pub enum BuildError {
     AdmissionRejected(String),
+    Usage(String),
     Failed(String),
 }
 
@@ -90,6 +93,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
     let mut target_cpu = String::from("native");
     let mut target = crate::codegen::Target::GooseBin;
     let mut backend = Backend::Rust;
+    let mut spectre_mitigations = false;
     let mut c_opt = crate::cgen::COpt::Auto;
     let mut c_opt_explicit = false;
     let mut train = None;
@@ -139,6 +143,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
                     other => return Err(format!("{USAGE}\ninvalid --backend {other:?}").into()),
                 };
             }
+            "--spectre-mitigations" => spectre_mitigations = true,
             "--c-opt" => {
                 c_opt = crate::cgen::COpt::parse(&value()?)?;
                 c_opt_explicit = true;
@@ -152,6 +157,9 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
             }
             other => return Err(format!("{USAGE}\nunrecognized argument {other}").into()),
         }
+    }
+    if spectre_mitigations && backend == Backend::Rust {
+        return Err(BuildError::Usage(SPECTRE_RUST_ERROR.into()));
     }
     let (Some(module), Some(cache)) = (module, cache) else {
         return Err(USAGE.into());
@@ -179,7 +187,14 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
         c_opt,
     };
     let program = match train {
-        None => build_classified(&module, &cache, module_path.as_deref(), &rt, &options)?,
+        None => build_classified(
+            &module,
+            &cache,
+            module_path.as_deref(),
+            &rt,
+            &options,
+            spectre_mitigations,
+        )?,
         Some(train) => build_trained(
             &module,
             &cache,
@@ -225,8 +240,8 @@ pub fn build(
     rt: &Path,
     options: &Options,
 ) -> Result<PathBuf, String> {
-    build_classified(module, cache, module_path, rt, options).map_err(|e| match e {
-        BuildError::AdmissionRejected(s) | BuildError::Failed(s) => s,
+    build_classified(module, cache, module_path, rt, options, false).map_err(|e| match e {
+        BuildError::AdmissionRejected(s) | BuildError::Usage(s) | BuildError::Failed(s) => s,
     })
 }
 
@@ -236,16 +251,23 @@ fn build_classified(
     module_path: Option<&str>,
     rt: &Path,
     options: &Options,
+    spectre_mitigations: bool,
 ) -> Result<PathBuf, BuildError> {
     let deadline = std::time::Instant::now() + options.time_limit;
     if options.backend == Backend::C {
-        return Ok(build_c(module, cache, options, deadline)?);
+        return Ok(build_c(
+            module,
+            cache,
+            options,
+            spectre_mitigations,
+            deadline,
+        )?);
     }
     if options.backend == Backend::X64 {
-        return build_x64(module, cache, options, deadline);
+        return build_x64(module, cache, options, spectre_mitigations, deadline);
     }
     if options.backend == Backend::Aarch64 {
-        return build_aarch64(module, cache, options, deadline);
+        return build_aarch64(module, cache, options, spectre_mitigations, deadline);
     }
     let prepared = prepare(module, cache, module_path, rt, options, deadline)?;
     Ok(cached(
@@ -1299,6 +1321,7 @@ fn build_c(
     module: &Path,
     cache: &Path,
     options: &Options,
+    spectre_mitigations: bool,
     deadline: std::time::Instant,
 ) -> Result<PathBuf, String> {
     check_deadline(deadline, options.time_limit)?;
@@ -1316,6 +1339,11 @@ fn build_c(
 
     let mut key = Sha256::new();
     field(&mut key, "wtime-aot build c 9", &[]);
+    field(
+        &mut key,
+        "spectre mitigations",
+        &[u8::from(spectre_mitigations)],
+    );
     field(&mut key, "wasm", &wasm);
     field(
         &mut key,
@@ -1368,6 +1396,7 @@ fn build_c(
         options.target_cpu,
         options.jobs,
         options.c_opt,
+        spectre_mitigations,
         &cc_info,
         &cc_target,
         Some(deadline),
@@ -1431,6 +1460,7 @@ fn build_aarch64(
     module: &Path,
     cache: &Path,
     options: &Options,
+    spectre_mitigations: bool,
     deadline: std::time::Instant,
 ) -> Result<PathBuf, BuildError> {
     use std::io::Write as _;
@@ -1455,6 +1485,11 @@ fn build_aarch64(
     };
     let mut key = Sha256::new();
     field(&mut key, "wtime-aot build aarch64 2", &[]);
+    field(
+        &mut key,
+        "spectre mitigations",
+        &[u8::from(spectre_mitigations)],
+    );
     field(&mut key, "target", artifact_name.as_bytes());
     field(&mut key, "wasm digest", &wasm_sha);
     field(&mut key, "generator build sha256", &gen_sha);
@@ -1481,6 +1516,7 @@ fn build_aarch64(
         optimize: true,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
+        spectre_mitigations,
         inc_cache_dir: Some(cache.join("a64-inc")),
         gen_fingerprint: gen_sha,
     };
@@ -1534,6 +1570,7 @@ fn build_x64(
     module: &Path,
     cache: &Path,
     options: &Options,
+    spectre_mitigations: bool,
     deadline: std::time::Instant,
 ) -> Result<PathBuf, BuildError> {
     use std::io::Write as _;
@@ -1578,6 +1615,11 @@ fn build_x64(
     // unverified cache hit can never bypass IR/regalloc verification when verification is requested.
     let mut key = Sha256::new();
     field(&mut key, "wtime-aot build x64 4", &[]);
+    field(
+        &mut key,
+        "spectre mitigations",
+        &[u8::from(spectre_mitigations)],
+    );
     field(&mut key, "target", artifact_name.as_bytes());
     field(&mut key, "wasm digest", &wasm_sha);
     field(&mut key, "generator build sha256", &gen_sha);
@@ -1630,6 +1672,7 @@ fn build_x64(
         isa,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
+        spectre_mitigations,
         verify,
         inc_cache_dir: Some(cache.clone()),
         cache_key_salt: Some(gen_sha),

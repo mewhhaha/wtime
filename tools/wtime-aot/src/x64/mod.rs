@@ -97,7 +97,11 @@ pub const OFF_EXEC_OUTPUT_LIMIT: i32 = 208;
 pub const OFF_EXEC_WRITTEN: i32 = 216;
 pub const OFF_EXEC_RESERVING: i32 = 224;
 pub const OFF_EXEC_POLICY_PTR: i32 = 232;
-pub const CTX_HEADER_BYTES: usize = 240;
+/// Standalone clock policy quantum in nanoseconds (`0` = full resolution, `u64::MAX` = deny,
+/// `1..u64::MAX` = truncate timestamps down to multiples of this quantum).
+pub const OFF_EXEC_CLOCK_QUANTUM: i32 = 240;
+/// 16-byte aligned header size (`240 + 8` padded to `256` so subsequent `v128` globals stay aligned).
+pub const CTX_HEADER_BYTES: usize = 256;
 
 // ---- Canonical trap codes `1..=22` ----
 pub const TRAP_UNREACHABLE: u8 = 1;
@@ -178,6 +182,8 @@ pub struct CtxLayout {
     /// `true` iff standalone `ET_EXEC` reserves an `8 GiB + 64 KiB` `PROT_NONE` guard region with
     /// a `SIGSEGV` handler for `memory32` (NEVER enabled for `--blot-cdylib` `.so`).
     pub use_guard_pages: bool,
+    /// Emit hardware speculation barriers after guest bounds and dispatch checks.
+    pub spectre_mitigations: bool,
     pub global_offs: Vec<i32>,
     pub table_lens: Vec<u32>,
     pub table_is64: Vec<bool>,
@@ -207,6 +213,12 @@ pub struct CtxLayout {
 }
 
 impl CtxLayout {
+    pub(crate) fn with_spectre_mitigations(mut self, enabled: bool) -> Self {
+        self.spectre_mitigations = enabled;
+        self.use_guard_pages &= !enabled;
+        self
+    }
+
     /// Returns the `Ctx` byte offset of memory `mem`'s 32-byte descriptor (`0` for memory 0).
     #[inline]
     pub fn mem_desc_off(&self, mem: u32) -> i32 {
@@ -368,6 +380,7 @@ impl CtxLayout {
             use_guard_pages: module.target == X64Target::StandaloneExec
                 && !module.memory64
                 && module.memory.is_some(),
+            spectre_mitigations: false,
             global_offs,
             table_lens: module.table_lens.clone(),
             table_is64: module.table_is64.clone(),
@@ -441,6 +454,8 @@ pub struct X64CompileOptions {
     /// Worker count: `0` = auto (`available_parallelism().min(64)`), explicit clamped `1..=64`.
     pub jobs: usize,
     pub deadline: Option<Instant>,
+    /// Emit speculation barriers and keep software bounds checks through lowering.
+    pub spectre_mitigations: bool,
     /// Enable SSA IR optimizations (`false` exercises `lower_wasm_to_ir_unopt` for differential tests).
     pub opt: bool,
     /// Run `verify_ir` and `verify_alloc` on every defined function during compilation.
@@ -463,6 +478,7 @@ impl Default for X64CompileOptions {
             },
             jobs: 0,
             deadline: None,
+            spectre_mitigations: false,
             opt: true,
             verify: true,
             inc_cache_dir: None,
@@ -1544,8 +1560,9 @@ fn compile_wasm_to_x64_so_inner(
 
     // 3. Compute Ctx global/extern-table offsets first, then build shared `.rodata` + `ci_tables`,
     //    then finalize `CtxLayout` with `ci_tables`.
-    let preliminary_layout =
-        CtxLayout::compute(&module, Vec::new()).map_err(X64CompileError::AdmissionRejected)?;
+    let preliminary_layout = CtxLayout::compute(&module, Vec::new())
+        .map_err(X64CompileError::AdmissionRejected)?
+        .with_spectre_mitigations(opts.spectre_mitigations);
     let SharedRodata {
         mut rodata,
         consts: ro,
@@ -1675,6 +1692,7 @@ fn compile_wasm_to_x64_so_inner(
             opts.isa,
             opts.opt,
             opts.verify,
+            opts.spectre_mitigations,
             n_defs,
             &module,
             &layout,
@@ -2343,7 +2361,10 @@ fn compile_wasm_to_x64_so_inner(
                     }
                     let step_res: Result<(AllocResult, Option<opt::FnElideInput>), String> =
                         (|| {
-                            if let Some(ref eff) = effects {
+                            // Stage 2 can prove bounds from branches that have no fence.
+                            if !opts.spectre_mitigations
+                                && let Some(ref eff) = effects
+                            {
                                 let ts = Instant::now();
                                 opt::optimize_func_stage2_with_scratch(
                                     &mut ir,
@@ -4017,15 +4038,17 @@ fn try_compile_defs_incremental(
                         break;
                     };
                     let step_res: Result<AllocResult, String> = (|| {
-                        let ts = Instant::now();
-                        opt::optimize_func_stage2_with_scratch(
-                            &mut ir,
-                            module,
-                            &effects,
-                            Some(budget),
-                            &mut scratch,
-                        )?;
-                        loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
+                        if !opts.spectre_mitigations {
+                            let ts = Instant::now();
+                            opt::optimize_func_stage2_with_scratch(
+                                &mut ir,
+                                module,
+                                &effects,
+                                Some(budget),
+                                &mut scratch,
+                            )?;
+                            loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
+                        }
                         if opts.verify {
                             verify_ir(&ir, module)?;
                         }
