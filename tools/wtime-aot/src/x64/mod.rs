@@ -173,6 +173,8 @@ pub struct CiTableLayout {
 #[derive(Clone, Debug)]
 pub struct CtxLayout {
     pub pinned_global: Option<u32>,
+    /// Optional 2nd hottest mutable scalar global pinned in `R13` when `fixed_mem_bytes.is_some()`.
+    pub pinned_global_2: Option<u32>,
     /// `Some(fixed_bytes)` iff memory 0 is fixed-size (`min == max`), freeing `R13` as a 4th callee-saved GP reg.
     pub fixed_mem_bytes: Option<u64>,
     /// Minimum guaranteed byte length of linear memory 0 (`min_pages * 65_536`; never shrinks).
@@ -204,6 +206,8 @@ pub struct CtxLayout {
     pub extra_mem_offs: Vec<i32>,
     /// `memory64` flag for each extra linear memory `1..N`.
     pub extra_mem_is64: Vec<bool>,
+    /// Minimum guaranteed byte length (`min_pages * 65_536`) for each extra linear memory `1..N`.
+    pub extra_mem_min_bytes: Vec<u64>,
     /// `Some(off)` when module uses Wasm `exception_handling` (`+0: active_exn, +8: slab_ptr, +16: slab_cursor, +24: slab_cap`).
     pub exn_state_off: Option<i32>,
     /// Per-tag payload field `(Ty, offset)` list and 16B-aligned total record size (empty for non-EH modules).
@@ -236,6 +240,16 @@ impl CtxLayout {
             self.memory64
         } else {
             self.extra_mem_is64[(mem as usize) - 1]
+        }
+    }
+
+    /// Returns the minimum guaranteed byte length of linear memory `mem`.
+    #[inline]
+    pub fn mem_min_bytes_idx(&self, mem: u32) -> u64 {
+        if mem == 0 {
+            self.mem_min_bytes
+        } else {
+            self.extra_mem_min_bytes[(mem as usize) - 1]
         }
     }
 
@@ -299,6 +313,7 @@ impl CtxLayout {
         }
         let mut extra_mem_offs = Vec::with_capacity(module.extra_memories.len());
         let mut extra_mem_is64 = Vec::with_capacity(module.extra_memories.len());
+        let mut extra_mem_min_bytes = Vec::with_capacity(module.extra_memories.len());
         for em in &module.extra_memories {
             cur = align_up_checked(cur, 8)?;
             let off = i32::try_from(cur).map_err(|_| "x64: Ctx extra-memory offset exceeds i32")?;
@@ -310,6 +325,7 @@ impl CtxLayout {
             }
             extra_mem_offs.push(off);
             extra_mem_is64.push(em.memory64);
+            extra_mem_min_bytes.push(em.min_pages.saturating_mul(65_536));
         }
         let exn_state_off = if module.uses_exceptions {
             cur = align_up_checked(cur, 8)?;
@@ -372,6 +388,7 @@ impl CtxLayout {
         }
         Ok(Self {
             pinned_global: module.pinned_global,
+            pinned_global_2: module.pinned_global_2,
             fixed_mem_bytes: module.fixed32,
             mem_min_bytes: module
                 .memory
@@ -392,6 +409,7 @@ impl CtxLayout {
             func_addr_ro_off: 0,
             extra_mem_offs,
             extra_mem_is64,
+            extra_mem_min_bytes,
             exn_state_off,
             tag_layouts,
             ci_tables,
@@ -1672,7 +1690,7 @@ fn compile_wasm_to_x64_so_inner(
 
     let alloc_cfg = AllocConfig {
         allow_r12: layout.pinned_global.is_none(),
-        allow_r13: layout.fixed_mem_bytes.is_some(),
+        allow_r13: layout.fixed_mem_bytes.is_some() && layout.pinned_global_2.is_none(),
         has_bmi2: opts.isa.has_bmi2,
     };
 
@@ -2361,15 +2379,13 @@ fn compile_wasm_to_x64_so_inner(
                     }
                     let step_res: Result<(AllocResult, Option<opt::FnElideInput>), String> =
                         (|| {
-                            // Stage 2 can prove bounds from branches that have no fence.
-                            if !opts.spectre_mitigations
-                                && let Some(ref eff) = effects
-                            {
+                            if let Some(ref eff) = effects {
                                 let ts = Instant::now();
-                                opt::optimize_func_stage2_with_scratch(
+                                opt::optimize_func_stage2_with_options(
                                     &mut ir,
                                     &module,
                                     eff,
+                                    opts.spectre_mitigations,
                                     Some(&budget),
                                     &mut scratch,
                                 )?;
@@ -4038,17 +4054,16 @@ fn try_compile_defs_incremental(
                         break;
                     };
                     let step_res: Result<AllocResult, String> = (|| {
-                        if !opts.spectre_mitigations {
-                            let ts = Instant::now();
-                            opt::optimize_func_stage2_with_scratch(
-                                &mut ir,
-                                module,
-                                &effects,
-                                Some(budget),
-                                &mut scratch,
-                            )?;
-                            loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
-                        }
+                        let ts = Instant::now();
+                        opt::optimize_func_stage2_with_options(
+                            &mut ir,
+                            module,
+                            &effects,
+                            opts.spectre_mitigations,
+                            Some(budget),
+                            &mut scratch,
+                        )?;
+                        loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
                         if opts.verify {
                             verify_ir(&ir, module)?;
                         }

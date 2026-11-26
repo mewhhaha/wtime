@@ -4970,7 +4970,10 @@ pub fn run_licm(
                             let gi = g as usize;
                             let written = (gi >> 6) < loop_written_globals.len()
                                 && (loop_written_globals[gi >> 6] & (1u64 << (gi & 63))) != 0;
-                            module.pinned_global != Some(g) && !loop_writes_all_globals && !written
+                            module.pinned_global != Some(g)
+                                && module.pinned_global_2 != Some(g)
+                                && !loop_writes_all_globals
+                                && !written
                         }
                         Op::MemSize => !loop_grows_mem,
                         ref op => is_pure_licm_op(op),
@@ -5815,7 +5818,8 @@ impl<'a> GvnState<'a> {
             return true;
         }
         if let Some(b) = self.non_wrap_bound[addr.0 as usize]
-            && b.saturating_add(end_off) <= self.mem_min_bytes
+            && b.checked_add(end_off)
+                .is_some_and(|hi| hi <= self.mem_min_bytes)
         {
             return true;
         }
@@ -6106,6 +6110,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     dom: &CfgDom,
     module: &X64Module,
     effects: &ModuleEffects,
+    allow_bce: bool,
     budget: Option<&CompileBudget>,
     scratch: &mut Stage2Scratch,
 ) -> Res<(bool, bool)> {
@@ -6586,7 +6591,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                     // Wrap-safe addressing-mode folding + cross-block dominator BCE + alias-aware Load/Store forwarding.
                     match &mut inst.op {
                         Op::BoundsCheck { addr, end_off, .. } => {
-                            if st.is_checked(*addr, *end_off) {
+                            if allow_bce && st.is_checked(*addr, *end_off) {
                                 ir_mutated = true;
                                 continue;
                             }
@@ -6612,7 +6617,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             let sz = kind.bytes();
                             let end = (*offset).saturating_add(sz);
                             let is_safe = *checked || st.is_checked(*addr, end);
-                            if is_safe {
+                            if allow_bce && is_safe {
                                 *checked = true;
                             }
                             let const_addr = if module.memory64 {
@@ -6643,8 +6648,15 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     val_ty: ir.val_tys[res.0 as usize],
                                 });
                                 match *kind {
-                                    LoadKind::I32Load8U => st.tighten_bound(res, 255),
-                                    LoadKind::I32Load16U => st.tighten_bound(res, 65_535),
+                                    LoadKind::I32Load8U | LoadKind::I64Load8U => {
+                                        st.tighten_bound(res, 255)
+                                    }
+                                    LoadKind::I32Load16U | LoadKind::I64Load16U => {
+                                        st.tighten_bound(res, 65_535)
+                                    }
+                                    LoadKind::I64Load32U => {
+                                        st.tighten_bound(res, u64::from(u32::MAX))
+                                    }
                                     _ => {}
                                 }
                             }
@@ -6691,7 +6703,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             let sz = kind.bytes();
                             let end = (*offset).saturating_add(sz);
-                            if *checked || st.is_checked(*addr, end) {
+                            if allow_bce && (*checked || st.is_checked(*addr, end)) {
                                 *checked = true;
                             }
                             st.record_checked(*addr, end);
@@ -6731,7 +6743,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 ir_mutated = true;
                             }
                             let end = (*offset).saturating_add(u64::from(*width));
-                            if *checked || st.is_checked(*addr, end) {
+                            if allow_bce && (*checked || st.is_checked(*addr, end)) {
                                 *checked = true;
                             }
                             st.record_checked(*addr, end);
@@ -6756,7 +6768,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             let sz = u64::from(*width);
                             let end = (*offset).saturating_add(sz);
-                            if *checked || st.is_checked(*addr, end) {
+                            if allow_bce && (*checked || st.is_checked(*addr, end)) {
                                 *checked = true;
                             }
                             st.record_checked(*addr, end);
@@ -6794,7 +6806,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             let mut forwarded_lanes: [(u32, Val, StoreKind); 4] =
                                 [(0, Val(0), StoreKind::I64); 4];
                             let mut n_lanes = 0usize;
-                            if *len > 0 && *len <= 32 && (*len & 3) == 0 {
+                            if allow_bce && *len > 0 && *len <= 32 && (*len & 3) == 0 {
                                 let (mut s_base, mut s_off) = st.try_fold_addr(*src, 0);
                                 if s_off.saturating_add(end) > i32::MAX as u64 {
                                     s_base = *src;
@@ -6899,10 +6911,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 continue;
                             }
 
-                            if dst_ok {
+                            if allow_bce && dst_ok {
                                 *dst_checked = true;
                             }
-                            if src_ok {
+                            if allow_bce && src_ok {
                                 *src_checked = true;
                             }
                             st.record_checked(*dst, end);
@@ -6918,7 +6930,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             dst, len, checked, ..
                         } => {
                             let end = u64::from(*len);
-                            if *checked || st.is_checked(*dst, end) {
+                            if allow_bce && (*checked || st.is_checked(*dst, end)) {
                                 *checked = true;
                             }
                             st.record_checked(*dst, end);
@@ -7708,6 +7720,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             st.insert_expr(key, res);
                         }
+                        let bit_mask_u64 = |v: u64| -> u64 {
+                            if v == 0 {
+                                0
+                            } else {
+                                u64::MAX >> v.leading_zeros()
+                            }
+                        };
                         match inst.op {
                             Op::ConstI32(c) => {
                                 st.insert_const32(res, c);
@@ -7718,15 +7737,41 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             Op::ConstI64(c) => {
                                 st.insert_const64(res, c);
+                                st.tighten_bound(res, c as u64);
                                 if c != 0 {
                                     st.mark_non_zero(res);
                                 }
                             }
-                            Op::I32BinImm(IntBinOp::Or, _, m)
-                            | Op::I64BinImm(IntBinOp::Or, _, m)
-                                if m != 0 =>
-                            {
-                                st.mark_non_zero(res);
+                            Op::I32BinImm(IntBinOp::Or, base, m) => {
+                                if m != 0 {
+                                    st.mark_non_zero(res);
+                                }
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize] {
+                                    let mu = u64::from(m as u32);
+                                    let hi = b.saturating_add(mu).min(bit_mask_u64(b | mu));
+                                    if hi <= u64::from(u32::MAX) {
+                                        st.tighten_bound(res, hi);
+                                    }
+                                }
+                            }
+                            Op::I64BinImm(IntBinOp::Or, base, m) => {
+                                if m != 0 {
+                                    st.mark_non_zero(res);
+                                }
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize] {
+                                    let mu = m as i64 as u64;
+                                    let hi = b.saturating_add(mu).min(bit_mask_u64(b | mu));
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I32BinImm(IntBinOp::Xor, base, m) => {
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize] {
+                                    let mu = u64::from(m as u32);
+                                    let hi = b.saturating_add(mu).min(bit_mask_u64(b | mu));
+                                    if hi <= u64::from(u32::MAX) {
+                                        st.tighten_bound(res, hi);
+                                    }
+                                }
                             }
                             Op::I32BinImm(IntBinOp::Add, base, k) if k > 0 => {
                                 st.insert_add_const(res, base, k as u32);
@@ -7737,11 +7782,58 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     st.mark_non_zero(res);
                                 }
                             }
-                            Op::I32BinImm(IntBinOp::And, _, m) => {
-                                st.tighten_bound(res, u64::from(m as u32));
+                            Op::I64BinImm(IntBinOp::Add, base, k) if k > 0 => {
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize]
+                                    && let Some(hi) = b.checked_add(k as u64)
+                                {
+                                    st.tighten_bound(res, hi);
+                                    st.mark_non_zero(res);
+                                }
                             }
-                            Op::I32BinImm(IntBinOp::ShrU, _, sh) if (1..32).contains(&sh) => {
-                                st.tighten_bound(res, u64::from(u32::MAX >> (sh as u32)));
+                            Op::I32BinImm(IntBinOp::Mul, base, k) => {
+                                let ku = u64::from(k as u32);
+                                if ku == 0 {
+                                    st.tighten_bound(res, 0);
+                                } else if let Some(b) = st.non_wrap_bound[base.0 as usize]
+                                    && let Some(hi) = b.checked_mul(ku)
+                                    && hi <= u64::from(u32::MAX)
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I64BinImm(IntBinOp::Mul, base, k) if k >= 0 => {
+                                let ku = k as u64;
+                                if ku == 0 {
+                                    st.tighten_bound(res, 0);
+                                } else if let Some(b) = st.non_wrap_bound[base.0 as usize]
+                                    && let Some(hi) = b.checked_mul(ku)
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I32BinImm(IntBinOp::And, base, m) => {
+                                let mu = u64::from(m as u32);
+                                let b =
+                                    st.non_wrap_bound[base.0 as usize].map_or(mu, |x| x.min(mu));
+                                st.tighten_bound(res, b);
+                            }
+                            Op::I64BinImm(IntBinOp::And, base, m) => {
+                                let mu = m as i64 as u64;
+                                let b =
+                                    st.non_wrap_bound[base.0 as usize].map_or(mu, |x| x.min(mu));
+                                st.tighten_bound(res, b);
+                            }
+                            Op::I32BinImm(IntBinOp::ShrU, base, sh) if (1..32).contains(&sh) => {
+                                let sh_u = sh as u32;
+                                let hi = st.non_wrap_bound[base.0 as usize]
+                                    .map_or(u64::from(u32::MAX >> sh_u), |b| b >> sh_u);
+                                st.tighten_bound(res, hi);
+                            }
+                            Op::I64BinImm(IntBinOp::ShrU, base, sh) if (1..64).contains(&sh) => {
+                                let sh_u = sh as u32;
+                                let hi = st.non_wrap_bound[base.0 as usize]
+                                    .map_or(u64::MAX >> sh_u, |b| b >> sh_u);
+                                st.tighten_bound(res, hi);
                             }
                             Op::I32BinImm(IntBinOp::Shl, base, sh) if (1..32).contains(&sh) => {
                                 if let Some(b) = st.non_wrap_bound[base.0 as usize]
@@ -7750,11 +7842,294 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     st.tighten_bound(res, b << (sh as u32));
                                 }
                             }
-                            Op::Select { a, b, .. } | Op::CmpSelect { tv: a, fv: b, .. } => {
+                            Op::I64BinImm(IntBinOp::Shl, base, sh) if (1..64).contains(&sh) => {
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize]
+                                    && b <= (u64::MAX >> (sh as u32))
+                                {
+                                    st.tighten_bound(res, b << (sh as u32));
+                                }
+                            }
+                            Op::I32BinImm(IntBinOp::RemU, _, d) if d != 0 => {
+                                st.tighten_bound(res, u64::from((d as u32) - 1));
+                            }
+                            Op::I64BinImm(IntBinOp::RemU, _, d) if d != 0 => {
+                                st.tighten_bound(res, (d as i64 as u64) - 1);
+                            }
+                            Op::I32Bin(IntBinOp::And, a, b) => {
+                                let hi = match (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) {
+                                    (Some(ba), Some(bb)) => Some(ba.min(bb)),
+                                    (Some(ba), None) => Some(ba),
+                                    (None, Some(bb)) => Some(bb),
+                                    (None, None) => None,
+                                };
+                                if let Some(h) = hi {
+                                    st.tighten_bound(res, h);
+                                }
+                            }
+                            Op::I64Bin(IntBinOp::And, a, b) => {
+                                let hi = match (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) {
+                                    (Some(ba), Some(bb)) => Some(ba.min(bb)),
+                                    (Some(ba), None) => Some(ba),
+                                    (None, Some(bb)) => Some(bb),
+                                    (None, None) => None,
+                                };
+                                if let Some(h) = hi {
+                                    st.tighten_bound(res, h);
+                                }
+                            }
+                            Op::I32Bin(IntBinOp::Add, a, b) => {
+                                if let (Some(ba), Some(bb)) = (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) && let Some(hi) = ba.checked_add(bb)
+                                    && hi <= u64::from(u32::MAX)
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I64Bin(IntBinOp::Add, a, b) => {
+                                if let (Some(ba), Some(bb)) = (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) && let Some(hi) = ba.checked_add(bb)
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I32Bin(IntBinOp::Mul, a, b) => {
+                                if let (Some(ba), Some(bb)) = (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) && let Some(hi) = ba.checked_mul(bb)
+                                    && hi <= u64::from(u32::MAX)
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I64Bin(IntBinOp::Mul, a, b) => {
+                                if let (Some(ba), Some(bb)) = (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) && let Some(hi) = ba.checked_mul(bb)
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::I32Bin(IntBinOp::Or | IntBinOp::Xor, a, b) => {
                                 if let (Some(ba), Some(bb)) = (
                                     st.non_wrap_bound[a.0 as usize],
                                     st.non_wrap_bound[b.0 as usize],
                                 ) {
+                                    let hi = ba.saturating_add(bb).min(bit_mask_u64(ba | bb));
+                                    if hi <= u64::from(u32::MAX) {
+                                        st.tighten_bound(res, hi);
+                                    }
+                                }
+                            }
+                            Op::I32Bin(IntBinOp::ShrU, a, _) | Op::I64Bin(IntBinOp::ShrU, a, _) => {
+                                if let Some(ba) = st.non_wrap_bound[a.0 as usize] {
+                                    st.tighten_bound(res, ba);
+                                }
+                            }
+                            Op::I32Bin(IntBinOp::RemU | IntBinOp::RemUNz, _, d)
+                            | Op::I64Bin(IntBinOp::RemU | IntBinOp::RemUNz, _, d) => {
+                                if let Some(bd) = st.non_wrap_bound[d.0 as usize]
+                                    && bd > 0
+                                {
+                                    st.tighten_bound(res, bd - 1);
+                                }
+                            }
+                            Op::I32Bin(IntBinOp::DivU | IntBinOp::DivUNz, a, _)
+                            | Op::I64Bin(IntBinOp::DivU | IntBinOp::DivUNz, a, _) => {
+                                if let Some(ba) = st.non_wrap_bound[a.0 as usize] {
+                                    st.tighten_bound(res, ba);
+                                }
+                            }
+                            Op::I32Cmp(..)
+                            | Op::I64Cmp(..)
+                            | Op::F32Cmp(..)
+                            | Op::F64Cmp(..)
+                            | Op::I32Eqz(_)
+                            | Op::I64Eqz(_) => {
+                                st.tighten_bound(res, 1);
+                            }
+                            Op::I32Clz(_) | Op::I32Ctz(_) | Op::I32Popcnt(_) => {
+                                st.tighten_bound(res, 32);
+                            }
+                            Op::I64Clz(_) | Op::I64Ctz(_) | Op::I64Popcnt(_) => {
+                                st.tighten_bound(res, 64);
+                            }
+                            Op::I64ExtendI32U(a) => {
+                                st.tighten_bound(
+                                    res,
+                                    st.non_wrap_bound[a.0 as usize].unwrap_or(u64::from(u32::MAX)),
+                                );
+                            }
+                            Op::AddScaled {
+                                base,
+                                idx,
+                                shift,
+                                disp,
+                                is64,
+                            } if disp >= 0 && shift < 64 => {
+                                if let (Some(bb), Some(bi)) = (
+                                    st.non_wrap_bound[base.0 as usize],
+                                    st.non_wrap_bound[idx.0 as usize],
+                                ) && let Some(scaled) = bi.checked_mul(1u64 << shift)
+                                    && let Some(s1) = bb.checked_add(scaled)
+                                    && let Some(hi) = s1.checked_add(disp as u64)
+                                    && (is64 || hi <= u64::from(u32::MAX))
+                                {
+                                    st.tighten_bound(res, hi);
+                                }
+                            }
+                            Op::Select { a, b, .. } => {
+                                if let (Some(ba), Some(bb)) = (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) {
+                                    st.tighten_bound(res, ba.max(bb));
+                                }
+                            }
+                            Op::CmpSelect { kind, a, b, tv, fv } => {
+                                // Detect unsigned upper-bounded clamps on BOTH register-register
+                                // (`I32`/`I64`) and register-immediate (`I32Imm`/`I64Imm`) selects:
+                                // e.g. `x <u k ? x : k`, `x <u k ? x : 0`, `x >=u k ? (k-1) : x`.
+                                let tv_b = st.non_wrap_bound[tv.0 as usize];
+                                let fv_b = st.non_wrap_bound[fv.0 as usize];
+                                let refined_tv = match kind {
+                                    CmpBranchKind::I32Imm(CmpOp::LtU, imm) if tv == a => {
+                                        let lim = u64::from(imm as u32).saturating_sub(1);
+                                        Some(tv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I32Imm(CmpOp::LeU, imm) if tv == a => {
+                                        let lim = u64::from(imm as u32);
+                                        Some(tv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I64Imm(CmpOp::LtU, imm) if tv == a => {
+                                        let lim = (imm as i64 as u64).saturating_sub(1);
+                                        Some(tv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I64Imm(CmpOp::LeU, imm) if tv == a => {
+                                        let lim = imm as i64 as u64;
+                                        Some(tv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I32(CmpOp::LtU)
+                                    | CmpBranchKind::I64(CmpOp::LtU)
+                                        if tv == a =>
+                                    {
+                                        match (tv_b, st.non_wrap_bound[b.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y.saturating_sub(1))),
+                                            (None, Some(y)) => Some(y.saturating_sub(1)),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    CmpBranchKind::I32(CmpOp::LeU)
+                                    | CmpBranchKind::I64(CmpOp::LeU)
+                                        if tv == a =>
+                                    {
+                                        match (tv_b, st.non_wrap_bound[b.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y)),
+                                            (None, Some(y)) => Some(y),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    CmpBranchKind::I32(CmpOp::GtU)
+                                    | CmpBranchKind::I64(CmpOp::GtU)
+                                        if tv == b =>
+                                    {
+                                        match (tv_b, st.non_wrap_bound[a.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y.saturating_sub(1))),
+                                            (None, Some(y)) => Some(y.saturating_sub(1)),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    CmpBranchKind::I32(CmpOp::GeU)
+                                    | CmpBranchKind::I64(CmpOp::GeU)
+                                        if tv == b =>
+                                    {
+                                        match (tv_b, st.non_wrap_bound[a.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y)),
+                                            (None, Some(y)) => Some(y),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    _ => tv_b,
+                                };
+                                let refined_fv = match kind {
+                                    CmpBranchKind::I32Imm(CmpOp::GeU, imm) if fv == a => {
+                                        let lim = u64::from(imm as u32).saturating_sub(1);
+                                        Some(fv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I32Imm(CmpOp::GtU, imm) if fv == a => {
+                                        let lim = u64::from(imm as u32);
+                                        Some(fv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I64Imm(CmpOp::GeU, imm) if fv == a => {
+                                        let lim = (imm as i64 as u64).saturating_sub(1);
+                                        Some(fv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I64Imm(CmpOp::GtU, imm) if fv == a => {
+                                        let lim = imm as i64 as u64;
+                                        Some(fv_b.map_or(lim, |x| x.min(lim)))
+                                    }
+                                    CmpBranchKind::I32(CmpOp::GeU)
+                                    | CmpBranchKind::I64(CmpOp::GeU)
+                                        if fv == a =>
+                                    {
+                                        match (fv_b, st.non_wrap_bound[b.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y.saturating_sub(1))),
+                                            (None, Some(y)) => Some(y.saturating_sub(1)),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    CmpBranchKind::I32(CmpOp::GtU)
+                                    | CmpBranchKind::I64(CmpOp::GtU)
+                                        if fv == a =>
+                                    {
+                                        match (fv_b, st.non_wrap_bound[b.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y)),
+                                            (None, Some(y)) => Some(y),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    CmpBranchKind::I32(CmpOp::LeU)
+                                    | CmpBranchKind::I64(CmpOp::LeU)
+                                        if fv == b =>
+                                    {
+                                        match (fv_b, st.non_wrap_bound[a.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y.saturating_sub(1))),
+                                            (None, Some(y)) => Some(y.saturating_sub(1)),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    CmpBranchKind::I32(CmpOp::LtU)
+                                    | CmpBranchKind::I64(CmpOp::LtU)
+                                        if fv == b =>
+                                    {
+                                        match (fv_b, st.non_wrap_bound[a.0 as usize]) {
+                                            (Some(x), Some(y)) => Some(x.min(y)),
+                                            (None, Some(y)) => Some(y),
+                                            (Some(x), None) => Some(x),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    _ => fv_b,
+                                };
+                                if let (Some(ba), Some(bb)) = (refined_tv, refined_fv) {
                                     st.tighten_bound(res, ba.max(bb));
                                 }
                             }
@@ -10861,6 +11236,7 @@ pub fn optimize_func_stage2(
 }
 
 /// Complete per-function Stage 2 IR optimization sequence reusing worker-local `Stage2Scratch`.
+#[cfg(test)]
 pub fn optimize_func_stage2_with_scratch(
     ir: &mut IrFunc,
     module: &X64Module,
@@ -10868,6 +11244,25 @@ pub fn optimize_func_stage2_with_scratch(
     budget: Option<&CompileBudget>,
     scratch: &mut Stage2Scratch,
 ) -> Res<()> {
+    optimize_func_stage2_with_options(ir, module, effects, false, budget, scratch)
+}
+
+/// Complete per-function Stage 2 IR optimization sequence with explicit Spectre hardening control.
+///
+/// When `spectre_mitigations` is `true`, bounds-check elimination, unchecked scaled loads/stores,
+/// and unchecked vectorized/versioned loops are disabled so every linear-memory access lowers
+/// through an explicit bounds check + branchless index clamp, while all Spectre-safe SSA
+/// optimizations (inlining, CFG cleanup, diamond `CmpSelect`, LICM, pure/global GVN, constant-trip
+/// unrolling, magic-constant division, and `AddScaled`) remain active.
+pub fn optimize_func_stage2_with_options(
+    ir: &mut IrFunc,
+    module: &X64Module,
+    effects: &ModuleEffects,
+    spectre_mitigations: bool,
+    budget: Option<&CompileBudget>,
+    scratch: &mut Stage2Scratch,
+) -> Res<()> {
+    let allow_bce = !spectre_mitigations;
     // Take `dom`, `cfg_scratch`, `prune_scratch` temporarily so we can pass `&dom` alongside `&mut scratch`.
     let mut dom = std::mem::take(&mut scratch.dom);
     let mut cfg_sc = std::mem::take(&mut scratch.cfg_scratch);
@@ -10885,20 +11280,23 @@ pub fn optimize_func_stage2_with_scratch(
         }
         if ir.blocks.len() == 1 {
             let euclid_changed = fold_euclidean_pow2_rem(ir, scratch);
-            let (_, gvn_changed) =
-                run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+            let (_, gvn_changed) = run_dom_gvn_and_bce_with_scratch(
+                ir, &dom, module, effects, allow_bce, budget, scratch,
+            )?;
             let op_flags = scratch.op_flags;
             if euclid_changed || gvn_changed || early_state != 2 {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
-            let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
-            if slp2 {
-                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
-            }
-            if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
-                && slp_fuse_f64x4(ir)
-            {
-                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            if allow_bce {
+                let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
+                if slp2 {
+                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                }
+                if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
+                    && slp_fuse_f64x4(ir)
+                {
+                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                }
             }
             if fold_add_scaled(ir, scratch) {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
@@ -10915,18 +11313,21 @@ pub fn optimize_func_stage2_with_scratch(
             let _ = fold_euclidean_pow2_rem(ir, scratch);
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
             if ir.blocks.len() == 1 {
-                let _ =
-                    run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+                let _ = run_dom_gvn_and_bce_with_scratch(
+                    ir, &dom, module, effects, allow_bce, budget, scratch,
+                )?;
                 let op_flags = scratch.op_flags;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
-                let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
-                if slp2 {
-                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
-                }
-                if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
-                    && slp_fuse_f64x4(ir)
-                {
-                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                if allow_bce {
+                    let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
+                    if slp2 {
+                        optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                    }
+                    if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
+                        && slp_fuse_f64x4(ir)
+                    {
+                        optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                    }
                 }
                 return Ok(());
             }
@@ -10941,8 +11342,9 @@ pub fn optimize_func_stage2_with_scratch(
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
             has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
         }
-        let (folded_branch, gvn_mutated) =
-            run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+        let (folded_branch, gvn_mutated) = run_dom_gvn_and_bce_with_scratch(
+            ir, &dom, module, effects, allow_bce, budget, scratch,
+        )?;
         let mut op_flags = scratch.op_flags;
         let split_sc = split_short_circuit_branches(ir);
         let prev_blocks = ir.blocks.len();
@@ -10988,7 +11390,8 @@ pub fn optimize_func_stage2_with_scratch(
         let mut non_wrap_scaled: HashSet<Val> = fx_set();
         if has_loops {
             let mut versioned_diamond = false;
-            if (op_flags & OP_FLAG_UNCHECKED_MEM) != 0
+            if allow_bce
+                && (op_flags & OP_FLAG_UNCHECKED_MEM) != 0
                 && version_checked_counted_loops(
                     ir,
                     &dom,
@@ -11007,7 +11410,7 @@ pub fn optimize_func_stage2_with_scratch(
                 // versioned so loads across pure read-only diamonds (e.g. `heapsort` sift_down) forward!
                 if versioned_diamond {
                     let (folded_after_ver, gvn_after_ver) = run_dom_gvn_and_bce_with_scratch(
-                        ir, &dom, module, effects, budget, scratch,
+                        ir, &dom, module, effects, allow_bce, budget, scratch,
                     )?;
                     if folded_after_ver || gvn_after_ver {
                         optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
@@ -11036,8 +11439,9 @@ pub fn optimize_func_stage2_with_scratch(
                 if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
-                let (uf, um) =
-                    run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+                let (uf, um) = run_dom_gvn_and_bce_with_scratch(
+                    ir, &dom, module, effects, allow_bce, budget, scratch,
+                )?;
                 if uf || um {
                     optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                     rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -11073,8 +11477,9 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            post_rot_changed =
-                (op_flags & OP_FLAG_SELECT) != 0 && peel_boundary_clamped_loops(ir, module);
+            post_rot_changed = allow_bce
+                && (op_flags & OP_FLAG_SELECT) != 0
+                && peel_boundary_clamped_loops(ir, module);
             if post_rot_changed {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -11082,8 +11487,9 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            if (op_flags & (OP_FLAG_BYTE_LOAD | OP_FLAG_BYTE_STORE))
-                == (OP_FLAG_BYTE_LOAD | OP_FLAG_BYTE_STORE)
+            if allow_bce
+                && (op_flags & (OP_FLAG_BYTE_LOAD | OP_FLAG_BYTE_STORE))
+                    == (OP_FLAG_BYTE_LOAD | OP_FLAG_BYTE_STORE)
                 && vectorize_byte_blur3_loops(ir, module)
             {
                 post_rot_changed = true;
@@ -11093,7 +11499,10 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            if (op_flags & OP_FLAG_BYTE_LOAD) != 0 && vectorize_byte_sum_loops(ir, module) {
+            if allow_bce
+                && (op_flags & OP_FLAG_BYTE_LOAD) != 0
+                && vectorize_byte_sum_loops(ir, module)
+            {
                 post_rot_changed = true;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -11101,7 +11510,10 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            if (op_flags & OP_FLAG_F64_LOAD) != 0 && vectorize_f64_axpy_loops(ir, module) {
+            if allow_bce
+                && (op_flags & OP_FLAG_F64_LOAD) != 0
+                && vectorize_f64_axpy_loops(ir, module)
+            {
                 post_rot_changed = true;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -11115,25 +11527,31 @@ pub fn optimize_func_stage2_with_scratch(
                 if run_licm(ir, &dom, module, effects, budget)? {
                     rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
                 }
-                let _ =
-                    run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+                let _ = run_dom_gvn_and_bce_with_scratch(
+                    ir, &dom, module, effects, allow_bce, budget, scratch,
+                )?;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
         }
-        let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
-        if slp2 {
-            post_rot_changed = true;
-            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
-            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
-            if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
-                let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+        if allow_bce {
+            let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
+            if slp2 {
+                post_rot_changed = true;
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                    let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+            }
+            if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
+                && slp_fuse_f64x4(ir)
+            {
+                post_rot_changed = true;
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
         }
-        if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0) && slp_fuse_f64x4(ir) {
-            post_rot_changed = true;
-            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
-        }
-        let scaled_folded = !module.memory64 && fold_scaled_mem_addrs(ir, &non_wrap_scaled);
+        let scaled_folded =
+            allow_bce && !module.memory64 && fold_scaled_mem_addrs(ir, &non_wrap_scaled);
         let mut late_folded = scaled_folded;
         if share_const_div_rem(ir, &dom) {
             late_folded = true;

@@ -149,13 +149,47 @@ typedef __UINTPTR_TYPE__ uintptr_t;
 #ifdef WT_SPECTRE_MITIGATIONS
 #if defined(__x86_64__)
 #define WT_SPEC_BARRIER() __asm__ __volatile__("lfence" ::: "memory")
+static inline uint64_t wt_spec_clamp_u64(uint64_t idx, uint64_t limit) {
+    uint64_t mask;
+    __asm__(
+        "cmpq %[lim], %[idx]\n\t"
+        "sbbq %[m], %[m]\n\t"
+        "andq %[m], %[idx]\n\t"
+        : [idx] "+r"(idx), [m] "=&r"(mask)
+        : [lim] "r"(limit)
+        : "cc"
+    );
+    return idx;
+}
 #elif defined(__aarch64__)
 #define WT_SPEC_BARRIER() __asm__ __volatile__("dsb nsh; isb" ::: "memory")
+static inline uint64_t wt_spec_clamp_u64(uint64_t idx, uint64_t limit) {
+    __asm__(
+        "cmp %[idx], %[lim]\n\t"
+        "csel %[idx], %[idx], xzr, lo\n\t"
+        "csdb\n\t"
+        : [idx] "+r"(idx)
+        : [lim] "r"(limit)
+        : "cc"
+    );
+    return idx;
+}
 #else
 #define WT_SPEC_BARRIER() __asm__ __volatile__("" ::: "memory")
+static inline uint64_t wt_spec_clamp_u64(uint64_t idx, uint64_t limit) {
+    (void)limit;
+    WT_SPEC_BARRIER();
+    return idx;
+}
+#endif
+#if defined(WT_MEM0_MIN_BYTES) && (WT_MEM0_MIN_BYTES >= 16ULL)
+#define WT_SPEC_CLAMP_MEM(at, sz, ml) do { (at) = wt_spec_clamp_u64((at), (uint64_t)(ml) - (uint64_t)(sz) + 1ULL); } while (0)
+#else
+#define WT_SPEC_CLAMP_MEM(at, sz, ml) do { (void)(at); (void)(sz); (void)(ml); WT_SPEC_BARRIER(); } while (0)
 #endif
 #else
 #define WT_SPEC_BARRIER() ((void)0)
+#define WT_SPEC_CLAMP_MEM(at, sz, ml) ((void)0)
 #endif
 
 static inline void wt_secure_zero(void *p, size_t n) {
@@ -437,35 +471,35 @@ static inline int64_t wt_i64_trunc_sat_f64_u(double a) {
 static inline uint8_t wt_l8(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint8_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 1ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 1ULL, ml);
     *out = mb[at];
     return 0;
 }
 static inline uint8_t wt_l16(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint16_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 2ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 2ULL, ml);
     memcpy(out, mb + at, 2);
     return 0;
 }
 static inline uint8_t wt_l32(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint32_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 4ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 4ULL, ml);
     memcpy(out, mb + at, 4);
     return 0;
 }
 static inline uint8_t wt_l64(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint64_t *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 8ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 8ULL, ml);
     memcpy(out, mb + at, 8);
     return 0;
 }
 static inline uint8_t wt_l128(const uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, wt_v128 *out) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 16ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 16ULL, ml);
     memcpy(out, mb + at, 16);
     return 0;
 }
@@ -473,35 +507,35 @@ static inline uint8_t wt_l128(const uint8_t *restrict mb, size_t ml, uint32_t a,
 static inline uint8_t wt_s8(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint8_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 1ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 1ULL, ml);
     mb[at] = v;
     return 0;
 }
 static inline uint8_t wt_s16(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint16_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 2ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 2ULL, ml);
     memcpy(mb + at, &v, 2);
     return 0;
 }
 static inline uint8_t wt_s32(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint32_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 4ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 4ULL, ml);
     memcpy(mb + at, &v, 4);
     return 0;
 }
 static inline uint8_t wt_s64(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, uint64_t v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 8ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 8ULL, ml);
     memcpy(mb + at, &v, 8);
     return 0;
 }
 static inline uint8_t wt_s128(uint8_t *restrict mb, size_t ml, uint32_t a, uint32_t off, wt_v128 v) {
     uint64_t at = (uint64_t)a + (uint64_t)off;
     if (WT_UNLIKELY(at + 16ULL > (uint64_t)ml)) return TRAP_OOB;
-    WT_SPEC_BARRIER();
+    WT_SPEC_CLAMP_MEM(at, 16ULL, ml);
     memcpy(mb + at, &v, 16);
     return 0;
 }
@@ -512,13 +546,13 @@ typedef uint64_t wt_u64u __attribute__((aligned(1), may_alias));
 typedef wt_v128  wt_u128u __attribute__((aligned(1), may_alias));
 #define wt_s32_u(p, v) (*(wt_u32u *)(p) = (uint32_t)(v))
 #define wt_l32_u(p)    (*(const wt_u32u *)(p))
-#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); (dst) = *(const uty *)((mb) + _at); } while (0)
-#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); *(uty *)((mb) + _at) = (v); } while (0)
+#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_CLAMP_MEM(_at, (sz), (ml)); (dst) = *(const uty *)((mb) + _at); } while (0)
+#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_CLAMP_MEM(_at, (sz), (ml)); *(uty *)((mb) + _at) = (v); } while (0)
 #else
 static inline void wt_s32_u(uint8_t *restrict p, uint32_t v) { memcpy(p, &v, 4); }
 static inline uint32_t wt_l32_u(const uint8_t *restrict p) { uint32_t v; memcpy(&v, p, 4); return v; }
-#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); memcpy(&(dst), (mb) + _at, (size_t)(sz)); } while (0)
-#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_BARRIER(); uty _v = (v); memcpy((mb) + _at, &_v, (size_t)(sz)); } while (0)
+#define WT_L(sz, uty, mb, ml, a, off, dst) do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_CLAMP_MEM(_at, (sz), (ml)); memcpy(&(dst), (mb) + _at, (size_t)(sz)); } while (0)
+#define WT_S(sz, uty, mb, ml, a, off, v)   do { uint64_t _at = (uint64_t)(a) + (uint64_t)(off); if (WT_UNLIKELY(_at + (sz) > (uint64_t)(ml))) goto wt_oob; WT_SPEC_CLAMP_MEM(_at, (sz), (ml)); uty _v = (v); memcpy((mb) + _at, &_v, (size_t)(sz)); } while (0)
 #endif
 
 static inline uint8_t wt_mcopy(uint8_t *restrict mb, size_t ml, uint32_t dst, uint32_t src, uint32_t n) {
@@ -4673,9 +4707,15 @@ fn generate_c_sources(
         );
     }
 
+    let mem0_min_bytes = m
+        .memories
+        .first()
+        .map_or(0u64, |mt| mt.limits.min.saturating_mul(65_536));
     Ok(GeneratedC {
         rt_h: if spectre_mitigations {
-            format!("#define WT_SPECTRE_MITIGATIONS 1\n{WTIME_AOT_RT_H}")
+            format!(
+                "#define WT_SPECTRE_MITIGATIONS 1\n#define WT_MEM0_MIN_BYTES {mem0_min_bytes}ULL\n{WTIME_AOT_RT_H}"
+            )
         } else {
             WTIME_AOT_RT_H.to_string()
         },

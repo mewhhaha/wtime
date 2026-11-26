@@ -558,6 +558,188 @@ impl<'a> LowerA64<'a> {
         }
     }
 
+    /// Emits a bounds check for a linear-memory 0 access `[addr + offset .. addr + offset + access_bytes)`.
+    ///
+    /// Under `spectre_mitigations`, uses branchless ARMv8 `csel(..., xzr, ls) + csdb` index
+    /// clamping when `mem_min_bytes >= access_bytes`, keeping all speculative accesses strictly
+    /// inside `[MEM_BASE_REG .. MEM_BASE_REG + mem_min_bytes)` without a full `dsb nsh; isb` flush.
+    fn emit_bounds_check_for_access(
+        &mut self,
+        addr: Reg,
+        offset: u64,
+        access_bytes: u64,
+    ) -> (Reg, u64) {
+        if !self.layout.spectre_mitigations {
+            self.emit_bounds_check(addr, offset.saturating_add(access_bytes));
+            return (addr, offset);
+        }
+        let oob = self.trap_oob_lbl();
+        let Some(end_off) = offset.checked_add(access_bytes) else {
+            self.asm.b(oob);
+            return (addr, offset);
+        };
+        if !self.layout.memory64 {
+            self.asm.uxtw(SGP2, addr);
+        } else {
+            self.asm.mov_r(true, SGP2, addr);
+        }
+        // Case 1: Fixed-size memory (`min == max`) with small offset (`< 16 MiB`).
+        if let Some(cap) = self.layout.fixed_mem_bytes {
+            if end_off > cap {
+                self.asm.b(oob);
+                return (addr, offset);
+            }
+            if access_bytes >= 1 && offset < (1u64 << 24) {
+                let max_addr = cap - end_off;
+                if max_addr < 4096 {
+                    self.asm.cmp_imm(true, SGP2, max_addr as u16);
+                } else {
+                    self.asm.mov_imm64(SGP3, max_addr);
+                    self.asm.cmp_r(true, SGP2, SGP3);
+                }
+                self.asm.b_cond(Cond::Hi, oob);
+                self.asm.csel(true, SGP2, SGP2, Reg::XZR, Cond::Ls);
+                self.asm.csdb();
+                return (SGP2, offset);
+            }
+            self.emit_bounds_check(addr, end_off);
+            return (addr, offset);
+        }
+        // Case 2: Dynamic memory where `end_off <= mem_min_bytes` and `offset < 16 MiB`.
+        if access_bytes >= 1 && end_off <= self.layout.mem_min_bytes && offset < (1u64 << 24) {
+            if end_off < 4096 {
+                self.asm.sub_imm(true, SGP3, MEM_LEN_REG, end_off as u16);
+            } else {
+                self.asm.mov_imm64(SGP3, end_off);
+                self.asm.sub_r(true, SGP3, MEM_LEN_REG, SGP3);
+            }
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hi, oob);
+            self.asm.csel(true, SGP2, SGP2, Reg::XZR, Cond::Ls);
+            self.asm.csdb();
+            return (SGP2, offset);
+        }
+        // Case 3: Dynamic memory with `mem_min_bytes >= access_bytes` (large offset):
+        // check & clamp the full effective byte offset `eff = zext(addr) + offset` to `0`.
+        if (1..4096).contains(&access_bytes) && self.layout.mem_min_bytes >= access_bytes {
+            if offset != 0 {
+                if self.layout.memory64 || offset > u32::MAX as u64 {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.adds_r(true, SGP2, SGP2, SGP3);
+                    self.asm.b_cond(Cond::Hs, oob);
+                    self.asm.csel(true, SGP2, SGP2, Reg::XZR, Cond::Lo);
+                    self.asm.csdb();
+                } else if offset < 4096 {
+                    self.asm.add_imm(true, SGP2, SGP2, offset as u16);
+                } else {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.add_r(true, SGP2, SGP2, SGP3);
+                }
+            }
+            self.asm
+                .sub_imm(true, SGP3, MEM_LEN_REG, access_bytes as u16);
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hi, oob);
+            self.asm.csel(true, SGP2, SGP2, Reg::XZR, Cond::Ls);
+            self.asm.csdb();
+            return (SGP2, 0);
+        }
+        // Case 4: `min_pages == 0` — fall back to `dsb nsh; isb`.
+        self.emit_bounds_check(addr, end_off);
+        (addr, offset)
+    }
+
+    /// Checks bounds for an extra-memory (`mem >= 1`) access and computes the effective host pointer
+    /// into `SGP2`, using branchless `csel + csdb` clamping under `spectre_mitigations` when
+    /// `mem_min_bytes >= access_bytes`.
+    fn emit_extra_mem_ptr(&mut self, mem: u32, addr: Val, offset: u64, access_bytes: u64) {
+        let desc_off = self.layout.mem_desc_off(mem);
+        let is64 = self.layout.mem_is64(mem);
+        let ar = self.gp_read(addr, SGP1);
+        if is64 {
+            if ar != SGP1 {
+                self.asm.mov_r(true, SGP1, ar);
+            }
+        } else {
+            self.asm.uxtw(SGP1, ar);
+        }
+        let oob = self.trap_oob_lbl();
+        if self.layout.spectre_mitigations
+            && (1..4096).contains(&access_bytes)
+            && self.layout.mem_min_bytes_idx(mem) >= access_bytes
+        {
+            if offset != 0 {
+                if is64 || offset > u32::MAX as u64 {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.adds_r(true, SGP1, SGP1, SGP3);
+                    self.asm.b_cond(Cond::Hs, oob);
+                    self.asm.csel(true, SGP1, SGP1, Reg::XZR, Cond::Lo);
+                    self.asm.csdb();
+                } else if offset < 4096 {
+                    self.asm.add_imm(true, SGP1, SGP1, offset as u16);
+                } else {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.add_r(true, SGP1, SGP1, SGP3);
+                }
+            }
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                desc_off + 8,
+                SGP3,
+            );
+            self.asm.sub_imm(true, SGP2, SGP2, access_bytes as u16);
+            self.asm.cmp_r(true, SGP1, SGP2);
+            self.asm.b_cond(Cond::Hi, oob);
+            self.asm.csel(true, SGP1, SGP1, Reg::XZR, Cond::Ls);
+            self.asm.csdb();
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                desc_off,
+                SGP3,
+            );
+            self.asm.add_r(true, SGP2, SGP2, SGP1);
+            return;
+        }
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            desc_off + 8,
+            SGP3,
+        );
+        self.asm
+            .mov_imm64(SGP3, offset.saturating_add(access_bytes));
+        self.asm.adds_r(true, SGP3, SGP1, SGP3);
+        self.asm.b_cond(Cond::Hs, oob);
+        self.asm.cmp_r(true, SGP3, SGP2);
+        self.asm.b_cond(Cond::Hi, oob);
+        self.emit_speculation_barrier();
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            desc_off,
+            SGP3,
+        );
+        self.asm.add_r(true, SGP2, SGP2, SGP1);
+        if offset != 0 {
+            self.asm.mov_imm64(SGP3, offset);
+            self.asm.add_r(true, SGP2, SGP2, SGP3);
+        }
+    }
+
     fn emit_bounds_check(&mut self, addr: Reg, end_off: u64) {
         let oob = self.trap_oob_lbl();
         if !self.layout.memory64 {
@@ -2076,16 +2258,26 @@ impl<'a> LowerA64<'a> {
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
                 if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
+                    if len == 0 {
+                        self.asm.b(toob);
+                        return Ok(());
+                    }
                     self.asm.mov_imm32(SGP2, len);
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
-                    self.emit_speculation_barrier();
+                    let eff_ir = if self.layout.spectre_mitigations {
+                        self.asm.csel(t64, SGP1, ir, Reg::XZR, Cond::Lo);
+                        self.asm.csdb();
+                        SGP1
+                    } else {
+                        ir
+                    };
                     self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP2);
                     let d = self.gp_write_reg(r);
-                    self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
+                    self.asm.ldr_reg_scaled(true, d, SGP3, eff_ir, true);
                     self.gp_commit(r, d);
                 } else {
-                    let (desc_off, _, _) = self.layout.dyn_tables[&table];
+                    let (desc_off, min_len, _) = self.layout.dyn_tables[&table];
                     emit_load_off(
                         &mut self.asm,
                         Ty::I32,
@@ -2097,7 +2289,14 @@ impl<'a> LowerA64<'a> {
                     );
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
-                    self.emit_speculation_barrier();
+                    let eff_ir = if self.layout.spectre_mitigations && min_len >= 1 {
+                        self.asm.csel(t64, SGP1, ir, Reg::XZR, Cond::Lo);
+                        self.asm.csdb();
+                        SGP1
+                    } else {
+                        self.emit_speculation_barrier();
+                        ir
+                    };
                     emit_load_off(
                         &mut self.asm,
                         Ty::I64,
@@ -2108,7 +2307,7 @@ impl<'a> LowerA64<'a> {
                         SGP2,
                     );
                     let d = self.gp_write_reg(r);
-                    self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
+                    self.asm.ldr_reg_scaled(true, d, SGP3, eff_ir, true);
                     self.gp_commit(r, d);
                 }
             }
@@ -2117,22 +2316,33 @@ impl<'a> LowerA64<'a> {
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
                 if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
+                    if len == 0 {
+                        self.asm.b(toob);
+                        return Ok(());
+                    }
                     self.asm.mov_imm32(SGP2, len);
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
-                    self.emit_speculation_barrier();
-                    let vr = self.gp_read(val, SGP1);
-                    let idx_r = if self.loc(idx) != A64Loc::Gp(ir) {
-                        self.asm.mov_r(true, SGP2, vr);
-                        let ii = self.gp_read(idx, SGP1);
-                        (ii, SGP2)
+                    if self.layout.spectre_mitigations {
+                        self.asm.csel(t64, SGP2, ir, Reg::XZR, Cond::Lo);
+                        self.asm.csdb();
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP3);
+                        self.asm.str_reg_scaled(true, vr, SGP3, SGP2, true);
                     } else {
-                        (ir, vr)
-                    };
-                    self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP3);
-                    self.asm.str_reg_scaled(true, idx_r.1, SGP3, idx_r.0, true);
+                        let vr = self.gp_read(val, SGP1);
+                        let idx_r = if self.loc(idx) != A64Loc::Gp(ir) {
+                            self.asm.mov_r(true, SGP2, vr);
+                            let ii = self.gp_read(idx, SGP1);
+                            (ii, SGP2)
+                        } else {
+                            (ir, vr)
+                        };
+                        self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP3);
+                        self.asm.str_reg_scaled(true, idx_r.1, SGP3, idx_r.0, true);
+                    }
                 } else {
-                    let (desc_off, _, _) = self.layout.dyn_tables[&table];
+                    let (desc_off, min_len, _) = self.layout.dyn_tables[&table];
                     emit_load_off(
                         &mut self.asm,
                         Ty::I32,
@@ -2144,7 +2354,14 @@ impl<'a> LowerA64<'a> {
                     );
                     self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
-                    self.emit_speculation_barrier();
+                    let eff_ir = if self.layout.spectre_mitigations && min_len >= 1 {
+                        self.asm.csel(t64, SGP1, ir, Reg::XZR, Cond::Lo);
+                        self.asm.csdb();
+                        SGP1
+                    } else {
+                        self.emit_speculation_barrier();
+                        ir
+                    };
                     emit_load_off(
                         &mut self.asm,
                         Ty::I64,
@@ -2154,7 +2371,7 @@ impl<'a> LowerA64<'a> {
                         desc_off,
                         SGP2,
                     );
-                    self.asm.uxtw(SGP2, ir);
+                    self.asm.uxtw(SGP2, eff_ir);
                     self.asm.lsl_imm(true, SGP2, SGP2, 3);
                     self.asm.add_r(true, SGP2, SGP3, SGP2);
                     let vr = self.gp_read(val, SGP1);
@@ -2166,6 +2383,9 @@ impl<'a> LowerA64<'a> {
                 end_off,
                 for_bulk,
             } => {
+                if !for_bulk && self.layout.spectre_mitigations {
+                    return Ok(());
+                }
                 if !for_bulk
                     && self.layout.use_guard_pages
                     && !self.layout.memory64
@@ -2186,11 +2406,13 @@ impl<'a> LowerA64<'a> {
                 let ar = self.gp_read(addr, SGP1);
                 let guard_ok =
                     self.layout.use_guard_pages && !self.layout.memory64 && offset < (1u64 << 32);
-                if !checked && !guard_ok {
-                    self.emit_bounds_check(ar, offset.saturating_add(kind.bytes()));
-                }
-                let uxtw = !self.layout.memory64;
-                if offset == 0 {
+                let (ar, eff_off) = if self.layout.spectre_mitigations || (!checked && !guard_ok) {
+                    self.emit_bounds_check_for_access(ar, offset, kind.bytes())
+                } else {
+                    (ar, offset)
+                };
+                let uxtw = !self.layout.memory64 && eff_off == offset;
+                if eff_off == 0 {
                     // Single-instruction register-indexed addressing `[MEM_BASE_REG, addr, UXTW/LSL #0]`!
                     match kind {
                         LoadKind::I32 => {
@@ -2330,7 +2552,7 @@ impl<'a> LowerA64<'a> {
                         }
                     }
                 } else {
-                    let (ptr, uimm) = self.compute_mem_base_uimm(ar, offset, kind.bytes());
+                    let (ptr, uimm) = self.compute_mem_base_uimm(ar, eff_off, kind.bytes());
                     match kind {
                         LoadKind::I32 => {
                             let d = self.gp_write_reg(r);
@@ -2646,11 +2868,13 @@ impl<'a> LowerA64<'a> {
                 let ar = self.gp_read(addr, SGP1);
                 let guard_ok =
                     self.layout.use_guard_pages && !self.layout.memory64 && offset < (1u64 << 32);
-                if !checked && !guard_ok {
-                    self.emit_bounds_check(ar, offset.saturating_add(kind.bytes()));
-                }
-                let uxtw = !self.layout.memory64;
-                if offset == 0 {
+                let (ar, eff_off) = if self.layout.spectre_mitigations || (!checked && !guard_ok) {
+                    self.emit_bounds_check_for_access(ar, offset, kind.bytes())
+                } else {
+                    (ar, offset)
+                };
+                let uxtw = !self.layout.memory64 && eff_off == offset;
+                if eff_off == 0 {
                     // Preserve `ar` in `SGP2` if `addr` spilled into `SGP1` and `val` is also spilled GP.
                     let ar_safe = if ar == SGP1
                         && !matches!(kind, StoreKind::F32 | StoreKind::F64 | StoreKind::V128)
@@ -2691,7 +2915,7 @@ impl<'a> LowerA64<'a> {
                         }
                     }
                 } else {
-                    let (ptr, uimm) = self.compute_mem_base_uimm(ar, offset, kind.bytes());
+                    let (ptr, uimm) = self.compute_mem_base_uimm(ar, eff_off, kind.bytes());
                     // Preserve `ptr` in `SGP2` before `gp_read`/`fp_read`, since large spill
                     // offsets in `emit_load_off` clobber `SGP3`.
                     let ptr_safe = if ptr == SGP3 {
@@ -2815,10 +3039,12 @@ impl<'a> LowerA64<'a> {
                 let ar = self.gp_read(addr, SGP1);
                 let guard_ok =
                     self.layout.use_guard_pages && !self.layout.memory64 && offset < (1u64 << 32);
-                if !checked && !guard_ok {
-                    self.emit_bounds_check(ar, offset.saturating_add(u64::from(width)));
-                }
-                let (ptr, uimm) = self.compute_mem_base_uimm(ar, offset, u64::from(width));
+                let (ar, eff_off) = if self.layout.spectre_mitigations || (!checked && !guard_ok) {
+                    self.emit_bounds_check_for_access(ar, offset, u64::from(width))
+                } else {
+                    (ar, offset)
+                };
+                let (ptr, uimm) = self.compute_mem_base_uimm(ar, eff_off, u64::from(width));
                 let sz = match width {
                     1 => {
                         self.asm.ldrb_uimm(SGP1, ptr, uimm);
@@ -2855,10 +3081,12 @@ impl<'a> LowerA64<'a> {
                 let ar = self.gp_read(addr, SGP1);
                 let guard_ok =
                     self.layout.use_guard_pages && !self.layout.memory64 && offset < (1u64 << 32);
-                if !checked && !guard_ok {
-                    self.emit_bounds_check(ar, offset.saturating_add(u64::from(width)));
-                }
-                let (ptr, uimm) = self.compute_mem_base_uimm(ar, offset, u64::from(width));
+                let (ar, eff_off) = if self.layout.spectre_mitigations || (!checked && !guard_ok) {
+                    self.emit_bounds_check_for_access(ar, offset, u64::from(width))
+                } else {
+                    (ar, offset)
+                };
+                let (ptr, uimm) = self.compute_mem_base_uimm(ar, eff_off, u64::from(width));
                 // Preserve `ptr` in `SGP2` before `fp_read`, since large spill offsets clobber `SGP3`.
                 let ptr_safe = if ptr == SGP3 {
                     self.asm.mov_r(true, SGP2, ptr);
@@ -2966,47 +3194,7 @@ impl<'a> LowerA64<'a> {
                 offset,
             } => {
                 let r = res.unwrap();
-                let desc_off = self.layout.mem_desc_off(mem);
-                let is64 = self.layout.mem_is64(mem);
-                let ar = self.gp_read(addr, SGP1);
-                if is64 {
-                    if ar != SGP1 {
-                        self.asm.mov_r(true, SGP1, ar);
-                    }
-                } else {
-                    self.asm.uxtw(SGP1, ar);
-                }
-                let oob = self.trap_oob_lbl();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off + 8,
-                    SGP3,
-                );
-                self.asm
-                    .mov_imm64(SGP3, offset.saturating_add(kind.bytes()));
-                self.asm.adds_r(true, SGP3, SGP1, SGP3);
-                self.asm.b_cond(Cond::Hs, oob);
-                self.asm.cmp_r(true, SGP3, SGP2);
-                self.asm.b_cond(Cond::Hi, oob);
-                self.emit_speculation_barrier();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, SGP1);
-                if offset != 0 {
-                    self.asm.mov_imm64(SGP3, offset);
-                    self.asm.add_r(true, SGP2, SGP2, SGP3);
-                }
+                self.emit_extra_mem_ptr(mem, addr, offset, kind.bytes());
                 let ptr = SGP2;
                 let uimm = 0u32;
                 match kind {
@@ -3154,47 +3342,7 @@ impl<'a> LowerA64<'a> {
                 val,
                 offset,
             } => {
-                let desc_off = self.layout.mem_desc_off(mem);
-                let is64 = self.layout.mem_is64(mem);
-                let ar = self.gp_read(addr, SGP1);
-                if is64 {
-                    if ar != SGP1 {
-                        self.asm.mov_r(true, SGP1, ar);
-                    }
-                } else {
-                    self.asm.uxtw(SGP1, ar);
-                }
-                let oob = self.trap_oob_lbl();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off + 8,
-                    SGP3,
-                );
-                self.asm
-                    .mov_imm64(SGP3, offset.saturating_add(kind.bytes()));
-                self.asm.adds_r(true, SGP3, SGP1, SGP3);
-                self.asm.b_cond(Cond::Hs, oob);
-                self.asm.cmp_r(true, SGP3, SGP2);
-                self.asm.b_cond(Cond::Hi, oob);
-                self.emit_speculation_barrier();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, SGP1);
-                if offset != 0 {
-                    self.asm.mov_imm64(SGP3, offset);
-                    self.asm.add_r(true, SGP2, SGP2, SGP3);
-                }
+                self.emit_extra_mem_ptr(mem, addr, offset, kind.bytes());
                 match kind {
                     StoreKind::I8 => {
                         let vr = self.gp_read(val, SGP1);
@@ -3235,47 +3383,7 @@ impl<'a> LowerA64<'a> {
                 lane,
             } => {
                 let r = res.unwrap();
-                let desc_off = self.layout.mem_desc_off(mem);
-                let is64 = self.layout.mem_is64(mem);
-                let ar = self.gp_read(addr, SGP1);
-                if is64 {
-                    if ar != SGP1 {
-                        self.asm.mov_r(true, SGP1, ar);
-                    }
-                } else {
-                    self.asm.uxtw(SGP1, ar);
-                }
-                let oob = self.trap_oob_lbl();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off + 8,
-                    SGP3,
-                );
-                self.asm
-                    .mov_imm64(SGP3, offset.saturating_add(u64::from(width)));
-                self.asm.adds_r(true, SGP3, SGP1, SGP3);
-                self.asm.b_cond(Cond::Hs, oob);
-                self.asm.cmp_r(true, SGP3, SGP2);
-                self.asm.b_cond(Cond::Hi, oob);
-                self.emit_speculation_barrier();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, SGP1);
-                if offset != 0 {
-                    self.asm.mov_imm64(SGP3, offset);
-                    self.asm.add_r(true, SGP2, SGP2, SGP3);
-                }
+                self.emit_extra_mem_ptr(mem, addr, offset, u64::from(width));
                 let sz = match width {
                     1 => {
                         self.asm.ldrb_uimm(SGP1, SGP2, 0);
@@ -3309,47 +3417,7 @@ impl<'a> LowerA64<'a> {
                 offset,
                 lane,
             } => {
-                let desc_off = self.layout.mem_desc_off(mem);
-                let is64 = self.layout.mem_is64(mem);
-                let ar = self.gp_read(addr, SGP1);
-                if is64 {
-                    if ar != SGP1 {
-                        self.asm.mov_r(true, SGP1, ar);
-                    }
-                } else {
-                    self.asm.uxtw(SGP1, ar);
-                }
-                let oob = self.trap_oob_lbl();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off + 8,
-                    SGP3,
-                );
-                self.asm
-                    .mov_imm64(SGP3, offset.saturating_add(u64::from(width)));
-                self.asm.adds_r(true, SGP3, SGP1, SGP3);
-                self.asm.b_cond(Cond::Hs, oob);
-                self.asm.cmp_r(true, SGP3, SGP2);
-                self.asm.b_cond(Cond::Hi, oob);
-                self.emit_speculation_barrier();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    desc_off,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, SGP1);
-                if offset != 0 {
-                    self.asm.mov_imm64(SGP3, offset);
-                    self.asm.add_r(true, SGP2, SGP2, SGP3);
-                }
+                self.emit_extra_mem_ptr(mem, addr, offset, u64::from(width));
                 let vr = self.fp_read(vec, SFP1);
                 match width {
                     1 => {
@@ -3679,28 +3747,60 @@ impl<'a> LowerA64<'a> {
                 dst_checked,
                 src_checked,
             } => {
-                if !dst_checked {
-                    let dr = self.gp_read(dst, SGP1);
-                    self.emit_bounds_check(dr, u64::from(len));
-                }
-                if !src_checked {
-                    let sr = self.gp_read(src, SGP1);
-                    self.emit_bounds_check(sr, u64::from(len));
+                let spectre_clamped = self.layout.spectre_mitigations
+                    && len > 0
+                    && self.layout.mem_min_bytes >= u64::from(len);
+                if spectre_clamped {
+                    let dr0 = self.gp_read(dst, SGP1);
+                    let (dr_c, _) = self.emit_bounds_check_for_access(dr0, 0, u64::from(len));
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(dr_c),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    let sr0 = self.gp_read(src, SGP1);
+                    let (sr_c, _) = self.emit_bounds_check_for_access(sr0, 0, u64::from(len));
+                    self.asm.add_r(true, SGP2, MEM_BASE_REG, sr_c);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    self.asm.add_r(true, SGP1, MEM_BASE_REG, SGP1);
+                } else {
+                    if self.layout.spectre_mitigations || !dst_checked {
+                        let dr = self.gp_read(dst, SGP1);
+                        self.emit_bounds_check(dr, u64::from(len));
+                    }
+                    if self.layout.spectre_mitigations || !src_checked {
+                        let sr = self.gp_read(src, SGP1);
+                        self.emit_bounds_check(sr, u64::from(len));
+                    }
+                    if len > 0 {
+                        let dr = self.gp_read(dst, SGP1);
+                        if !self.layout.memory64 {
+                            self.asm.add_ext_uxtw(SGP1, MEM_BASE_REG, dr);
+                        } else {
+                            self.asm.add_r(true, SGP1, MEM_BASE_REG, dr);
+                        }
+                        let sr = self.gp_read(src, SGP2);
+                        if !self.layout.memory64 {
+                            self.asm.add_ext_uxtw(SGP2, MEM_BASE_REG, sr);
+                        } else {
+                            self.asm.add_r(true, SGP2, MEM_BASE_REG, sr);
+                        }
+                    }
                 }
                 if len > 0 {
                     // Overlap-safe wide NEON 16B / 8B / 4B / 2B / 1B inline copy (`len <= 64`).
-                    let dr = self.gp_read(dst, SGP1);
-                    if !self.layout.memory64 {
-                        self.asm.add_ext_uxtw(SGP1, MEM_BASE_REG, dr);
-                    } else {
-                        self.asm.add_r(true, SGP1, MEM_BASE_REG, dr);
-                    }
-                    let sr = self.gp_read(src, SGP2);
-                    if !self.layout.memory64 {
-                        self.asm.add_ext_uxtw(SGP2, MEM_BASE_REG, sr);
-                    } else {
-                        self.asm.add_r(true, SGP2, MEM_BASE_REG, sr);
-                    }
                     let lbl_bwd = self.asm.new_label();
                     let lbl_done = self.asm.new_label();
                     self.asm.cmp_r(true, SGP1, SGP2);
@@ -3769,17 +3869,28 @@ impl<'a> LowerA64<'a> {
                 len,
                 checked,
             } => {
-                if !checked {
-                    let dr = self.gp_read(dst, SGP1);
-                    self.emit_bounds_check(dr, u64::from(len));
+                let spectre_clamped = self.layout.spectre_mitigations
+                    && len > 0
+                    && self.layout.mem_min_bytes >= u64::from(len);
+                if spectre_clamped {
+                    let dr0 = self.gp_read(dst, SGP1);
+                    let (dr_c, _) = self.emit_bounds_check_for_access(dr0, 0, u64::from(len));
+                    self.asm.add_r(true, SGP3, MEM_BASE_REG, dr_c);
+                } else {
+                    if self.layout.spectre_mitigations || !checked {
+                        let dr = self.gp_read(dst, SGP1);
+                        self.emit_bounds_check(dr, u64::from(len));
+                    }
+                    if len > 0 {
+                        let dr = self.gp_read(dst, SGP1);
+                        if !self.layout.memory64 {
+                            self.asm.add_ext_uxtw(SGP3, MEM_BASE_REG, dr);
+                        } else {
+                            self.asm.add_r(true, SGP3, MEM_BASE_REG, dr);
+                        }
+                    }
                 }
                 if len > 0 {
-                    let dr = self.gp_read(dst, SGP1);
-                    if !self.layout.memory64 {
-                        self.asm.add_ext_uxtw(SGP3, MEM_BASE_REG, dr);
-                    } else {
-                        self.asm.add_r(true, SGP3, MEM_BASE_REG, dr);
-                    }
                     let is_zero = matches!(self.loc(val), A64Loc::Remat(A64RematConst::I32(0)));
                     let vr = if is_zero {
                         Reg::XZR
@@ -4858,11 +4969,16 @@ pub fn lower_ir_to_aarch64(
         });
     }
 
-    // 2. Emit basic blocks in RPO order (with integer `madd`/`msub` fusion).
+    // 2. Emit basic blocks in RPO order (with 16-byte loop-header alignment and `madd`/`msub` fusion).
     let n_ord = l.alloc.block_order.len();
     for oi in 0..n_ord {
         let bid = l.alloc.block_order[oi];
         let next_bb = l.alloc.block_order.get(oi + 1).copied();
+        if oi > 0 && l.ir.blocks[bid as usize].is_loop_header {
+            while (l.asm.pos() & 15) != 0 {
+                l.asm.nop();
+            }
+        }
         l.asm.bind(l.bb_labels[bid as usize]);
         l.live_flags = None;
         let bb = &l.ir.blocks[bid as usize];

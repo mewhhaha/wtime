@@ -1427,6 +1427,9 @@ impl Asm {
     pub fn sub_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
         self.alu_rr(0x29, is64, dst, src);
     }
+    pub fn sbb_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.alu_rr(0x19, is64, dst, src);
+    }
     pub fn xor_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
         self.alu_rr(0x31, is64, dst, src);
     }
@@ -2855,6 +2858,18 @@ impl Asm {
     pub fn vdivss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x5e);
     }
+    pub fn vaddss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x58);
+    }
+    pub fn vsubss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x5c);
+    }
+    pub fn vmulss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x59);
+    }
+    pub fn vdivss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x5e);
+    }
     pub fn vaddsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x58);
     }
@@ -2866,6 +2881,18 @@ impl Asm {
     }
     pub fn vdivsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x5e);
+    }
+    pub fn vaddsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x58);
+    }
+    pub fn vsubsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x5c);
+    }
+    pub fn vmulsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x59);
+    }
+    pub fn vdivsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x5e);
     }
     pub fn vaddpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x58);

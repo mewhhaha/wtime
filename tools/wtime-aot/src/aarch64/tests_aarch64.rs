@@ -349,7 +349,7 @@ impl A64Vm {
         let rm = ((insn >> 16) & 31) as u8;
         let sf = (insn >> 31) != 0;
 
-        if matches!(insn, 0xd503_201f | 0xd503_379f | 0xd503_3fdf) {
+        if matches!(insn, 0xd503_201f | 0xd503_229f | 0xd503_379f | 0xd503_3fdf) {
             // NOP and speculation barriers have no functional effect in the VM.
         } else if (insn & 0xffe0_001f) == 0xd400_0001 {
             // SVC #imm16 (Linux AArch64 syscall)
@@ -5063,4 +5063,37 @@ fn aarch64_regalloc_enforces_liveness_memory_cap_and_filters_cross_block() {
         err.contains("liveness matrix") && err.contains("exceeds cap"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn aarch64_spectre_branchless_csel_csdb_clamping_and_disasm() {
+    let wasm = crate::x64::tests_unit::wasm_module(&[
+        crate::x64::tests_unit::type_sec(&[(&[0x7f], &[0x7f])]),
+        crate::x64::tests_unit::func_sec(&[0]),
+        crate::x64::tests_unit::section(5, &[1, 1, 1, 1]),
+        crate::x64::tests_unit::export_sec(&[("run", 0, 0), ("memory", 2, 0)]),
+        crate::x64::tests_unit::code_sec(&[crate::x64::tests_unit::enc_body(
+            &[],
+            &[
+                0x20, 0, 0x41, 77, 0x36, 2, 0, // mem[arg] = 77
+                0x20, 0, 0x28, 2, 0, // return mem[arg]
+            ],
+        )]),
+    ]);
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            spectre_mitigations: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let csdb_bytes = 0xd503_229fu32.to_le_bytes();
+    assert!(
+        img.text.windows(4).step_by(4).any(|w| w == csdb_bytes),
+        "AArch64 Spectre SLH must emit csdb for linear-memory clamping"
+    );
+    verify_disasm_aarch64("spectre_slh_csdb", &img.elf);
+    let calls = [0, 65532, 65533, 65536].map(|a| ("run", Value::I32(a)));
+    assert_aarch64_image_matches_oracle("aarch64 spectre slh", &wasm, &calls, 16, &img);
 }

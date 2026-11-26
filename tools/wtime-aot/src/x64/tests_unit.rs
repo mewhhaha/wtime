@@ -688,6 +688,7 @@ fn ctx_layout_enforces_16_mib_cap() {
         global_inits: vec![X64ConstVal::V128([0; 16]); n_v128_globals],
         global_consts: vec![None; n_v128_globals],
         pinned_global: None,
+        pinned_global_2: None,
         exported_globals: Vec::new(),
         exported_funcs: Vec::new(),
         ci_index: Default::default(),
@@ -847,6 +848,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         global_inits: Vec::new(),
         global_consts: Vec::new(),
         pinned_global: None,
+        pinned_global_2: None,
         exported_globals: Vec::new(),
         exported_funcs: Vec::new(),
         ci_index: Default::default(),
@@ -5083,4 +5085,172 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
             .any(|i| matches!(i.op, Op::F64AxpyLoop { .. }))),
         "AXPY vectorization must NOT drop an unrelated BoundsCheck"
     );
+}
+
+#[test]
+fn x64_spectre_branchless_slh_bitwise_bce_and_dual_pinned_globals() {
+    // 1. Pure memory load/store function with min_pages == 1 under `--spectre-mitigations`:
+    //    must emit branchless `sbb` clamping without `lfence` in the guest body, and preserve
+    //    both valid accesses and OOB traps.
+    let mem_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 1, 1, 1]), // fixed 1-page memory
+        export_sec(&[("run", 0, 0), ("memory", 2, 0)]),
+        code_sec(&[enc_body(
+            &[],
+            &[
+                0x20, 0, 0x41, 123, 0x36, 2, 0, // mem[arg] = 123
+                0x20, 0, 0x28, 2, 0, // return mem[arg]
+            ],
+        )]),
+    ]);
+    let validated =
+        wtime_validate::validate(&mem_wasm, &x64_validate_features(), &x64_validate_limits())
+            .unwrap();
+    let module = admit_x64_module(validated.decoded()).unwrap();
+    let layout = CtxLayout::compute(&module, Vec::new())
+        .unwrap()
+        .with_spectre_mitigations(true);
+    let mut ir = super::ir::lower_wasm_to_ir(validated.decoded(), &module, 0).unwrap();
+    let eff = super::opt::compute_module_effects(std::slice::from_ref(&ir), &module, None).unwrap();
+    let mut sc = super::opt::Stage2Scratch::default();
+    super::opt::optimize_func_stage2_with_options(&mut ir, &module, &eff, true, None, &mut sc)
+        .unwrap();
+    verify_ir(&ir, &module).unwrap();
+    // Under Spectre hardening, loads/stores must remain `checked: false` (never BCE-elided).
+    assert!(
+        ir.blocks.iter().all(|b| b.insts.iter().all(|i| !matches!(
+            i.op,
+            Op::Load { checked: true, .. } | Op::Store { checked: true, .. }
+        ))),
+        "spectre mode must not mark loads/stores checked"
+    );
+    let cfg = super::regalloc::AllocConfig {
+        allow_r12: layout.pinned_global.is_none(),
+        allow_r13: layout.fixed_mem_bytes.is_some() && layout.pinned_global_2.is_none(),
+        has_bmi2: false,
+    };
+    let alloc = super::regalloc::allocate_with_config(&ir, cfg, None).unwrap();
+    let asm = super::lower::lower_ir_to_x64(
+        &ir,
+        &alloc,
+        &layout,
+        &super::RodataConsts::default(),
+        TargetIsa::default(),
+    )
+    .unwrap();
+    assert!(
+        !asm.code.windows(3).any(|w| w == [0x0f, 0xae, 0xe8]),
+        "pure mem load/store under Spectre SLH must not emit lfence"
+    );
+    assert!(
+        asm.code.windows(3).any(|w| w == [0x4d, 0x19, 0xdb]),
+        "pure mem load/store under Spectre SLH must emit sbb r11, r11"
+    );
+
+    // 2. Bitwise mask + multiply + unsigned min_u clamp BCE (default unhardened mode):
+    //    `mem[((x & 0xff) * 12) + 0]` and `mem[(min_u(x, 1000) << 2) + 0]` both fit inside
+    //    the 64 KiB fixed memory, so Stage 2 must prove `checked: true` statically!
+    let bce_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[("run", 0, 0), ("memory", 2, 0)]),
+        code_sec(&[enc_body(
+            &[(1, 0x7f)],
+            &[
+                // local 1 = (arg & 255) * 12
+                0x20, 0, 0x41, 0xff, 0x01, 0x71, 0x41, 12, 0x6c, 0x21, 1,
+                // load mem[local 1]
+                0x20, 1, 0x28, 2, 0, // min_u(arg, 1000): select(arg, 1000, arg <u 1000)
+                0x20, 0, 0x41, 0xe8, 0x07, 0x20, 0, 0x41, 0xe8, 0x07, 0x49, 0x1b,
+                // << 2, load mem[...]
+                0x41, 2, 0x74, 0x28, 2, 0, 0x6a, // add
+            ],
+        )]),
+    ]);
+    let val_bce =
+        wtime_validate::validate(&bce_wasm, &x64_validate_features(), &x64_validate_limits())
+            .unwrap();
+    let mod_bce = admit_x64_module(val_bce.decoded()).unwrap();
+    let mut ir_bce = super::ir::lower_wasm_to_ir(val_bce.decoded(), &mod_bce, 0).unwrap();
+    let eff_bce =
+        super::opt::compute_module_effects(std::slice::from_ref(&ir_bce), &mod_bce, None).unwrap();
+    super::opt::optimize_func_stage2(&mut ir_bce, &mod_bce, &eff_bce, None).unwrap();
+    verify_ir(&ir_bce, &mod_bce).unwrap();
+    let unchecked_loads = ir_bce
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i.op, Op::Load { checked: false, .. }))
+        .count();
+    assert_eq!(
+        unchecked_loads, 0,
+        "bitwise mul + min_u clamp loads must be statically BCE-proven checked: true"
+    );
+
+    // 3. Dual pinned globals (`R12` + `R13`) on a fixed-size memory module with 2 hot mutable globals.
+    let mut gbody = Vec::new();
+    for _ in 0..10 {
+        gbody.extend_from_slice(&[0x23, 0, 0x20, 0, 0x6a, 0x24, 0]); // g0 += arg
+        gbody.extend_from_slice(&[0x23, 1, 0x41, 1, 0x6a, 0x24, 1]); // g1 += 1
+    }
+    gbody.extend_from_slice(&[0x23, 0, 0x23, 1, 0x6a]);
+    let g2_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 1, 1, 1]),
+        section(6, &[2, 0x7f, 1, 0x41, 5, 0x0b, 0x7f, 1, 0x41, 7, 0x0b]),
+        export_sec(&[("run", 0, 0), ("memory", 2, 0)]),
+        code_sec(&[enc_body(&[], &gbody)]),
+    ]);
+    let val_g2 =
+        wtime_validate::validate(&g2_wasm, &x64_validate_features(), &x64_validate_limits())
+            .unwrap();
+    let mod_g2 = admit_x64_module(val_g2.decoded()).unwrap();
+    assert!(
+        mod_g2.pinned_global.is_some() && mod_g2.pinned_global_2.is_some(),
+        "expected both pinned_global and pinned_global_2 to be assigned on fixed-size memory: {:?} / {:?}",
+        mod_g2.pinned_global,
+        mod_g2.pinned_global_2
+    );
+    assert_ne!(mod_g2.pinned_global, mod_g2.pinned_global_2);
+    let so = compile_wasm_to_x64_so(
+        &g2_wasm,
+        &X64CompileOptions {
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = so;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-dual-pin");
+        let path = root.0.join("g2.so");
+        std::fs::write(&path, so).unwrap();
+        let mut child = Command::new(driver)
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"call run 3\ncall run a\n")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            std::str::from_utf8(&out.stdout).unwrap(),
+            "NEW_OK\nCALL 0 0000000000000034 0 0\nCALL 0 00000000000000a2 0 0\n"
+        );
+    }
 }

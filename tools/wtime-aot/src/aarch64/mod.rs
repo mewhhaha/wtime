@@ -57,7 +57,7 @@ use crate::x64::module::{
 };
 use crate::x64::opt::{
     self, FnOwnEffects, InlineMode, Stage2Scratch, compute_module_effects_from_summaries,
-    inline_small_helpers, optimize_func_stage2_with_scratch, try_compute_fn_own_effects,
+    inline_small_helpers, optimize_func_stage2_with_options, try_compute_fn_own_effects,
 };
 use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables, TRAP_MESSAGES, global_kind_code};
 use crate::x64::verify::verify_ir;
@@ -522,16 +522,15 @@ fn try_compile_a64_incremental(
             let mut scratch = Stage2Scratch::default();
             for &bi in &dirty_list {
                 let mut ir = lowered_irs[bi].take().unwrap();
-                if !opts.spectre_mitigations {
-                    optimize_func_stage2_with_scratch(
-                        &mut ir,
-                        module,
-                        &effects,
-                        Some(budget),
-                        &mut scratch,
-                    )
-                    .map_err(X64CompileError::Failed)?;
-                }
+                optimize_func_stage2_with_options(
+                    &mut ir,
+                    module,
+                    &effects,
+                    opts.spectre_mitigations,
+                    Some(budget),
+                    &mut scratch,
+                )
+                .map_err(X64CompileError::Failed)?;
                 verify_ir(&ir, module).map_err(X64CompileError::Failed)?;
                 let alloc =
                     allocate(&ir, Some(budget)).map_err(X64CompileError::AdmissionRejected)?;
@@ -564,16 +563,15 @@ fn try_compile_a64_incremental(
                         .take()
                         .unwrap();
                     let res = (|| -> Result<A64Asm, X64CompileError> {
-                        if !opts.spectre_mitigations {
-                            optimize_func_stage2_with_scratch(
-                                &mut ir,
-                                module,
-                                &effects,
-                                Some(budget),
-                                &mut scratch,
-                            )
-                            .map_err(X64CompileError::Failed)?;
-                        }
+                        optimize_func_stage2_with_options(
+                            &mut ir,
+                            module,
+                            &effects,
+                            opts.spectre_mitigations,
+                            Some(budget),
+                            &mut scratch,
+                        )
+                        .map_err(X64CompileError::Failed)?;
                         verify_ir(&ir, module).map_err(X64CompileError::Failed)?;
                         let alloc = allocate(&ir, Some(budget))
                             .map_err(X64CompileError::AdmissionRejected)?;
@@ -1382,14 +1380,12 @@ fn compile_wasm_to_aarch64_detailed(
             let mut out = Vec::with_capacity(n_defs);
             let mut scratch = Stage2Scratch::default();
             for mut ir in irs {
-                // Stage 2 can prove bounds from branches that have no barrier.
-                if !opts.spectre_mitigations
-                    && let Some(ref eff) = effects
-                {
-                    optimize_func_stage2_with_scratch(
+                if let Some(ref eff) = effects {
+                    optimize_func_stage2_with_options(
                         &mut ir,
                         &module,
                         eff,
+                        opts.spectre_mitigations,
                         Some(&budget),
                         &mut scratch,
                     )
@@ -1429,13 +1425,12 @@ fn compile_wasm_to_aarch64_detailed(
                         .take()
                         .unwrap();
                     let res = (|| -> Result<A64Asm, X64CompileError> {
-                        if !opts.spectre_mitigations
-                            && let Some(eff) = eff_ref
-                        {
-                            optimize_func_stage2_with_scratch(
+                        if let Some(eff) = eff_ref {
+                            optimize_func_stage2_with_options(
                                 &mut ir,
                                 &module,
                                 eff,
+                                opts.spectre_mitigations,
                                 Some(&budget),
                                 &mut scratch,
                             )

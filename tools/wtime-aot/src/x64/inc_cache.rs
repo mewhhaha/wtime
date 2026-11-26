@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 12;
+const FORMAT_VERSION: u32 = 14;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -327,6 +327,13 @@ pub fn compute_abi_hash(
         }
     }
     match layout.pinned_global {
+        None => h.update(&[0]),
+        Some(g) => {
+            h.update(&[1]);
+            hash_u32(&mut h, g);
+        }
+    }
+    match layout.pinned_global_2 {
         None => h.update(&[0]),
         Some(g) => {
             h.update(&[1]);

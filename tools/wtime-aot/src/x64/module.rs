@@ -333,6 +333,8 @@ pub struct X64Module {
     pub global_consts: Vec<Option<X64ConstVal>>,
     /// Single hottest mutable non-const scalar (`I32`/`I64`) global to pin in `R12`.
     pub pinned_global: Option<u32>,
+    /// Second hottest mutable non-const scalar (`I32`/`I64`) global to pin in `R13` when `fixed32.is_some()`.
+    pub pinned_global_2: Option<u32>,
     /// Exported globals: `(name, global_index, val_type, mutable)`.
     pub exported_globals: Vec<(String, usize, ValType, bool)>,
     /// Exported functions: `(name, func_index)`.
@@ -2171,6 +2173,21 @@ pub fn admit_x64_module_for_target_with_summaries(
         .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
         .map(|k| k as u32);
 
+    let pinned_global_2 = if fixed32.is_some() {
+        (0..globals.len())
+            .filter(|&k| {
+                pinned_global != Some(k as u32)
+                    && global_consts[k].is_none()
+                    && globals[k].1
+                    && matches!(globals[k].0, ValType::I32 | ValType::I64)
+                    && (global_reads[k] + global_writes[k]) >= min_pin_accesses
+            })
+            .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
+            .map(|k| k as u32)
+    } else {
+        None
+    };
+
     let start = if let Some(s) = decoded.start {
         let fty = func_type_idx
             .get(s.0 as usize)
@@ -2245,6 +2262,7 @@ pub fn admit_x64_module_for_target_with_summaries(
             global_inits,
             global_consts,
             pinned_global,
+            pinned_global_2,
             exported_globals,
             exported_funcs,
             ci_index,

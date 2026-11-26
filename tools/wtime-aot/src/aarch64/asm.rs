@@ -1132,6 +1132,11 @@ impl A64Asm {
         self.emit(0xd503_3fdf);
     }
 
+    /// Consumption of Speculative Data Barrier (`csdb`), pairing with `csel` for Spectre v1 clamping.
+    pub fn csdb(&mut self) {
+        self.emit(0xd503_229f);
+    }
+
     pub fn nop(&mut self) {
         self.emit(0xd503_201f);
     }

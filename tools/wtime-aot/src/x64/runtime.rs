@@ -218,6 +218,11 @@ fn emit_pinned_load(asm: &mut Asm, module: &X64Module, layout: &CtxLayout) {
         let off = layout.global_offs[g as usize];
         asm.mov_rm(is64, Gp::R12, Mem::base_disp(Gp::R15, off));
     }
+    if let Some(g2) = layout.pinned_global_2 {
+        let is64 = module.globals[g2 as usize].0 == ValType::I64;
+        let off = layout.global_offs[g2 as usize];
+        asm.mov_rm(is64, Gp::R13, Mem::base_disp(Gp::R15, off));
+    }
 }
 
 fn emit_pinned_store(asm: &mut Asm, module: &X64Module, layout: &CtxLayout) {
@@ -225,6 +230,11 @@ fn emit_pinned_store(asm: &mut Asm, module: &X64Module, layout: &CtxLayout) {
         let is64 = module.globals[g as usize].0 == ValType::I64;
         let off = layout.global_offs[g as usize];
         asm.mov_mr(is64, Mem::base_disp(Gp::R15, off), Gp::R12);
+    }
+    if let Some(g2) = layout.pinned_global_2 {
+        let is64 = module.globals[g2 as usize].0 == ValType::I64;
+        let off = layout.global_offs[g2 as usize];
+        asm.mov_mr(is64, Mem::base_disp(Gp::R15, off), Gp::R13);
     }
 }
 
@@ -1142,9 +1152,6 @@ pub fn emit_helper_initialize(
         }
     }
 
-    // 2. Load pinned global into R12 (width-exact: 32-bit zero-ext for I32, 64-bit for I64).
-    emit_pinned_load(&mut a, module, layout);
-
     // 3. Explicit non-null initializers for dynamic tables (`table_inits` from function-references).
     for (&tbl, meta) in &module.dyn_tables {
         if meta.init_val != 0 && meta.min_len > 0 {
@@ -1249,6 +1256,10 @@ pub fn emit_helper_initialize(
             }
         }
     }
+
+    // 4b. Load pinned global(s) into R12 (and R13 when `pinned_global_2` is set on fixed-size
+    //     memories) AFTER active data segment bounds checks have consumed `R13 = mem_len`.
+    emit_pinned_load(&mut a, module, layout);
 
     // 5. Optional start function (defined or imported `wt_import{k}` via `RelocTarget::Func`).
     if let Some(start_idx) = module.start {
