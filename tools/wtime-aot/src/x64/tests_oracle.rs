@@ -49,7 +49,7 @@ pub(super) fn get_oracle_driver() -> Option<&'static Path> {
                 .args(["-O1", "-o"])
                 .arg(&bin)
                 .arg(&c_path)
-                .args(["-ldl"])
+                .args(["-ldl", "-lm"])
                 .status()
                 .ok()?;
             if !st.success() {
@@ -72,6 +72,7 @@ const ORACLE_DRIVER_C: &str = r#"
 #include <stddef.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <fenv.h>
 
 typedef int32_t (*host_fn_t)(void *, void *, uint32_t, uint64_t, uint64_t, uint64_t *);
 typedef void *(*fn_new)(void *, host_fn_t, uint64_t, uint8_t *);
@@ -113,6 +114,8 @@ static int32_t oracle_host_cb(void *u, void *ac, uint32_t idx, uint64_t tok, uin
 
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
+    const int host_round_down = argc > 2;
+    if (host_round_down && fesetround(FE_DOWNWARD) != 0) return 5;
     void *dl = dlopen(argv[1], RTLD_NOW);
     if (!dl) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 3; }
     fn_new b_new = (fn_new)dlsym(dl, "blot_aot_new");
@@ -149,6 +152,7 @@ int main(int argc, char **argv) {
             uint8_t tr = 0;
             hs.count = 0;
             int32_t rc = b_call(h, (const uint8_t *)name, strlen(name), (uint64_t)arg, &res, &tr);
+            if (host_round_down && fegetround() != FE_DOWNWARD) return 6;
             printf("CALL %d %016llx %u %zu", rc, (unsigned long long)res, (unsigned)tr, hs.count);
             for (size_t i = 0; i < hs.count; i++) {
                 printf(" %u:%016llx:%016llx", hs.log[i].idx,
@@ -387,12 +391,13 @@ fn run_wtime_oracle(
     }
 }
 
-fn run_x64_so(
+fn run_blot_so(
     driver: &Path,
     so_path: &Path,
     calls: &[OracleCall],
     check_globals: &[&str],
     check_mem: &[(u64, usize)],
+    host_round_down: bool,
 ) -> RunTrace {
     let mut script = String::new();
     for c in calls {
@@ -405,8 +410,12 @@ fn run_x64_so(
         script.push_str(&format!("mem {off} {len}\n"));
     }
 
-    let mut child = Command::new(driver)
-        .arg(so_path)
+    let mut command = Command::new(driver);
+    command.arg(so_path);
+    if host_round_down {
+        command.arg("--round-down");
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -540,7 +549,7 @@ fn assert_oracle_matrix(
         let so_path = root.0.join(format!("{name}_{tag}.so"));
         crate::build::assert_inside_test_root(&root.0, &so_path);
         fs::write(&so_path, &so_bytes).unwrap();
-        let actual = run_x64_so(driver, &so_path, calls, check_globals, check_mem);
+        let actual = run_blot_so(driver, &so_path, calls, check_globals, check_mem, false);
         for (i, ((exp_o, exp_tr), (act_o, act_tr))) in
             expected.outcomes.iter().zip(&actual.outcomes).enumerate()
         {
@@ -2652,7 +2661,10 @@ fn push_v128_const(out: &mut Vec<u8>, bytes: [u8; 16]) {
     out.extend_from_slice(&bytes);
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 #[test]
 fn oracle_hill1_all_236_simd_opcodes() {
     // Track EVERY valid 0xfd00..=0xfdff opcode we emit and assert total == 236!
@@ -2729,6 +2741,31 @@ fn oracle_hill1_all_236_simd_opcodes() {
     // [160..176]: i64x2 second
     seed[160..168].copy_from_slice(&(-1i64).to_le_bytes());
     seed[168..176].copy_from_slice(&0x0123_4567_89ab_cdefi64.to_le_bytes());
+
+    // Exact unsigned conversion inputs and expected f32 bits. Include ties on
+    // both sides of 2^31, ties rounding down/up to even, and adjacent non-ties.
+    let unsigned_to_f32: [([u32; 4], [u32; 4]); 4] = [
+        (
+            [0, 1, 0x00ff_ffff, 0x7fff_ffff],
+            [0, 0x3f80_0000, 0x4b7f_ffff, 0x4f00_0000],
+        ),
+        (
+            [0x8000_0000, 0xffff_ffff, 0x0100_0001, 0x0100_0003],
+            [0x4f00_0000, 0x4f80_0000, 0x4b80_0000, 0x4b80_0002],
+        ),
+        (
+            [0x8000_0080, 0x8000_0180, 0x8000_0081, 0xffff_ff7f],
+            [0x4f00_0000, 0x4f00_0002, 0x4f00_0001, 0x4f7f_ffff],
+        ),
+        (
+            [0xffff_ff80, 0x0100_0002, 0x0200_0002, 0x0200_0006],
+            [0x4f80_0000, 0x4b80_0001, 0x4c00_0000, 0x4c00_0002],
+        ),
+    ];
+    for (i, (inputs, _)) in unsigned_to_f32.iter().enumerate() {
+        let off = 176 + 16 * i;
+        seed[off..off + 16].copy_from_slice(&inputs.map(u32::to_le_bytes).concat());
+    }
 
     // Output cursor in memory starts at offset 512 (each result is 16 bytes -> fits easily in 1 page!).
     let mut out_off: i32 = 512;
@@ -2941,6 +2978,12 @@ fn oracle_hill1_all_236_simd_opcodes() {
             store_v128(&mut b1, &mut out_off, &covered);
         }
     }
+    let u32_to_f32_output = out_off;
+    for off in [176, 192, 208, 224] {
+        load_at(&mut b1, off, &covered);
+        emit_op(&mut b1, 0xfdfb);
+        store_v128(&mut b1, &mut out_off, &covered);
+    }
     // All 12 shifts using parameter 0 (dynamic shift count!)
     for op in [
         0xfd6bu16, 0xfd6c, 0xfd6d, 0xfd8b, 0xfd8c, 0xfd8d, 0xfdab, 0xfdac, 0xfdad, 0xfdcb, 0xfdcc,
@@ -3027,7 +3070,7 @@ fn oracle_hill1_all_236_simd_opcodes() {
     let mut b3 = vec![0x20, 0];
     push_v128_const(&mut b3, [0; 16]);
     push_simd_op(&mut b3, 0xfd56);
-    b3.extend_from_slice(&[0, 0, 0]);
+    b3.extend_from_slice(&[0, 1, 0]); // align=0, offset=1, lane=0
     push_simd_op(&mut b3, 0xfd1b);
     b3.push(0);
 
@@ -3038,7 +3081,7 @@ fn oracle_hill1_all_236_simd_opcodes() {
     let wasm = wasm_module(&[
         type_sec(&[(&[0x7f], &[0x7f])]),
         func_sec(&[0, 0, 0, 0]),
-        section(5, &[1, 0x01, 1, 1]),
+        section(5, &[1, 0x01, 1, 2]),
         export_sec(&[
             ("blot:memory", 2, 0),
             ("simd_misc", 0, 0),
@@ -3058,12 +3101,13 @@ fn oracle_hill1_all_236_simd_opcodes() {
     let mut calls = vec![
         c("simd_misc", ArgSpec::I32(-42)),
         c("simd_bin", ArgSpec::I32(0)),
-        c("simd_lane_oob", ArgSpec::I32(65_532)), // exact in-bounds
-        c("simd_lane_oob", ArgSpec::I32(65_533)), // OOB trap!
+        c("simd_lane_oob", ArgSpec::I32(65_531)), // exact in-bounds
+        c("simd_lane_oob", ArgSpec::I32(65_532)), // OOB trap!
     ];
     for shift in [0, 1, 7, 8, 15, 31, 63, 65, -1] {
         calls.push(c("simd_un_shift", ArgSpec::I32(shift)));
     }
+    #[cfg(target_arch = "x86_64")]
     assert_oracle_matrix(
         "hill1_simd_236",
         &wasm,
@@ -3071,6 +3115,73 @@ fn oracle_hill1_all_236_simd_opcodes() {
         &[],
         &[(512, (out_off - 512) as usize)],
     );
+
+    let Some(driver) = get_oracle_driver() else {
+        return;
+    };
+    let root = crate::build::create_fresh_test_root("wtime-aot-c-simd-oracle");
+    let baseline = if cfg!(target_arch = "x86_64") {
+        "x86-64"
+    } else {
+        "generic"
+    };
+    for (cpu, opt) in [
+        (baseline, crate::cgen::COpt::O2),
+        ("native", crate::cgen::COpt::Auto),
+    ] {
+        let so = root.0.join(format!("{cpu}.so"));
+        match crate::cgen::detect_cc_with_deadline(cpu, None, None) {
+            Ok(_) => {}
+            Err(err)
+                if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") =>
+            {
+                panic!("C compiler probe failed ({cpu}): {err}");
+            }
+            Err(_) => return,
+        }
+        crate::cgen::build_c_blot_cdylib(
+            &wasm,
+            &root.0.join("cache"),
+            cpu,
+            Some(2),
+            opt,
+            Some(std::time::Duration::from_secs(120)),
+            &so,
+        )
+        .unwrap_or_else(|e| panic!("C SIMD compile failed ({cpu}): {e}"));
+        let expected_bytes: Vec<u8> = unsigned_to_f32
+            .iter()
+            .flat_map(|(_, bits)| bits.iter().flat_map(|bits| bits.to_le_bytes()))
+            .collect();
+        let check_mem = [
+            (u32_to_f32_output as u64, expected_bytes.len()),
+            (512, (out_off - 512) as usize),
+        ];
+        // Compare after each shift so later calls cannot overwrite a bad result.
+        for shift in [0, 1, 7, 8, 15, 31, 63, 65, -1] {
+            let mut case_calls = calls[..4].to_vec();
+            case_calls.push(c("simd_un_shift", ArgSpec::I32(shift)));
+            let actual = run_blot_so(driver, &so, &case_calls, &[], &check_mem, true);
+            let expected = run_wtime_oracle(&wasm, &case_calls, &[], &check_mem);
+            assert_eq!(
+                actual.outcomes, expected.outcomes,
+                "C SIMD outcomes ({cpu}, shift={shift})"
+            );
+            assert_eq!(
+                actual.mem_slices[0].1, expected_bytes,
+                "f32x4.convert_i32x4_u ({cpu})"
+            );
+            let mismatch = actual.mem_slices[1]
+                .1
+                .iter()
+                .zip(&expected.mem_slices[1].1)
+                .position(|(actual, expected)| actual != expected);
+            assert_eq!(
+                mismatch, None,
+                "C SIMD output differs at the indicated byte relative to 512 ({cpu}, shift={shift})"
+            );
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

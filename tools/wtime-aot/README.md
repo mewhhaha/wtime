@@ -14,7 +14,9 @@ validator and compiles it ahead of time through one of four backends:
   C99 with a content-addressed, SHA-256-verified per-shard object cache
   (`c-obj/`) compiled by Clang/GCC and linked with `ld.lld`/`ld` (with
   `-fcf-protection=return` CET shadow-stack hardening, `-fstack-clash-protection`,
-  MXCSR isolation, and calling-thread stack checks on Linux x86-64).
+  and calling-thread stack checks on Linux x86-64). Supports all 236 fixed-width
+  Wasm SIMD opcodes, with guest floating-point control isolated from the host
+  on x86-64 (MXCSR) and AArch64 (FPCR).
 - **`--backend x64`** (`--blot-cdylib` or standalone static Linux x86-64
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) SSA
   optimizer, register allocator, independent IR/allocation verifier (enabled by
@@ -151,9 +153,9 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     `env::bench_input*`, and `8 GiB + 64 KiB` guard-page `memory32` bounds
     checks (zero signal handlers in `--blot-cdylib`).
 
-Unsupported constructs are rejected before codegen (`--backend x64` uses exit
-code `4` for admission rejections vs. exit code `1` for I/O, timeout, or
-internal errors).
+The CLI builds with the selected backend. For `--backend x64`, an admission
+rejection exits with code `4`. I/O failures, timeouts, and internal errors exit
+with code `1`.
 
 ## Not covered
 
