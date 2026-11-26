@@ -355,6 +355,7 @@ pub(crate) fn spectre_bulk_and_scrub_wasm() -> Vec<u8> {
 #[test]
 fn x64_spectre_bulk_helpers_and_drop_scrub() {
     let wasm = spectre_bulk_and_scrub_wasm();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let root = crate::build::create_fresh_test_root("wtime-aot-x64-spectre-bulk");
     let has_lfence = |bytes: &[u8]| bytes.windows(3).any(|w| w == [0x0f, 0xae, 0xe8]);
     let has_rep_stosb = |bytes: &[u8]| bytes.windows(2).any(|w| w == [0xf3, 0xaa]);
@@ -428,6 +429,7 @@ fn x64_spectre_bulk_helpers_and_drop_scrub() {
             },
         )
         .unwrap();
+        assert!(image.starts_with(b"\x7fELF"));
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(driver) = super::tests_oracle::get_oracle_driver() {
