@@ -1719,6 +1719,64 @@ impl A64Asm {
         self.emit(0x4e00_0000 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | vd.0 as u32);
     }
 
+    /// AdvSIMD 128-bit permute (`zip1`, `zip2`, `uzp1`, `uzp2`, `trn1`, `trn2`; `size`: 0=16b, 1=8h, 2=4s, 3=2d).
+    fn neon_perm(&mut self, base: u32, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(
+            base | (((size & 3) as u32) << 22)
+                | ((vm.0 as u32) << 16)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+    pub fn uzp1_128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_perm(0x4e00_1800, size, vd, vn, vm);
+    }
+    pub fn trn1_128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_perm(0x4e00_2800, size, vd, vn, vm);
+    }
+    pub fn zip1_128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_perm(0x4e00_3800, size, vd, vn, vm);
+    }
+    pub fn uzp2_128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_perm(0x4e00_5800, size, vd, vn, vm);
+    }
+    pub fn trn2_128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_perm(0x4e00_6800, size, vd, vn, vm);
+    }
+    pub fn zip2_128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_perm(0x4e00_7800, size, vd, vn, vm);
+    }
+    /// `ext vd.16b, vn.16b, vm.16b, #imm4`: extracts `[vn[imm4..16], vm[0..imm4]]`.
+    pub fn ext_16b(&mut self, vd: VReg, vn: VReg, vm: VReg, imm4: u8) {
+        self.emit(
+            0x6e00_0000
+                | ((vm.0 as u32) << 16)
+                | (((imm4 & 15) as u32) << 11)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+    /// `fmla vd.<T>, vn.<T>, vm.<T>`: `vd += vn * vm` (`4s` when `!is64`, `2d` when `is64`).
+    pub fn fmla_v128(&mut self, is64: bool, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(
+            0x4e20_cc00
+                | (u32::from(is64) << 22)
+                | ((vm.0 as u32) << 16)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+    /// `fmls vd.<T>, vn.<T>, vm.<T>`: `vd -= vn * vm` (`4s` when `!is64`, `2d` when `is64`).
+    pub fn fmls_v128(&mut self, is64: bool, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(
+            0x4ea0_cc00
+                | (u32::from(is64) << 22)
+                | ((vm.0 as u32) << 16)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
     /// `saddlp vd.<T>, vn.<2T>` (`size`: `0`=16b->8h, `1`=8h->4s, `2`=4s->2d).
     pub fn saddlp_128(&mut self, size: u8, vd: VReg, vn: VReg) {
         self.emit(0x4e20_2800 | (((size & 3) as u32) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);

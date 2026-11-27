@@ -19,8 +19,7 @@ use super::ir::{
 use super::module::{MAX_FRAME_BYTES, X64Module};
 use super::regalloc::{
     AllocConfig, AllocResult, HelperKind, Loc, MASK_GP_CALLER, MASK_RAX_RDX, MASK_RCX,
-    MASK_XMM_CALLER, RematConst, XMM_ALLOC, XMM_CALLEE_SAVED, helper_clobbers, layout_args,
-    layout_rets,
+    MASK_XMM_CALLER, RematConst, XMM_CALLEE_SAVED, helper_clobbers, layout_args, layout_rets,
 };
 
 fn check_val_range(ir: &IrFunc, r: ValRange, ctx: &str) -> Result<(), String> {
@@ -1627,6 +1626,141 @@ fn verify_inst_types(
             }
             expect_no_res(ir, bi, res, "F64x4BinMem")?;
         }
+        Op::SlpWideChain { desc_idx, args } => {
+            let Some(desc) = ir.wide_chains.get(desc_idx as usize) else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: SlpWideChain desc_idx {desc_idx} out of range",
+                    ir.func_index
+                ));
+            };
+            if !matches!(desc.chunks, 2 | 4) || desc.result_slot > 1 || desc.steps.is_empty() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: invalid SlpWideChain descriptor",
+                    ir.func_index
+                ));
+            }
+            let expected_args = 1usize + (desc.n_loads as usize) + (desc.n_bcasts as usize);
+            let sl = ir.pool_slice(args);
+            if sl.len() != expected_args || desc.load_offs.len() != desc.n_loads as usize {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: SlpWideChain arg count mismatch",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, sl[0], addr_ty, "SlpWideChain.dst")?;
+            for &la in &sl[1..1 + desc.n_loads as usize] {
+                expect_ty(ir, bi, la, addr_ty, "SlpWideChain.load")?;
+            }
+            for &bv in &sl[1 + desc.n_loads as usize..] {
+                expect_ty(ir, bi, bv, Ty::V128, "SlpWideChain.bcast")?;
+            }
+            let width = u64::from(desc.chunks) * 16;
+            if u64::from(desc.dst_off) + width > i32::MAX as u64 {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: SlpWideChain dst_off overflow",
+                    ir.func_index
+                ));
+            }
+            for &lo in &desc.load_offs {
+                if u64::from(lo) + width > i32::MAX as u64 {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: SlpWideChain load_off overflow",
+                        ir.func_index
+                    ));
+                }
+            }
+            for &step in &desc.steps {
+                match step {
+                    super::ir::WideStep::Load {
+                        dst_slot,
+                        load_idx,
+                        offset,
+                    } => {
+                        if dst_slot > 1
+                            || load_idx >= desc.n_loads
+                            || u64::from(offset) + width > i32::MAX as u64
+                        {
+                            return Err(format!(
+                                "verify_ir fn {} bb{bi}: invalid SlpWideChain Load step",
+                                ir.func_index
+                            ));
+                        }
+                    }
+                    super::ir::WideStep::Broadcast {
+                        dst_slot,
+                        bcast_idx,
+                    } => {
+                        if dst_slot > 1 || bcast_idx >= desc.n_bcasts {
+                            return Err(format!(
+                                "verify_ir fn {} bb{bi}: invalid SlpWideChain Broadcast step",
+                                ir.func_index
+                            ));
+                        }
+                    }
+                    super::ir::WideStep::Bin {
+                        op,
+                        dst_slot,
+                        lhs_slot,
+                        rhs_slot,
+                    } => {
+                        if dst_slot > 1
+                            || lhs_slot > 1
+                            || rhs_slot > 1
+                            || op.is_fma()
+                            || (op.is_canon_nan()
+                                && (dst_slot != lhs_slot
+                                    || rhs_slot == dst_slot
+                                    || !desc.uses_canon_nan))
+                        {
+                            return Err(format!(
+                                "verify_ir fn {} bb{bi}: invalid SlpWideChain Bin step",
+                                ir.func_index
+                            ));
+                        }
+                    }
+                    super::ir::WideStep::BinMem {
+                        op,
+                        dst_slot,
+                        lhs_slot,
+                        load_idx,
+                        offset,
+                    } => {
+                        if dst_slot > 1
+                            || lhs_slot > 1
+                            || load_idx >= desc.n_loads
+                            || !op.supports_mem_rhs()
+                            || u64::from(offset) + width > i32::MAX as u64
+                        {
+                            return Err(format!(
+                                "verify_ir fn {} bb{bi}: invalid SlpWideChain BinMem step",
+                                ir.func_index
+                            ));
+                        }
+                    }
+                    super::ir::WideStep::TerMem {
+                        op,
+                        acc_slot,
+                        a_slot,
+                        load_idx,
+                        offset,
+                    } => {
+                        if acc_slot > 1
+                            || a_slot > 1
+                            || acc_slot == a_slot
+                            || load_idx >= desc.n_loads
+                            || !op.is_fma()
+                            || u64::from(offset) + width > i32::MAX as u64
+                        {
+                            return Err(format!(
+                                "verify_ir fn {} bb{bi}: invalid SlpWideChain TerMem step",
+                                ir.func_index
+                            ));
+                        }
+                    }
+                }
+            }
+            expect_no_res(ir, bi, res, "SlpWideChain")?;
+        }
         Op::V128Splat { kind, val } => {
             expect_ty(ir, bi, val, kind.scalar_ty(), "V128Splat")?;
             expect_res(ir, bi, res, Ty::V128, "V128Splat")?;
@@ -2191,7 +2325,7 @@ pub fn verify_alloc_with_config(
                         ir.func_index
                     ));
                 }
-                if !XMM_ALLOC.contains(&x) {
+                if !cfg.is_alloc_xmm(x) {
                     return Err(format!(
                         "verify_alloc fn {}: value v{vi} in non-allocatable XMM {x:?}",
                         ir.func_index
@@ -2336,8 +2470,8 @@ pub fn verify_alloc_with_config(
         remat_gp_refs: [u32; 16],
         remat_gp_base: [Option<u32>; 16],
         remat_gp_mask: u16,
-        xmm_owner: [Option<u32>; 16],
-        xmm_mask: u16,
+        xmm_owner: [Option<u32>; 32],
+        xmm_mask: u32,
         spill_owner: Vec<Option<u32>>,
         dirty_spills: Vec<usize>,
         spill_base: i32,
@@ -2356,7 +2490,7 @@ pub fn verify_alloc_with_config(
             self.remat_gp_refs = [0; 16];
             self.remat_gp_base = [None; 16];
             self.remat_gp_mask = 0;
-            self.xmm_owner = [None; 16];
+            self.xmm_owner = [None; 32];
             self.xmm_mask = 0;
             for s in self.dirty_spills.drain(..) {
                 self.spill_owner[s] = None;
@@ -2416,7 +2550,7 @@ pub fn verify_alloc_with_config(
                         });
                     }
                     self.xmm_owner[xid] = Some(vi);
-                    self.xmm_mask |= 1u16 << xid;
+                    self.xmm_mask |= 1u32 << xid;
                 }
                 Loc::Spill(off) => {
                     let w = spill_width(ir.val_tys[idx]);
@@ -2487,7 +2621,7 @@ pub fn verify_alloc_with_config(
                 Loc::Xmm(x) => {
                     let xid = x.id() as usize;
                     self.xmm_owner[xid] = None;
-                    self.xmm_mask &= !(1u16 << xid);
+                    self.xmm_mask &= !(1u32 << xid);
                 }
                 Loc::Spill(off) => {
                     let w = spill_width(ir.val_tys[idx]);
@@ -2518,7 +2652,7 @@ pub fn verify_alloc_with_config(
         remat_gp_refs: [0; 16],
         remat_gp_base: [None; 16],
         remat_gp_mask: 0,
-        xmm_owner: [None; 16],
+        xmm_owner: [None; 32],
         xmm_mask: 0,
         spill_owner: vec![None; n_spill_slots],
         dirty_spills: Vec::new(),
@@ -2701,6 +2835,18 @@ pub fn verify_alloc_with_config(
                     (1 << 0) | (1 << 1) | (1 << 2),
                 ),
                 Op::PgoRecordCi { .. } => (1 << 0, 0),
+                Op::SlpWideChain { desc_idx, args } if !cfg.allow_xmm16_31 => {
+                    let n_loads = ir.wide_chains[desc_idx as usize].n_loads as usize;
+                    for &bv in &ir.pool_slice(args)[1 + n_loads..] {
+                        if alloc.locs[bv.0 as usize] == Loc::Xmm(super::asm::Xmm::Xmm0) {
+                            return Err(format!(
+                                "verify_alloc fn {} bb{b} inst {ii}: SlpWideChain bcast operand v{} allocated to clobbered Xmm0",
+                                ir.func_index, bv.0
+                            ));
+                        }
+                    }
+                    (0, 1 << 0)
+                }
                 _ => (0, 0),
             };
             let hit_gp = gp_clob & (tracker.gp_mask | tracker.remat_gp_mask);

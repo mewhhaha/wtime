@@ -1212,6 +1212,120 @@ impl A64Vm {
                 out[i] = if idx[i] < 16 { tbl[idx[i] as usize] } else { 0 };
             }
             self.v[rd] = out;
+        } else if (insn & 0xff20_8c00) == 0x4e00_0800
+            && matches!((insn >> 12) & 7, 1 | 2 | 3 | 5 | 6 | 7)
+        {
+            // AdvSIMD 128-bit permute: UZP1(1), TRN1(2), ZIP1(3), UZP2(5), TRN2(6), ZIP2(7)
+            let size = ((insn >> 22) & 3) as usize;
+            let op = (insn >> 12) & 7;
+            let elem = 1usize << size;
+            let n = 16 / elem;
+            let half = n / 2;
+            let a = self.v[rn];
+            let b = self.v[rm];
+            let mut out = [0u8; 16];
+            for i in 0..n {
+                let src_idx = match op {
+                    1 => {
+                        if i < half {
+                            2 * i
+                        } else {
+                            n + 2 * (i - half)
+                        }
+                    }
+                    5 => {
+                        if i < half {
+                            2 * i + 1
+                        } else {
+                            n + 2 * (i - half) + 1
+                        }
+                    }
+                    2 => {
+                        if (i & 1) == 0 {
+                            i
+                        } else {
+                            n + (i - 1)
+                        }
+                    }
+                    6 => {
+                        if (i & 1) == 0 {
+                            i + 1
+                        } else {
+                            n + i
+                        }
+                    }
+                    3 => {
+                        if (i & 1) == 0 {
+                            i / 2
+                        } else {
+                            n + (i / 2)
+                        }
+                    }
+                    7 => {
+                        if (i & 1) == 0 {
+                            half + i / 2
+                        } else {
+                            n + half + i / 2
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                let (src, idx) = if src_idx < n {
+                    (&a, src_idx)
+                } else {
+                    (&b, src_idx - n)
+                };
+                out[i * elem..(i + 1) * elem].copy_from_slice(&src[idx * elem..(idx + 1) * elem]);
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xffe0_8400) == 0x6e00_0000 {
+            // EXT Vd.16B, Vn.16B, Vm.16B, #imm4
+            let imm4 = ((insn >> 11) & 15) as usize;
+            let a = self.v[rn];
+            let b = self.v[rm];
+            let mut out = [0u8; 16];
+            for i in 0..16 {
+                out[i] = if imm4 + i < 16 {
+                    a[imm4 + i]
+                } else {
+                    b[imm4 + i - 16]
+                };
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xff20_fc00) == 0x4e20_cc00 {
+            // FMLA (bit 23 == 0) / FMLS (bit 23 == 1) Vd.{4S,2D}, Vn, Vm
+            let is_sub = ((insn >> 23) & 1) != 0;
+            let is64 = ((insn >> 22) & 1) != 0;
+            let acc = self.v[rd];
+            let a = self.v[rn];
+            let b = self.v[rm];
+            let mut out = [0u8; 16];
+            if is64 {
+                for i in 0..2 {
+                    let va = f64::from_le_bytes(a[i * 8..i * 8 + 8].try_into().unwrap());
+                    let vb = f64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+                    let vc = f64::from_le_bytes(acc[i * 8..i * 8 + 8].try_into().unwrap());
+                    let res = if is_sub {
+                        (-va).mul_add(vb, vc)
+                    } else {
+                        va.mul_add(vb, vc)
+                    };
+                    out[i * 8..i * 8 + 8].copy_from_slice(&res.to_le_bytes());
+                }
+            } else {
+                for i in 0..4 {
+                    let va = f32::from_le_bytes(a[i * 4..i * 4 + 4].try_into().unwrap());
+                    let vb = f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+                    let vc = f32::from_le_bytes(acc[i * 4..i * 4 + 4].try_into().unwrap());
+                    let res = if is_sub {
+                        (-va).mul_add(vb, vc)
+                    } else {
+                        va.mul_add(vb, vc)
+                    };
+                    out[i * 4..i * 4 + 4].copy_from_slice(&res.to_le_bytes());
+                }
+            }
+            self.v[rd] = out;
         } else if (insn & 0xdf3f_fc00) == 0x4e20_2800 {
             // SADDLP (U=0) / UADDLP (U=1) 128-bit
             let unsigned = ((insn >> 29) & 1) != 0;
@@ -5050,6 +5164,7 @@ fn aarch64_regalloc_enforces_liveness_memory_cap_and_filters_cross_block() {
         val_pool,
         v128_consts: Vec::new(),
         br_tables: Vec::new(),
+        wide_chains: Vec::new(),
         needs_stack_check: false,
         elided_callee_stack_bytes: 0,
         early_pruned: 0,

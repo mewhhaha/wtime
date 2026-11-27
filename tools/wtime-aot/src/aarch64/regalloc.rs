@@ -493,6 +493,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut val_remat: Vec<Option<A64RematConst>> = vec![None; n_vals];
     let mut val_remat_addr: Vec<Option<(u32, i32, bool)>> = vec![None; n_vals];
     let mut clobbers: Vec<(u32, u32, u32)> = Vec::new();
+    let mut slp_bcast_avoid_v0: Vec<u32> = Vec::new();
     let mut max_out_args = 0i32;
     let mut max_ret_buf = 0i32;
     let mut has_calls = false;
@@ -562,6 +563,13 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 }
                 Op::PgoRecordCi { .. } => {
                     clobbers.push((pos, 1 << 0, 0));
+                }
+                Op::SlpWideChain { desc_idx, args } => {
+                    clobbers.push((pos, 0, 1 << 0));
+                    let n_loads = ir.wide_chains[desc_idx as usize].n_loads as usize;
+                    for &bv in &ir.pool_slice(args)[1 + n_loads..] {
+                        slp_bcast_avoid_v0.push(bv.0);
+                    }
                 }
                 _ => {}
             }
@@ -1154,6 +1162,9 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     // 4. Build GP and FP intervals with exact clobber masks, spill weights, and remat metadata.
     let mut val_clob_gp = vec![0u32; n_vals];
     let mut val_clob_fp = vec![0u32; n_vals];
+    for &bv in &slp_bcast_avoid_v0 {
+        val_clob_fp[bv as usize] |= 1 << 0;
+    }
     let mut gp_ivs = Vec::new();
     let mut fp_ivs = Vec::new();
     for vi in 0..n_vals {
@@ -1163,7 +1174,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
         let e = iv_end[vi].max(s + 1);
         let mut cgp = 0u32;
-        let mut cfp = 0u32;
+        let mut cfp = val_clob_fp[vi];
         let lo = clobbers.partition_point(|&(cp, _, _)| cp <= s);
         for &(cp, gm, fm) in &clobbers[lo..] {
             if cp >= e {

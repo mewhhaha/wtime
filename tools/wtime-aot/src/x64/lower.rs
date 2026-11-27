@@ -568,6 +568,8 @@ struct Lower<'a> {
     edge_tramps: Vec<(Label, u32, ValRange)>,
     /// Interns repeated `(target_bb, args.start, args.len)` edge trampolines (e.g. dense `br_table`).
     edge_tramp_cache: HashMap<(u32, u32, u32), Label>,
+    /// Cold out-of-line 128-bit overlap fallback stubs for `Op::SlpWideChain` (`(slow_lbl, resume_lbl, desc_idx, args)`).
+    wide_slow_tramps: Vec<(Label, Label, u32, ValRange)>,
     /// Lazily populated map of `Val`s defined by non-zero, non-NaN `ConstF32`/`ConstF64` ops
     /// (enables bit-exact SSE2 `min`/`max` lowering for non-strict `<=`/`>=` clamps like `clamp(x, -100.0, 100.0)`).
     fp_nz_consts: Option<Vec<bool>>,
@@ -868,6 +870,24 @@ impl<'a> Lower<'a> {
                 self.asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, off), reg);
             }
             Loc::Xmm(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
+        }
+    }
+
+    fn fp_read_low16(&mut self, v: Val, scratch: Xmm) -> Xmm {
+        let r = self.fp_read(v, scratch);
+        if r.id() >= 16 {
+            self.asm.movaps_rr(scratch, r);
+            scratch
+        } else {
+            r
+        }
+    }
+
+    fn fp_write_low16(&self, v: Val) -> Xmm {
+        match self.loc(v) {
+            Loc::Xmm(x) if x.id() < 16 => x,
+            Loc::Xmm(_) | Loc::Spill(_) => SCRATCH_FP1,
+            Loc::Gp(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
         }
     }
 
@@ -1235,6 +1255,16 @@ impl<'a> Lower<'a> {
                 LoadKind::F32 | LoadKind::F64 | LoadKind::V128 => {
                     emit_fp_load(&mut self.asm, d, mem, kind.ty());
                 }
+                LoadKind::V128Load8x8S if self.isa.has_avx2 => self.asm.vpmovsxbw_xm(d, mem),
+                LoadKind::V128Load8x8U if self.isa.has_avx2 => self.asm.vpmovzxbw_xm(d, mem),
+                LoadKind::V128Load16x4S if self.isa.has_avx2 => self.asm.vpmovsxwd_xm(d, mem),
+                LoadKind::V128Load16x4U if self.isa.has_avx2 => self.asm.vpmovzxwd_xm(d, mem),
+                LoadKind::V128Load32x2S if self.isa.has_avx2 => self.asm.vpmovsxdq_xm(d, mem),
+                LoadKind::V128Load32x2U if self.isa.has_avx2 => self.asm.vpmovzxdq_xm(d, mem),
+                LoadKind::V128Load8Splat if self.isa.has_avx2 => self.asm.vpbroadcastb_xm(d, mem),
+                LoadKind::V128Load16Splat if self.isa.has_avx2 => self.asm.vpbroadcastw_xm(d, mem),
+                LoadKind::V128Load32Splat if self.isa.has_avx2 => self.asm.vbroadcastss_xm(d, mem),
+                LoadKind::V128Load64Splat if self.isa.has_avx2 => self.asm.vmovddup_xm(d, mem),
                 LoadKind::V128Load8x8S => self.asm.pmovsxbw_xm(d, mem),
                 LoadKind::V128Load8x8U => self.asm.pmovzxbw_xm(d, mem),
                 LoadKind::V128Load16x4S => self.asm.pmovsxwd_xm(d, mem),
@@ -1427,7 +1457,7 @@ impl<'a> Lower<'a> {
         let params = &self.ir.blocks[then_bb as usize].params;
         let arg_vals = self.ir.pool_slice(then_args);
         let mut dst_gp = 0u16;
-        let mut dst_xmm = 0u16;
+        let mut dst_xmm = 0u32;
         let mut any_move = false;
         for (&p, &a) in params.iter().zip(arg_vals) {
             let dl = self.loc(p);
@@ -1444,7 +1474,7 @@ impl<'a> Lower<'a> {
             }
             match dl {
                 Loc::Gp(g) => dst_gp |= 1u16 << g.id(),
-                Loc::Xmm(x) => dst_xmm |= 1u16 << x.id(),
+                Loc::Xmm(x) => dst_xmm |= 1u32 << x.id(),
                 Loc::Spill(_) | Loc::Remat(_) | Loc::RematAddr { .. } => return false,
             }
         }
@@ -1456,7 +1486,7 @@ impl<'a> Lower<'a> {
         for &ea in self.ir.pool_slice(else_args) {
             match self.loc(ea) {
                 Loc::Gp(g) => else_live_gp |= 1u16 << g.id(),
-                Loc::Xmm(x) => else_live_xmm |= 1u16 << x.id(),
+                Loc::Xmm(x) => else_live_xmm |= 1u32 << x.id(),
                 Loc::RematAddr { base_reg, .. } => else_live_gp |= 1u16 << base_reg.id(),
                 Loc::Spill(_) | Loc::Remat(_) => {}
             }
@@ -1840,6 +1870,9 @@ impl<'a> Lower<'a> {
             if let Some(f) = direct_func {
                 self.asm.jmp_reloc(RelocTarget::Func(f));
             } else {
+                if self.asm.guard_legacy_sse_vzeroupper {
+                    self.asm.vzeroupper();
+                }
                 self.asm.jmp_reg(Gp::Rax);
             }
             return Ok(());
@@ -2946,8 +2979,20 @@ impl<'a> Lower<'a> {
             Op::F64Cmp(cop, a, b) => self.emit_float_cmp(true, cop, res.unwrap(), a, b),
             Op::F32Un(uop, a) => {
                 let r = res.unwrap();
-                let ar = self.fp_read(a, SCRATCH_FP1);
-                let d = self.fp_write_reg(r);
+                let need_low16 = matches!(
+                    uop,
+                    FloatUnOp::Nearest | FloatUnOp::Floor | FloatUnOp::Ceil | FloatUnOp::Trunc
+                );
+                let ar = if need_low16 {
+                    self.fp_read_low16(a, SCRATCH_FP1)
+                } else {
+                    self.fp_read(a, SCRATCH_FP1)
+                };
+                let d = if need_low16 {
+                    self.fp_write_low16(r)
+                } else {
+                    self.fp_write_reg(r)
+                };
                 match uop {
                     FloatUnOp::Abs => {
                         self.asm.movaps_rr(d, ar);
@@ -2994,8 +3039,20 @@ impl<'a> Lower<'a> {
             }
             Op::F64Un(uop, a) => {
                 let r = res.unwrap();
-                let ar = self.fp_read(a, SCRATCH_FP1);
-                let d = self.fp_write_reg(r);
+                let need_low16 = matches!(
+                    uop,
+                    FloatUnOp::Nearest | FloatUnOp::Floor | FloatUnOp::Ceil | FloatUnOp::Trunc
+                );
+                let ar = if need_low16 {
+                    self.fp_read_low16(a, SCRATCH_FP1)
+                } else {
+                    self.fp_read(a, SCRATCH_FP1)
+                };
+                let d = if need_low16 {
+                    self.fp_write_low16(r)
+                } else {
+                    self.fp_write_reg(r)
+                };
                 match uop {
                     FloatUnOp::Abs => {
                         self.asm.movaps_rr(d, ar);
@@ -3501,6 +3558,14 @@ impl<'a> Lower<'a> {
             Op::Select { cond, a, b } => {
                 let r = res.unwrap();
                 let ty = self.ty(r);
+                let cond_in_gp = matches!(self.loc(cond), Loc::Gp(_));
+                let cond_flags_live = cond_in_gp
+                    && prev_flags
+                        == Some(LiveFlags::IntRI {
+                            is64: false,
+                            a: cond,
+                            imm: 0,
+                        });
                 let cr = self.gp_read(cond, SCRATCH_GP2);
                 if ty.is_fp() {
                     let ar = self.fp_read(a, SCRATCH_FP1);
@@ -3508,7 +3573,9 @@ impl<'a> Lower<'a> {
                     let d = self.fp_write_reg(r);
                     let lbl_use_a = self.asm.new_label();
                     let lbl_done = self.asm.new_label();
-                    self.asm.test_rr(false, cr, cr);
+                    if !cond_flags_live {
+                        self.asm.test_rr(false, cr, cr);
+                    }
                     self.asm.jcc(Cond::Ne, lbl_use_a);
                     self.asm.movaps_rr(d, br);
                     self.asm.jmp(lbl_done);
@@ -3516,9 +3583,17 @@ impl<'a> Lower<'a> {
                     self.asm.movaps_rr(d, ar);
                     self.asm.bind(lbl_done);
                     self.fp_commit(r, d);
+                    if cond_in_gp {
+                        self.live_flags = Some(LiveFlags::IntRI {
+                            is64: false,
+                            a: cond,
+                            imm: 0,
+                        });
+                    }
                 } else {
                     let is64 = ty == Ty::I64;
                     let d = self.gp_write_reg(r);
+                    let preserve_cond_flags = cond_in_gp && self.loc(r) != Loc::Gp(cr);
                     // Branchless `cmovcc` for ALL GP `Select`s (register, spill, or rematerialized const).
                     // Avoids emitting a taken branch inside hot inner loops (e.g. `i != 0 ? i - 1 : 0`).
                     if cr != SCRATCH_GP2 {
@@ -3531,21 +3606,45 @@ impl<'a> Lower<'a> {
                             Loc::Remat(RematConst::I32(0) | RematConst::I64(0))
                         );
                         if self.loc(a) == Loc::Gp(d) && b_is_zero {
-                            self.asm.xor_rr(false, SCRATCH_GP2, SCRATCH_GP2);
-                            self.asm.test_rr(false, cr, cr);
+                            if cond_flags_live {
+                                self.asm.mov_ri32_preserve_flags(SCRATCH_GP2, 0);
+                            } else {
+                                self.asm.xor_rr(false, SCRATCH_GP2, SCRATCH_GP2);
+                                self.asm.test_rr(false, cr, cr);
+                            }
                             self.asm.cmovcc(Cond::E, is64, d, SCRATCH_GP2);
                             self.gp_commit(r, d);
+                            if preserve_cond_flags {
+                                self.live_flags = Some(LiveFlags::IntRI {
+                                    is64: false,
+                                    a: cond,
+                                    imm: 0,
+                                });
+                            }
                             return Ok(());
                         }
                         if self.loc(b) == Loc::Gp(d) && a_is_zero {
-                            self.asm.xor_rr(false, SCRATCH_GP2, SCRATCH_GP2);
-                            self.asm.test_rr(false, cr, cr);
+                            if cond_flags_live {
+                                self.asm.mov_ri32_preserve_flags(SCRATCH_GP2, 0);
+                            } else {
+                                self.asm.xor_rr(false, SCRATCH_GP2, SCRATCH_GP2);
+                                self.asm.test_rr(false, cr, cr);
+                            }
                             self.asm.cmovcc(Cond::Ne, is64, d, SCRATCH_GP2);
                             self.gp_commit(r, d);
+                            if preserve_cond_flags {
+                                self.live_flags = Some(LiveFlags::IntRI {
+                                    is64: false,
+                                    a: cond,
+                                    imm: 0,
+                                });
+                            }
                             return Ok(());
                         }
                     }
-                    self.asm.test_rr(false, cr, cr);
+                    if !cond_flags_live {
+                        self.asm.test_rr(false, cr, cr);
+                    }
                     if self.loc(a) == Loc::Gp(d) {
                         let br = self.gp_read_preserve_flags(b, SCRATCH_GP2);
                         self.asm.cmovcc(Cond::E, is64, d, br);
@@ -3561,6 +3660,13 @@ impl<'a> Lower<'a> {
                         self.asm.cmovcc(Cond::Ne, is64, d, ar);
                     }
                     self.gp_commit(r, d);
+                    if preserve_cond_flags {
+                        self.live_flags = Some(LiveFlags::IntRI {
+                            is64: false,
+                            a: cond,
+                            imm: 0,
+                        });
+                    }
                 }
             }
             Op::CmpSelect { kind, a, b, tv, fv } => {
@@ -4296,8 +4402,8 @@ impl<'a> Lower<'a> {
                         (ar, offset)
                     };
                 let mem = self.mem_addr(eff_ar, eff_off);
-                let vr = self.fp_read(vec, SCRATCH_FP1);
-                let d = self.fp_write_reg(r);
+                let vr = self.fp_read_low16(vec, SCRATCH_FP1);
+                let d = self.fp_write_low16(r);
                 self.asm.movaps_rr(d, vr);
                 match width {
                     1 => self.asm.pinsrb_xm(d, mem, lane),
@@ -4327,7 +4433,7 @@ impl<'a> Lower<'a> {
                         (ar, offset)
                     };
                 let mem = self.mem_addr(eff_ar, eff_off);
-                let vr = self.fp_read(vec, SCRATCH_FP1);
+                let vr = self.fp_read_low16(vec, SCRATCH_FP1);
                 match width {
                     1 => self.asm.pextrb_mx(mem, vr, lane),
                     2 => self.asm.pextrw_mx(mem, vr, lane),
@@ -4430,8 +4536,8 @@ impl<'a> Lower<'a> {
                 let r = res.unwrap();
                 self.emit_extra_mem_ptr(mem, addr, offset, u64::from(width));
                 let m = Mem::base(SCRATCH_GP1);
-                let vr = self.fp_read(vec, SCRATCH_FP1);
-                let d = self.fp_write_reg(r);
+                let vr = self.fp_read_low16(vec, SCRATCH_FP1);
+                let d = self.fp_write_low16(r);
                 self.asm.movaps_rr(d, vr);
                 match width {
                     1 => self.asm.pinsrb_xm(d, m, lane),
@@ -4452,7 +4558,7 @@ impl<'a> Lower<'a> {
             } => {
                 self.emit_extra_mem_ptr(mem, addr, offset, u64::from(width));
                 let m = Mem::base(SCRATCH_GP1);
-                let vr = self.fp_read(vec, SCRATCH_FP1);
+                let vr = self.fp_read_low16(vec, SCRATCH_FP1);
                 match width {
                     1 => self.asm.pextrb_mx(m, vr, lane),
                     2 => self.asm.pextrw_mx(m, vr, lane),
@@ -6628,7 +6734,7 @@ impl<'a> Lower<'a> {
                     let (lhs_m0, _) = mem_pair(lhs_off, SCRATCH_GP1)?;
                     self.asm.vmovupd_ym(SCRATCH_FP1, lhs_m0);
                     if rhs_is_splat {
-                        let rr = self.fp_read(rhs, SCRATCH_FP2);
+                        let rr = self.fp_read_low16(rhs, SCRATCH_FP2);
                         self.asm.vbroadcastsd_yx(SCRATCH_FP2, rr);
                         match op {
                             FloatBinOp::Add => {
@@ -6667,7 +6773,6 @@ impl<'a> Lower<'a> {
                     load_addr_reg(self, dst, SCRATCH_GP1);
                     let (dst_m0, _) = mem_pair(dst_off, SCRATCH_GP1)?;
                     self.asm.vmovupd_my(dst_m0, SCRATCH_FP1);
-                    self.asm.vzeroupper();
                 } else {
                     // Portable 2×128-bit SSE2 fallback (exact same load-all-before-store order).
                     // If `rhs_is_splat`, read `rhs` into `SCRATCH_FP2` BEFORE clobbering `Xmm0`
@@ -6732,15 +6837,632 @@ impl<'a> Lower<'a> {
                         .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128));
                 }
             }
+            Op::SlpWideChain { desc_idx, args } => {
+                use super::ir::{WideStep, WideStepOp};
+                let desc = self.ir.wide_chains[desc_idx as usize].clone();
+                let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+                let dst_val = arg_vals[0];
+                let load_vals = &arg_vals[1..1 + desc.n_loads as usize];
+                let bcast_vals = &arg_vals[1 + desc.n_loads as usize..];
+                let slot_reg = |s: u8| if s == 0 { SCRATCH_FP1 } else { SCRATCH_FP2 };
+                let mem_at = |this: &mut Self, addr_v: Val, off: u32| -> Mem {
+                    if let Loc::Gp(g) = this.loc(addr_v)
+                        && (this.ir.memory64 || this.is_upper32_zero(addr_v))
+                    {
+                        return Mem::indexed(Gp::R14, g, 1, off as i32);
+                    }
+                    let ar = this.gp_read(addr_v, SCRATCH_GP1);
+                    if ar != SCRATCH_GP1 {
+                        this.asm.mov_rr(this.ir.memory64, SCRATCH_GP1, ar);
+                    } else if !this.ir.memory64 {
+                        this.asm.mov_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    }
+                    Mem::indexed(Gp::R14, SCRATCH_GP1, 1, off as i32)
+                };
+                let load_eff_into = |this: &mut Self, addr_v: Val, off: u32, dst_gp: Gp| {
+                    let ar = this.gp_read(addr_v, dst_gp);
+                    if ar != dst_gp {
+                        this.asm.mov_rr(this.ir.memory64, dst_gp, ar);
+                    } else if !this.ir.memory64 {
+                        this.asm.mov_rr(false, dst_gp, dst_gp);
+                    }
+                    if off != 0 {
+                        this.asm.add_ri(true, dst_gp, off as i32);
+                    }
+                };
+
+                // Helper emitting one 128-bit chunk `c` (`off + 16*c`) in VEX/EVEX (`has_avx2`) or SSE2.
+                let emit_chunk_128 = |this: &mut Self, c: u32| {
+                    let delta = c * 16;
+                    for &step in &desc.steps {
+                        match step {
+                            WideStep::Load {
+                                dst_slot,
+                                load_idx,
+                                offset,
+                            } => {
+                                let m = mem_at(this, load_vals[load_idx as usize], offset + delta);
+                                if this.isa.has_avx2 {
+                                    this.asm.vmovdqu_xm(slot_reg(dst_slot), m);
+                                } else {
+                                    this.asm.movdqu_xm(slot_reg(dst_slot), m);
+                                }
+                            }
+                            WideStep::Broadcast {
+                                dst_slot,
+                                bcast_idx,
+                            } => {
+                                let d = slot_reg(dst_slot);
+                                let br = this.fp_read(bcast_vals[bcast_idx as usize], d);
+                                if br != d {
+                                    this.asm.movaps_rr(d, br);
+                                }
+                            }
+                            WideStep::Bin {
+                                op,
+                                dst_slot,
+                                lhs_slot,
+                                rhs_slot,
+                            } => {
+                                let d = slot_reg(dst_slot);
+                                let l = slot_reg(lhs_slot);
+                                let r = slot_reg(rhs_slot);
+                                if this.isa.has_avx2 {
+                                    match op {
+                                        WideStepOp::F32Add => this.asm.vaddps_xxx(d, l, r),
+                                        WideStepOp::F32Sub => this.asm.vsubps_xxx(d, l, r),
+                                        WideStepOp::F32Mul => this.asm.vmulps_xxx(d, l, r),
+                                        WideStepOp::F32Div => this.asm.vdivps_xxx(d, l, r),
+                                        WideStepOp::F64Add => this.asm.vaddpd_xxx(d, l, r),
+                                        WideStepOp::F64Sub => this.asm.vsubpd_xxx(d, l, r),
+                                        WideStepOp::F64Mul => this.asm.vmulpd_xxx(d, l, r),
+                                        WideStepOp::F64Div => this.asm.vdivpd_xxx(d, l, r),
+                                        WideStepOp::I32Add => this.asm.vpaddd_xxx(d, l, r),
+                                        WideStepOp::I32Sub => this.asm.vpsubd_xxx(d, l, r),
+                                        WideStepOp::I32Mul => this.asm.vpmulld_xxx(d, l, r),
+                                        WideStepOp::I64Add => this.asm.vpaddq_xxx(d, l, r),
+                                        WideStepOp::I64Sub => this.asm.vpsubq_xxx(d, l, r),
+                                        WideStepOp::VAnd => this.asm.vpand_xxx(d, l, r),
+                                        WideStepOp::VOr => this.asm.vpor_xxx(d, l, r),
+                                        WideStepOp::VXor => this.asm.vpxor_xxx(d, l, r),
+                                        WideStepOp::F32CanonNan => {
+                                            if this.isa.has_avx512 {
+                                                this.asm.vcmpps_k1_evex(0, l, l, 3);
+                                                this.asm.vmovaps_k1_evex(0, d, r);
+                                            } else {
+                                                this.asm.vcmpps_xxxi(Xmm::Xmm0, l, l, 0);
+                                                this.asm.vblendvps_xxxx(d, r, l, Xmm::Xmm0);
+                                            }
+                                        }
+                                        WideStepOp::F64CanonNan => {
+                                            if this.isa.has_avx512 {
+                                                this.asm.vcmppd_k1_evex(0, l, l, 3);
+                                                this.asm.vmovapd_k1_evex(0, d, r);
+                                            } else {
+                                                this.asm.vcmppd_xxxi(Xmm::Xmm0, l, l, 0);
+                                                this.asm.vblendvpd_xxxx(d, r, l, Xmm::Xmm0);
+                                            }
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                } else {
+                                    // SSE2: `d == l` and `r == 1 - d` (and `Xmm0` is clobbered).
+                                    debug_assert_eq!(d, l);
+                                    match op {
+                                        WideStepOp::F32Add => this.asm.addps(d, r),
+                                        WideStepOp::F32Sub => this.asm.subps(d, r),
+                                        WideStepOp::F32Mul => this.asm.mulps(d, r),
+                                        WideStepOp::F32Div => this.asm.divps(d, r),
+                                        WideStepOp::F64Add => this.asm.addpd(d, r),
+                                        WideStepOp::F64Sub => this.asm.subpd(d, r),
+                                        WideStepOp::F64Mul => this.asm.mulpd(d, r),
+                                        WideStepOp::F64Div => this.asm.divpd(d, r),
+                                        WideStepOp::I32Add => this.asm.paddd(d, r),
+                                        WideStepOp::I32Sub => this.asm.psubd(d, r),
+                                        WideStepOp::I32Mul => this.asm.pmulld(d, r),
+                                        WideStepOp::I64Add => this.asm.paddq(d, r),
+                                        WideStepOp::I64Sub => this.asm.psubq(d, r),
+                                        WideStepOp::VAnd => this.asm.pand(d, r),
+                                        WideStepOp::VOr => this.asm.por(d, r),
+                                        WideStepOp::VXor => this.asm.pxor(d, r),
+                                        WideStepOp::F32CanonNan => {
+                                            this.asm.movaps_rr(Xmm::Xmm0, d);
+                                            this.asm.cmpps(Xmm::Xmm0, d, 0);
+                                            this.asm.pxor(d, r);
+                                            this.asm.pand(d, Xmm::Xmm0);
+                                            this.asm.pxor(d, r);
+                                        }
+                                        WideStepOp::F64CanonNan => {
+                                            this.asm.movaps_rr(Xmm::Xmm0, d);
+                                            this.asm.cmppd(Xmm::Xmm0, d, 0);
+                                            this.asm.pxor(d, r);
+                                            this.asm.pand(d, Xmm::Xmm0);
+                                            this.asm.pxor(d, r);
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                            WideStep::BinMem {
+                                op,
+                                dst_slot,
+                                lhs_slot,
+                                load_idx,
+                                offset,
+                            } => {
+                                let d = slot_reg(dst_slot);
+                                let l = slot_reg(lhs_slot);
+                                let m = mem_at(this, load_vals[load_idx as usize], offset + delta);
+                                if this.isa.has_avx2 {
+                                    match op {
+                                        WideStepOp::F32Add => this.asm.vaddps_xxm(d, l, m),
+                                        WideStepOp::F32Sub => this.asm.vsubps_xxm(d, l, m),
+                                        WideStepOp::F32Mul => this.asm.vmulps_xxm(d, l, m),
+                                        WideStepOp::F32Div => this.asm.vdivps_xxm(d, l, m),
+                                        WideStepOp::F64Add => this.asm.vaddpd_xxm(d, l, m),
+                                        WideStepOp::F64Sub => this.asm.vsubpd_xxm(d, l, m),
+                                        WideStepOp::F64Mul => this.asm.vmulpd_xxm(d, l, m),
+                                        WideStepOp::F64Div => this.asm.vdivpd_xxm(d, l, m),
+                                        WideStepOp::I32Add => this.asm.vpaddd_xxm(d, l, m),
+                                        WideStepOp::I32Sub => this.asm.vpsubd_xxm(d, l, m),
+                                        WideStepOp::I32Mul => this.asm.vpmulld_xxm(d, l, m),
+                                        WideStepOp::I64Add => this.asm.vpaddq_xxm(d, l, m),
+                                        WideStepOp::I64Sub => this.asm.vpsubq_xxm(d, l, m),
+                                        WideStepOp::VAnd => this.asm.vpand_xxm(d, l, m),
+                                        WideStepOp::VOr => this.asm.vpor_xxm(d, l, m),
+                                        WideStepOp::VXor => this.asm.vpxor_xxm(d, l, m),
+                                        _ => unreachable!(),
+                                    }
+                                } else {
+                                    debug_assert_eq!(d, l);
+                                    this.asm.movdqu_xm(Xmm::Xmm0, m);
+                                    match op {
+                                        WideStepOp::F32Add => this.asm.addps(d, Xmm::Xmm0),
+                                        WideStepOp::F32Sub => this.asm.subps(d, Xmm::Xmm0),
+                                        WideStepOp::F32Mul => this.asm.mulps(d, Xmm::Xmm0),
+                                        WideStepOp::F32Div => this.asm.divps(d, Xmm::Xmm0),
+                                        WideStepOp::F64Add => this.asm.addpd(d, Xmm::Xmm0),
+                                        WideStepOp::F64Sub => this.asm.subpd(d, Xmm::Xmm0),
+                                        WideStepOp::F64Mul => this.asm.mulpd(d, Xmm::Xmm0),
+                                        WideStepOp::F64Div => this.asm.divpd(d, Xmm::Xmm0),
+                                        WideStepOp::I32Add => this.asm.paddd(d, Xmm::Xmm0),
+                                        WideStepOp::I32Sub => this.asm.psubd(d, Xmm::Xmm0),
+                                        WideStepOp::I32Mul => this.asm.pmulld(d, Xmm::Xmm0),
+                                        WideStepOp::I64Add => this.asm.paddq(d, Xmm::Xmm0),
+                                        WideStepOp::I64Sub => this.asm.psubq(d, Xmm::Xmm0),
+                                        WideStepOp::VAnd => this.asm.pand(d, Xmm::Xmm0),
+                                        WideStepOp::VOr => this.asm.por(d, Xmm::Xmm0),
+                                        WideStepOp::VXor => this.asm.pxor(d, Xmm::Xmm0),
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                            WideStep::TerMem {
+                                op,
+                                acc_slot,
+                                a_slot,
+                                load_idx,
+                                offset,
+                            } => {
+                                let acc = slot_reg(acc_slot);
+                                let a = slot_reg(a_slot);
+                                let m = mem_at(this, load_vals[load_idx as usize], offset + delta);
+                                if this.isa.has_avx2 {
+                                    match op {
+                                        WideStepOp::F32Madd => this.asm.vfmadd231ps_xxm(acc, a, m),
+                                        WideStepOp::F32Nmadd => {
+                                            this.asm.vfnmadd231ps_xxm(acc, a, m)
+                                        }
+                                        WideStepOp::F64Madd => this.asm.vfmadd231pd_xxm(acc, a, m),
+                                        WideStepOp::F64Nmadd => {
+                                            this.asm.vfnmadd231pd_xxm(acc, a, m)
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                } else {
+                                    this.asm.movdqu_xm(Xmm::Xmm0, m);
+                                    match op {
+                                        WideStepOp::F32Madd => {
+                                            this.asm.mulps(Xmm::Xmm0, a);
+                                            this.asm.addps(acc, Xmm::Xmm0);
+                                        }
+                                        WideStepOp::F32Nmadd => {
+                                            this.asm.mulps(Xmm::Xmm0, a);
+                                            this.asm.xmm_rip_op(
+                                                None,
+                                                0x57,
+                                                Xmm::Xmm0,
+                                                RelocTarget::Rodata(this.ro.f32_neg),
+                                            );
+                                            this.asm.addps(acc, Xmm::Xmm0);
+                                        }
+                                        WideStepOp::F64Madd => {
+                                            this.asm.mulpd(Xmm::Xmm0, a);
+                                            this.asm.addpd(acc, Xmm::Xmm0);
+                                        }
+                                        WideStepOp::F64Nmadd => {
+                                            this.asm.mulpd(Xmm::Xmm0, a);
+                                            this.asm.xmm_rip_op(
+                                                Some(0x66),
+                                                0x57,
+                                                Xmm::Xmm0,
+                                                RelocTarget::Rodata(this.ro.f64_neg),
+                                            );
+                                            this.asm.addpd(acc, Xmm::Xmm0);
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                if !self.isa.has_avx2 {
+                    // Portable SSE2 (`x64-v2`) path: exact original chunk order (or buffered for `buffer_all_loads`).
+                    if desc.buffer_all_loads {
+                        emit_chunk_128(self, 0);
+                        self.asm.movdqu_mx(
+                            Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128),
+                            slot_reg(desc.result_slot),
+                        );
+                        emit_chunk_128(self, 1);
+                        self.asm
+                            .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128));
+                        let m0 = mem_at(self, dst_val, desc.dst_off);
+                        self.asm.movdqu_mx(m0, Xmm::Xmm0);
+                        let m1 = mem_at(self, dst_val, desc.dst_off + 16);
+                        self.asm.movdqu_mx(m1, slot_reg(desc.result_slot));
+                    } else {
+                        for j in 0..u32::from(desc.chunks) {
+                            let c = if desc.descending {
+                                u32::from(desc.chunks) - 1 - j
+                            } else {
+                                j
+                            };
+                            emit_chunk_128(self, c);
+                            let m = mem_at(self, dst_val, desc.dst_off + c * 16);
+                            self.asm.movdqu_mx(m, slot_reg(desc.result_slot));
+                        }
+                    }
+                } else {
+                    // Wide AVX-512 (`ZMM`, 64 B) / AVX2 (`YMM`, 32 B) path with optional runtime overlap guard.
+                    let width = u32::from(desc.chunks) * 16;
+                    let dyn_checks: Vec<(Val, u32)> = if desc.need_overlap_check {
+                        load_vals
+                            .iter()
+                            .copied()
+                            .zip(desc.load_offs.iter().copied())
+                            .filter(|&(la, lo)| {
+                                if la == dst_val {
+                                    let identical = lo == desc.dst_off;
+                                    let disjoint = u64::from(lo) + u64::from(width)
+                                        <= u64::from(desc.dst_off)
+                                        || u64::from(desc.dst_off) + u64::from(width)
+                                            <= u64::from(lo);
+                                    !(identical || disjoint)
+                                } else {
+                                    true
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let lbl_slow = if !dyn_checks.is_empty() {
+                        Some(self.asm.new_label())
+                    } else {
+                        None
+                    };
+                    let lbl_done = if !dyn_checks.is_empty() {
+                        Some(self.asm.new_label())
+                    } else {
+                        None
+                    };
+                    if let Some(slow) = lbl_slow {
+                        load_eff_into(self, dst_val, desc.dst_off, SCRATCH_GP1);
+                        for (la, lo) in dyn_checks {
+                            let ok_lbl = self.asm.new_label();
+                            load_eff_into(self, la, lo, SCRATCH_GP2);
+                            self.asm.sub_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                            self.asm.jcc(Cond::E, ok_lbl);
+                            self.asm.add_ri(true, SCRATCH_GP2, (width - 1) as i32);
+                            self.asm.cmp_ri(true, SCRATCH_GP2, (2 * width - 1) as i32);
+                            self.asm.jcc(Cond::B, slow);
+                            self.asm.bind(ok_lbl);
+                        }
+                    }
+
+                    if self.isa.has_avx512 && desc.chunks == 4 {
+                        // Single 512-bit `ZMM` pass (64 bytes!).
+                        for &step in &desc.steps {
+                            match step {
+                                WideStep::Load {
+                                    dst_slot,
+                                    load_idx,
+                                    offset,
+                                } => {
+                                    let m = mem_at(self, load_vals[load_idx as usize], offset);
+                                    self.asm.vmovups_zm(slot_reg(dst_slot), m);
+                                }
+                                WideStep::Broadcast {
+                                    dst_slot,
+                                    bcast_idx,
+                                } => {
+                                    let d = slot_reg(dst_slot);
+                                    let br = self.fp_read(bcast_vals[bcast_idx as usize], d);
+                                    self.asm.vshufi32x4_zzz(d, br, br, 0x00);
+                                }
+                                WideStep::Bin {
+                                    op,
+                                    dst_slot,
+                                    lhs_slot,
+                                    rhs_slot,
+                                } => {
+                                    let d = slot_reg(dst_slot);
+                                    let l = slot_reg(lhs_slot);
+                                    let r = slot_reg(rhs_slot);
+                                    match op {
+                                        WideStepOp::F32Add => self.asm.vaddps_zzz(d, l, r),
+                                        WideStepOp::F32Sub => self.asm.vsubps_zzz(d, l, r),
+                                        WideStepOp::F32Mul => self.asm.vmulps_zzz(d, l, r),
+                                        WideStepOp::F32Div => self.asm.vdivps_zzz(d, l, r),
+                                        WideStepOp::F64Add => self.asm.vaddpd_zzz(d, l, r),
+                                        WideStepOp::F64Sub => self.asm.vsubpd_zzz(d, l, r),
+                                        WideStepOp::F64Mul => self.asm.vmulpd_zzz(d, l, r),
+                                        WideStepOp::F64Div => self.asm.vdivpd_zzz(d, l, r),
+                                        WideStepOp::I32Add => self.asm.vpaddd_zzz(d, l, r),
+                                        WideStepOp::I32Sub => self.asm.vpsubd_zzz(d, l, r),
+                                        WideStepOp::I32Mul => self.asm.vpmulld_zzz(d, l, r),
+                                        WideStepOp::I64Add => self.asm.vpaddq_zzz(d, l, r),
+                                        WideStepOp::I64Sub => self.asm.vpsubq_zzz(d, l, r),
+                                        WideStepOp::VAnd => self.asm.vpandd_zzz(d, l, r),
+                                        WideStepOp::VOr => self.asm.vpord_zzz(d, l, r),
+                                        WideStepOp::VXor => self.asm.vpxord_zzz(d, l, r),
+                                        WideStepOp::F32CanonNan => {
+                                            self.asm.vcmpps_k1_evex(2, l, l, 3);
+                                            self.asm.vmovaps_k1_evex(2, d, r);
+                                        }
+                                        WideStepOp::F64CanonNan => {
+                                            self.asm.vcmppd_k1_evex(2, l, l, 3);
+                                            self.asm.vmovapd_k1_evex(2, d, r);
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                WideStep::BinMem {
+                                    op,
+                                    dst_slot,
+                                    lhs_slot,
+                                    load_idx,
+                                    offset,
+                                } => {
+                                    let d = slot_reg(dst_slot);
+                                    let l = slot_reg(lhs_slot);
+                                    let m = mem_at(self, load_vals[load_idx as usize], offset);
+                                    match op {
+                                        WideStepOp::F32Add => self.asm.vaddps_zzm(d, l, m),
+                                        WideStepOp::F32Sub => self.asm.vsubps_zzm(d, l, m),
+                                        WideStepOp::F32Mul => self.asm.vmulps_zzm(d, l, m),
+                                        WideStepOp::F32Div => self.asm.vdivps_zzm(d, l, m),
+                                        WideStepOp::F64Add => self.asm.vaddpd_zzm(d, l, m),
+                                        WideStepOp::F64Sub => self.asm.vsubpd_zzm(d, l, m),
+                                        WideStepOp::F64Mul => self.asm.vmulpd_zzm(d, l, m),
+                                        WideStepOp::F64Div => self.asm.vdivpd_zzm(d, l, m),
+                                        WideStepOp::I32Add => self.asm.vpaddd_zzm(d, l, m),
+                                        WideStepOp::I32Sub => self.asm.vpsubd_zzm(d, l, m),
+                                        WideStepOp::I32Mul => self.asm.vpmulld_zzm(d, l, m),
+                                        WideStepOp::I64Add => self.asm.vpaddq_zzm(d, l, m),
+                                        WideStepOp::I64Sub => self.asm.vpsubq_zzm(d, l, m),
+                                        WideStepOp::VAnd => self.asm.vpandd_zzm(d, l, m),
+                                        WideStepOp::VOr => self.asm.vpord_zzm(d, l, m),
+                                        WideStepOp::VXor => self.asm.vpxord_zzm(d, l, m),
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                WideStep::TerMem {
+                                    op,
+                                    acc_slot,
+                                    a_slot,
+                                    load_idx,
+                                    offset,
+                                } => {
+                                    let acc = slot_reg(acc_slot);
+                                    let a = slot_reg(a_slot);
+                                    let m = mem_at(self, load_vals[load_idx as usize], offset);
+                                    match op {
+                                        WideStepOp::F32Madd => self.asm.vfmadd231ps_zzm(acc, a, m),
+                                        WideStepOp::F32Nmadd => {
+                                            self.asm.vfnmadd231ps_zzm(acc, a, m)
+                                        }
+                                        WideStepOp::F64Madd => self.asm.vfmadd231pd_zzm(acc, a, m),
+                                        WideStepOp::F64Nmadd => {
+                                            self.asm.vfnmadd231pd_zzm(acc, a, m)
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                        }
+                        let mdst = mem_at(self, dst_val, desc.dst_off);
+                        self.asm.vmovups_mz(mdst, slot_reg(desc.result_slot));
+                    } else {
+                        // 256-bit `YMM` passes (`1` pass for `chunks == 2`, `2` passes for `chunks == 4` on `x64-v3`).
+                        let passes = u32::from(desc.chunks) / 2;
+                        for pass in 0..passes {
+                            let delta = pass * 32;
+                            for &step in &desc.steps {
+                                match step {
+                                    WideStep::Load {
+                                        dst_slot,
+                                        load_idx,
+                                        offset,
+                                    } => {
+                                        let m = mem_at(
+                                            self,
+                                            load_vals[load_idx as usize],
+                                            offset + delta,
+                                        );
+                                        self.asm.vmovups_ym(slot_reg(dst_slot), m);
+                                    }
+                                    WideStep::Broadcast {
+                                        dst_slot,
+                                        bcast_idx,
+                                    } => {
+                                        let d = slot_reg(dst_slot);
+                                        let br = self.fp_read(bcast_vals[bcast_idx as usize], d);
+                                        if self.isa.has_avx512 {
+                                            self.asm.vinsertf32x4_yyx(d, br, br, 1);
+                                        } else {
+                                            self.asm.vinsertf128_yyx(d, br, br, 1);
+                                        }
+                                    }
+                                    WideStep::Bin {
+                                        op,
+                                        dst_slot,
+                                        lhs_slot,
+                                        rhs_slot,
+                                    } => {
+                                        let d = slot_reg(dst_slot);
+                                        let l = slot_reg(lhs_slot);
+                                        let r = slot_reg(rhs_slot);
+                                        match op {
+                                            WideStepOp::F32Add => self.asm.vaddps_yyy(d, l, r),
+                                            WideStepOp::F32Sub => self.asm.vsubps_yyy(d, l, r),
+                                            WideStepOp::F32Mul => self.asm.vmulps_yyy(d, l, r),
+                                            WideStepOp::F32Div => self.asm.vdivps_yyy(d, l, r),
+                                            WideStepOp::F64Add => self.asm.vaddpd_yyy(d, l, r),
+                                            WideStepOp::F64Sub => self.asm.vsubpd_yyy(d, l, r),
+                                            WideStepOp::F64Mul => self.asm.vmulpd_yyy(d, l, r),
+                                            WideStepOp::F64Div => self.asm.vdivpd_yyy(d, l, r),
+                                            WideStepOp::I32Add => self.asm.vpaddd_yyy(d, l, r),
+                                            WideStepOp::I32Sub => self.asm.vpsubd_yyy(d, l, r),
+                                            WideStepOp::I32Mul => self.asm.vpmulld_yyy(d, l, r),
+                                            WideStepOp::I64Add => self.asm.vpaddq_yyy(d, l, r),
+                                            WideStepOp::I64Sub => self.asm.vpsubq_yyy(d, l, r),
+                                            WideStepOp::VAnd => self.asm.vpand_yyy(d, l, r),
+                                            WideStepOp::VOr => self.asm.vpor_yyy(d, l, r),
+                                            WideStepOp::VXor => self.asm.vpxor_yyy(d, l, r),
+                                            WideStepOp::F32CanonNan => {
+                                                if self.isa.has_avx512 {
+                                                    self.asm.vcmpps_k1_evex(1, l, l, 3);
+                                                    self.asm.vmovaps_k1_evex(1, d, r);
+                                                } else {
+                                                    self.asm.vcmpeqps_yyy(Xmm::Xmm0, l, l);
+                                                    self.asm.vblendvps_yyyy(d, r, l, Xmm::Xmm0);
+                                                }
+                                            }
+                                            WideStepOp::F64CanonNan => {
+                                                if self.isa.has_avx512 {
+                                                    self.asm.vcmppd_k1_evex(1, l, l, 3);
+                                                    self.asm.vmovapd_k1_evex(1, d, r);
+                                                } else {
+                                                    self.asm.vcmpeqpd_yyy(Xmm::Xmm0, l, l);
+                                                    self.asm.vblendvpd_yyyy(d, r, l, Xmm::Xmm0);
+                                                }
+                                            }
+                                            _ => unreachable!(),
+                                        }
+                                    }
+                                    WideStep::BinMem {
+                                        op,
+                                        dst_slot,
+                                        lhs_slot,
+                                        load_idx,
+                                        offset,
+                                    } => {
+                                        let d = slot_reg(dst_slot);
+                                        let l = slot_reg(lhs_slot);
+                                        let m = mem_at(
+                                            self,
+                                            load_vals[load_idx as usize],
+                                            offset + delta,
+                                        );
+                                        match op {
+                                            WideStepOp::F32Add => self.asm.vaddps_yym(d, l, m),
+                                            WideStepOp::F32Sub => self.asm.vsubps_yym(d, l, m),
+                                            WideStepOp::F32Mul => self.asm.vmulps_yym(d, l, m),
+                                            WideStepOp::F32Div => self.asm.vdivps_yym(d, l, m),
+                                            WideStepOp::F64Add => self.asm.vaddpd_yym(d, l, m),
+                                            WideStepOp::F64Sub => self.asm.vsubpd_yym(d, l, m),
+                                            WideStepOp::F64Mul => self.asm.vmulpd_yym(d, l, m),
+                                            WideStepOp::F64Div => self.asm.vdivpd_yym(d, l, m),
+                                            WideStepOp::I32Add => self.asm.vpaddd_yym(d, l, m),
+                                            WideStepOp::I32Sub => self.asm.vpsubd_yym(d, l, m),
+                                            WideStepOp::I32Mul => self.asm.vpmulld_yym(d, l, m),
+                                            WideStepOp::I64Add => self.asm.vpaddq_yym(d, l, m),
+                                            WideStepOp::I64Sub => self.asm.vpsubq_yym(d, l, m),
+                                            WideStepOp::VAnd => self.asm.vpand_yym(d, l, m),
+                                            WideStepOp::VOr => self.asm.vpor_yym(d, l, m),
+                                            WideStepOp::VXor => self.asm.vpxor_yym(d, l, m),
+                                            _ => unreachable!(),
+                                        }
+                                    }
+                                    WideStep::TerMem {
+                                        op,
+                                        acc_slot,
+                                        a_slot,
+                                        load_idx,
+                                        offset,
+                                    } => {
+                                        let acc = slot_reg(acc_slot);
+                                        let a = slot_reg(a_slot);
+                                        let m = mem_at(
+                                            self,
+                                            load_vals[load_idx as usize],
+                                            offset + delta,
+                                        );
+                                        match op {
+                                            WideStepOp::F32Madd => {
+                                                self.asm.vfmadd231ps_yym(acc, a, m)
+                                            }
+                                            WideStepOp::F32Nmadd => {
+                                                self.asm.vfnmadd231ps_yym(acc, a, m)
+                                            }
+                                            WideStepOp::F64Madd => {
+                                                self.asm.vfmadd231pd_yym(acc, a, m)
+                                            }
+                                            WideStepOp::F64Nmadd => {
+                                                self.asm.vfnmadd231pd_yym(acc, a, m)
+                                            }
+                                            _ => unreachable!(),
+                                        }
+                                    }
+                                }
+                            }
+                            let mdst = mem_at(self, dst_val, desc.dst_off + delta);
+                            self.asm.vmovups_my(mdst, slot_reg(desc.result_slot));
+                        }
+                    }
+                    if let (Some(slow), Some(done)) = (lbl_slow, lbl_done) {
+                        self.asm.bind(done);
+                        self.wide_slow_tramps.push((slow, done, desc_idx, args));
+                    }
+                }
+            }
             Op::V128Splat { kind, val } => {
                 let r = res.unwrap();
                 let d = self.fp_write_reg(r);
                 if kind.scalar_ty().is_fp() {
                     let sr = self.fp_read(val, SCRATCH_FP1);
-                    super::simd_lower::emit_v128_splat(&mut self.asm, kind, d, None, Some(sr));
+                    super::simd_lower::emit_v128_splat(
+                        &mut self.asm,
+                        kind,
+                        d,
+                        None,
+                        Some(sr),
+                        self.isa,
+                    );
                 } else {
                     let vr = self.gp_read(val, SCRATCH_GP1);
-                    super::simd_lower::emit_v128_splat(&mut self.asm, kind, d, Some(vr), None);
+                    super::simd_lower::emit_v128_splat(
+                        &mut self.asm,
+                        kind,
+                        d,
+                        Some(vr),
+                        None,
+                        self.isa,
+                    );
                 }
                 self.fp_commit(r, d);
             }
@@ -6787,6 +7509,7 @@ impl<'a> Lower<'a> {
                         lane,
                         None,
                         Some(xr),
+                        self.isa,
                     );
                 } else {
                     let vr = self.fp_read(v, SCRATCH_FP1);
@@ -6799,6 +7522,7 @@ impl<'a> Lower<'a> {
                         lane,
                         Some(xr),
                         None,
+                        self.isa,
                     );
                 }
                 self.fp_commit(r, d);
@@ -6809,59 +7533,233 @@ impl<'a> Lower<'a> {
                 let ar = self.fp_read(a, SCRATCH_FP1);
                 let br = self.fp_read(b, SCRATCH_FP2);
                 let d = self.fp_write_reg(r);
-                super::simd_lower::emit_v128_shuffle(&mut self.asm, d, ar, br, &lanes);
+                super::simd_lower::emit_v128_shuffle(&mut self.asm, d, ar, br, &lanes, self.isa);
                 self.fp_commit(r, d);
             }
             Op::V128Un { op, a } => {
                 let r = res.unwrap();
-                let ar = self.fp_read(a, SCRATCH_FP1);
-                let d = self.fp_write_reg(r);
-                super::simd_lower::emit_v128_un_full(&mut self.asm, op, d, ar, self.ro)?;
+                let need_low16 = matches!(
+                    op,
+                    0xfd62 | 0xfd67
+                        ..=0xfd6a
+                            | 0xfd74
+                            | 0xfd75
+                            | 0xfd7a
+                            | 0xfd94
+                            | 0xfdf8
+                            | 0xfdf9
+                            | 0xfdfc
+                            | 0xfdfd
+                ) || (!self.isa.has_avx512 && op == 0xfd4d);
+                let ar = if need_low16 {
+                    self.fp_read_low16(a, SCRATCH_FP1)
+                } else {
+                    self.fp_read(a, SCRATCH_FP1)
+                };
+                let d = if need_low16 {
+                    self.fp_write_low16(r)
+                } else {
+                    self.fp_write_reg(r)
+                };
+                super::simd_lower::emit_v128_un_full(&mut self.asm, op, d, ar, self.ro, self.isa)?;
                 self.fp_commit(r, d);
             }
             Op::V128Bin { op, a, b } => {
                 let r = res.unwrap();
-                let ar = self.fp_read(a, SCRATCH_FP1);
-                let br = self.fp_read(b, SCRATCH_FP2);
-                let d = self.fp_write_reg(r);
-                if self.isa.has_avx2 {
-                    match op {
-                        0xfdf0 => {
-                            self.asm.vaddpd_xxx(d, ar, br);
+                let need_low16 = matches!(
+                    op,
+                    0xfd23..=0xfd4c
+                        | 0xfd82
+                        | 0xfdd5..=0xfddb
+                        | 0xfde8
+                        | 0xfde9
+                        | 0xfdf4
+                        | 0xfdf5
+                );
+                let d = if need_low16 {
+                    self.fp_write_low16(r)
+                } else {
+                    self.fp_write_reg(r)
+                };
+                if self.isa.has_avx2 && !need_low16 {
+                    // Fold spilled stack RHS (or commutative integer/bitwise LHS) directly into a 3-address VEX/EVEX memory operand!
+                    if let Loc::Spill(boff) = self.loc(b) {
+                        let ar = self.fp_read(a, SCRATCH_FP1);
+                        if super::simd_lower::try_emit_v128_bin_mem_vex(
+                            &mut self.asm,
+                            op,
+                            d,
+                            ar,
+                            Mem::base_disp(Gp::Rsp, boff),
+                        ) {
                             self.fp_commit(r, d);
                             return Ok(());
                         }
-                        0xfdf1 => {
-                            self.asm.vsubpd_xxx(d, ar, br);
+                    } else if super::simd_lower::is_bitexact_commutative_v128_bin(op)
+                        && let Loc::Spill(aoff) = self.loc(a)
+                    {
+                        let br = self.fp_read(b, SCRATCH_FP1);
+                        if super::simd_lower::try_emit_v128_bin_mem_vex(
+                            &mut self.asm,
+                            op,
+                            d,
+                            br,
+                            Mem::base_disp(Gp::Rsp, aoff),
+                        ) {
                             self.fp_commit(r, d);
                             return Ok(());
                         }
-                        0xfdf2 => {
-                            self.asm.vmulpd_xxx(d, ar, br);
-                            self.fp_commit(r, d);
-                            return Ok(());
-                        }
-                        0xfdf3 => {
-                            self.asm.vdivpd_xxx(d, ar, br);
-                            self.fp_commit(r, d);
-                            return Ok(());
-                        }
-                        0xfdf6 => {
-                            // Wasm f64x2.pmin(a, b) == x86 minpd(b, a): if b < a ? b : a!
-                            self.asm.vminpd_xxx(d, br, ar);
-                            self.fp_commit(r, d);
-                            return Ok(());
-                        }
-                        0xfdf7 => {
-                            // Wasm f64x2.pmax(a, b) == x86 maxpd(b, a): if a < b ? b : a!
-                            self.asm.vmaxpd_xxx(d, br, ar);
-                            self.fp_commit(r, d);
-                            return Ok(());
-                        }
-                        _ => {}
                     }
                 }
-                super::simd_lower::emit_v128_bin_full(&mut self.asm, op, d, ar, br)?;
+                let ar = if need_low16 {
+                    self.fp_read_low16(a, SCRATCH_FP1)
+                } else {
+                    self.fp_read(a, SCRATCH_FP1)
+                };
+                let br = if need_low16 {
+                    self.fp_read_low16(b, SCRATCH_FP2)
+                } else {
+                    self.fp_read(b, SCRATCH_FP2)
+                };
+                super::simd_lower::emit_v128_bin_full(&mut self.asm, op, d, ar, br, self.isa)?;
+                self.fp_commit(r, d);
+            }
+            Op::V128Ternary { op, a, b, c } if matches!(op, 0xfa05..=0xfa08) => {
+                // Wasm 3.0 relaxed FMA: `±(a * b) + c` (`0xfa05`=f32 madd, `0xfa06`=f32 nmadd,
+                // `0xfa07`=f64 madd, `0xfa08`=f64 nmadd). Hardware FMA3 on `x64-v3`/`x64-v4`;
+                // SSE2 unfused `mul + add` fallback on `x64-v2`.
+                let r = res.unwrap();
+                let is64 = op >= 0xfa07;
+                let is_neg = (op & 1) == 0;
+                let d = self.fp_write_reg(r);
+                if self.isa.has_avx2 {
+                    let ar = self.fp_read(a, SCRATCH_FP1);
+                    let br = self.fp_read(b, SCRATCH_FP2);
+                    match self.loc(c) {
+                        Loc::Xmm(cx) => {
+                            if d == cx {
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd231ps(d, ar, br),
+                                    (false, true) => self.asm.vfnmadd231ps(d, ar, br),
+                                    (true, false) => self.asm.vfmadd231pd(d, ar, br),
+                                    (true, true) => self.asm.vfnmadd231pd(d, ar, br),
+                                }
+                            } else if d == ar {
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd213ps(d, br, cx),
+                                    (false, true) => self.asm.vfnmadd213ps(d, br, cx),
+                                    (true, false) => self.asm.vfmadd213pd(d, br, cx),
+                                    (true, true) => self.asm.vfnmadd213pd(d, br, cx),
+                                }
+                            } else if d == br {
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd213ps(d, ar, cx),
+                                    (false, true) => self.asm.vfnmadd213ps(d, ar, cx),
+                                    (true, false) => self.asm.vfmadd213pd(d, ar, cx),
+                                    (true, true) => self.asm.vfnmadd213pd(d, ar, cx),
+                                }
+                            } else {
+                                self.asm.vmovaps_rr(d, cx);
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd231ps(d, ar, br),
+                                    (false, true) => self.asm.vfnmadd231ps(d, ar, br),
+                                    (true, false) => self.asm.vfmadd231pd(d, ar, br),
+                                    (true, true) => self.asm.vfnmadd231pd(d, ar, br),
+                                }
+                            }
+                        }
+                        Loc::Spill(coff) => {
+                            let cm = Mem::base_disp(Gp::Rsp, coff);
+                            if d == ar {
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd213ps_xxm(d, br, cm),
+                                    (false, true) => self.asm.vfnmadd213ps_xxm(d, br, cm),
+                                    (true, false) => self.asm.vfmadd213pd_xxm(d, br, cm),
+                                    (true, true) => self.asm.vfnmadd213pd_xxm(d, br, cm),
+                                }
+                            } else if d == br {
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd213ps_xxm(d, ar, cm),
+                                    (false, true) => self.asm.vfnmadd213ps_xxm(d, ar, cm),
+                                    (true, false) => self.asm.vfmadd213pd_xxm(d, ar, cm),
+                                    (true, true) => self.asm.vfnmadd213pd_xxm(d, ar, cm),
+                                }
+                            } else {
+                                self.asm.vmovdqu_xm(d, cm);
+                                match (is64, is_neg) {
+                                    (false, false) => self.asm.vfmadd231ps(d, ar, br),
+                                    (false, true) => self.asm.vfnmadd231ps(d, ar, br),
+                                    (true, false) => self.asm.vfmadd231pd(d, ar, br),
+                                    (true, true) => self.asm.vfnmadd231pd(d, ar, br),
+                                }
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    // SSE2 (`x64-v2`) fallback: `(is_neg ? -a : a) * b + c` (100% alias-safe via `ctx_v128_tmp`).
+                    let cr = self.fp_read(c, SCRATCH_FP2);
+                    self.asm
+                        .movdqu_mx(Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128), cr);
+                    let ar = self.fp_read(a, SCRATCH_FP1);
+                    let br = self.fp_read(b, SCRATCH_FP2);
+                    let mul_op = if is64 { 0xfdf2 } else { 0xfde6 };
+                    let add_op = if is64 { 0xfdf0 } else { 0xfde4 };
+                    if is_neg {
+                        // Compute `d = (-a) * b` without clobbering `b` if `d == b`
+                        let b_save = if d == br {
+                            self.asm.movaps_rr(SCRATCH_FP2, br);
+                            SCRATCH_FP2
+                        } else {
+                            br
+                        };
+                        self.asm.movaps_rr(d, ar);
+                        if is64 {
+                            self.asm.xmm_rip_op(
+                                Some(0x66),
+                                0x57,
+                                d,
+                                RelocTarget::Rodata(self.ro.f64_neg),
+                            );
+                        } else {
+                            self.asm.xmm_rip_op(
+                                None,
+                                0x57,
+                                d,
+                                RelocTarget::Rodata(self.ro.f32_neg),
+                            );
+                        }
+                        super::simd_lower::emit_v128_bin_full(
+                            &mut self.asm,
+                            mul_op,
+                            d,
+                            d,
+                            b_save,
+                            self.isa,
+                        )?;
+                    } else {
+                        super::simd_lower::emit_v128_bin_full(
+                            &mut self.asm,
+                            mul_op,
+                            d,
+                            ar,
+                            br,
+                            self.isa,
+                        )?;
+                    }
+                    self.asm.movdqu_xm(
+                        SCRATCH_FP2,
+                        Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128),
+                    );
+                    super::simd_lower::emit_v128_bin_full(
+                        &mut self.asm,
+                        add_op,
+                        d,
+                        d,
+                        SCRATCH_FP2,
+                        self.isa,
+                    )?;
+                }
                 self.fp_commit(r, d);
             }
             Op::V128Ternary { op: _, a, b, c } => {
@@ -6901,22 +7799,39 @@ impl<'a> Lower<'a> {
                 let ar = self.fp_read(a, SCRATCH_FP1);
                 let br = self.fp_read(b, SCRATCH_FP2);
                 let d = self.fp_write_reg(r);
-                super::simd_lower::emit_v128_bitselect(&mut self.asm, d, ar, br, c_in_tmp, cx);
+                super::simd_lower::emit_v128_bitselect(
+                    &mut self.asm,
+                    d,
+                    ar,
+                    br,
+                    c_in_tmp,
+                    cx,
+                    self.isa,
+                );
                 self.fp_commit(r, d);
             }
             Op::V128ToI32 { op, a } => {
                 let r = res.unwrap();
-                let ar = self.fp_read(a, SCRATCH_FP1);
+                let ar = self.fp_read_low16(a, SCRATCH_FP1);
                 let d = self.gp_write_reg(r);
-                super::simd_lower::emit_v128_to_i32(&mut self.asm, op, d, ar)?;
+                super::simd_lower::emit_v128_to_i32(&mut self.asm, op, d, ar, self.isa)?;
                 self.gp_commit(r, d);
             }
             Op::V128Shift { op, v, shift } => {
                 let r = res.unwrap();
-                let vr = self.fp_read(v, SCRATCH_FP1);
+                let need_low16 = op == 0xfd6c;
+                let vr = if need_low16 {
+                    self.fp_read_low16(v, SCRATCH_FP1)
+                } else {
+                    self.fp_read(v, SCRATCH_FP1)
+                };
                 let sr = self.gp_read(shift, SCRATCH_GP1);
-                let d = self.fp_write_reg(r);
-                super::simd_lower::emit_v128_shift(&mut self.asm, op, d, vr, sr)?;
+                let d = if need_low16 {
+                    self.fp_write_low16(r)
+                } else {
+                    self.fp_write_reg(r)
+                };
+                super::simd_lower::emit_v128_shift(&mut self.asm, op, d, vr, sr, self.isa)?;
                 self.fp_commit(r, d);
             }
             Op::Call { func, args, rets } => self.emit_call_abi(args, rets, None, Some(func))?,
@@ -7581,6 +8496,159 @@ impl<'a> Lower<'a> {
         true
     }
 
+    /// Emits the cold exact-order 128-bit VEX/EVEX fallback for `Op::SlpWideChain` when a
+    /// runtime partial overlap between `dst` and a load stream is detected.
+    fn emit_slp_wide_overlap_fallback(&mut self, desc_idx: u32, args: ValRange) {
+        use super::ir::{WideStep, WideStepOp};
+        let desc = self.ir.wide_chains[desc_idx as usize].clone();
+        let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+        let dst_val = arg_vals[0];
+        let load_vals = &arg_vals[1..1 + desc.n_loads as usize];
+        let bcast_vals = &arg_vals[1 + desc.n_loads as usize..];
+        let slot_reg = |s: u8| if s == 0 { SCRATCH_FP1 } else { SCRATCH_FP2 };
+        let mem_at = |this: &mut Self, addr_v: Val, off: u32| -> Mem {
+            if let Loc::Gp(g) = this.loc(addr_v)
+                && (this.ir.memory64 || this.is_upper32_zero(addr_v))
+            {
+                return Mem::indexed(Gp::R14, g, 1, off as i32);
+            }
+            let ar = this.gp_read(addr_v, SCRATCH_GP1);
+            if ar != SCRATCH_GP1 {
+                this.asm.mov_rr(this.ir.memory64, SCRATCH_GP1, ar);
+            } else if !this.ir.memory64 {
+                this.asm.mov_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+            }
+            Mem::indexed(Gp::R14, SCRATCH_GP1, 1, off as i32)
+        };
+        for j in 0..u32::from(desc.chunks) {
+            let c = if desc.descending {
+                u32::from(desc.chunks) - 1 - j
+            } else {
+                j
+            };
+            let delta = c * 16;
+            for &step in &desc.steps {
+                match step {
+                    WideStep::Load {
+                        dst_slot,
+                        load_idx,
+                        offset,
+                    } => {
+                        let m = mem_at(self, load_vals[load_idx as usize], offset + delta);
+                        self.asm.vmovdqu_xm(slot_reg(dst_slot), m);
+                    }
+                    WideStep::Broadcast {
+                        dst_slot,
+                        bcast_idx,
+                    } => {
+                        let d = slot_reg(dst_slot);
+                        let br = self.fp_read(bcast_vals[bcast_idx as usize], d);
+                        if br != d {
+                            self.asm.movaps_rr(d, br);
+                        }
+                    }
+                    WideStep::Bin {
+                        op,
+                        dst_slot,
+                        lhs_slot,
+                        rhs_slot,
+                    } => {
+                        let d = slot_reg(dst_slot);
+                        let l = slot_reg(lhs_slot);
+                        let r = slot_reg(rhs_slot);
+                        match op {
+                            WideStepOp::F32Add => self.asm.vaddps_xxx(d, l, r),
+                            WideStepOp::F32Sub => self.asm.vsubps_xxx(d, l, r),
+                            WideStepOp::F32Mul => self.asm.vmulps_xxx(d, l, r),
+                            WideStepOp::F32Div => self.asm.vdivps_xxx(d, l, r),
+                            WideStepOp::F64Add => self.asm.vaddpd_xxx(d, l, r),
+                            WideStepOp::F64Sub => self.asm.vsubpd_xxx(d, l, r),
+                            WideStepOp::F64Mul => self.asm.vmulpd_xxx(d, l, r),
+                            WideStepOp::F64Div => self.asm.vdivpd_xxx(d, l, r),
+                            WideStepOp::I32Add => self.asm.vpaddd_xxx(d, l, r),
+                            WideStepOp::I32Sub => self.asm.vpsubd_xxx(d, l, r),
+                            WideStepOp::I32Mul => self.asm.vpmulld_xxx(d, l, r),
+                            WideStepOp::I64Add => self.asm.vpaddq_xxx(d, l, r),
+                            WideStepOp::I64Sub => self.asm.vpsubq_xxx(d, l, r),
+                            WideStepOp::VAnd => self.asm.vpand_xxx(d, l, r),
+                            WideStepOp::VOr => self.asm.vpor_xxx(d, l, r),
+                            WideStepOp::VXor => self.asm.vpxor_xxx(d, l, r),
+                            WideStepOp::F32CanonNan => {
+                                if self.isa.has_avx512 {
+                                    self.asm.vcmpps_k1_evex(0, l, l, 3);
+                                    self.asm.vmovaps_k1_evex(0, d, r);
+                                } else {
+                                    self.asm.vcmpps_xxxi(Xmm::Xmm0, l, l, 0);
+                                    self.asm.vblendvps_xxxx(d, r, l, Xmm::Xmm0);
+                                }
+                            }
+                            WideStepOp::F64CanonNan => {
+                                if self.isa.has_avx512 {
+                                    self.asm.vcmppd_k1_evex(0, l, l, 3);
+                                    self.asm.vmovapd_k1_evex(0, d, r);
+                                } else {
+                                    self.asm.vcmppd_xxxi(Xmm::Xmm0, l, l, 0);
+                                    self.asm.vblendvpd_xxxx(d, r, l, Xmm::Xmm0);
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    WideStep::BinMem {
+                        op,
+                        dst_slot,
+                        lhs_slot,
+                        load_idx,
+                        offset,
+                    } => {
+                        let d = slot_reg(dst_slot);
+                        let l = slot_reg(lhs_slot);
+                        let m = mem_at(self, load_vals[load_idx as usize], offset + delta);
+                        match op {
+                            WideStepOp::F32Add => self.asm.vaddps_xxm(d, l, m),
+                            WideStepOp::F32Sub => self.asm.vsubps_xxm(d, l, m),
+                            WideStepOp::F32Mul => self.asm.vmulps_xxm(d, l, m),
+                            WideStepOp::F32Div => self.asm.vdivps_xxm(d, l, m),
+                            WideStepOp::F64Add => self.asm.vaddpd_xxm(d, l, m),
+                            WideStepOp::F64Sub => self.asm.vsubpd_xxm(d, l, m),
+                            WideStepOp::F64Mul => self.asm.vmulpd_xxm(d, l, m),
+                            WideStepOp::F64Div => self.asm.vdivpd_xxm(d, l, m),
+                            WideStepOp::I32Add => self.asm.vpaddd_xxm(d, l, m),
+                            WideStepOp::I32Sub => self.asm.vpsubd_xxm(d, l, m),
+                            WideStepOp::I32Mul => self.asm.vpmulld_xxm(d, l, m),
+                            WideStepOp::I64Add => self.asm.vpaddq_xxm(d, l, m),
+                            WideStepOp::I64Sub => self.asm.vpsubq_xxm(d, l, m),
+                            WideStepOp::VAnd => self.asm.vpand_xxm(d, l, m),
+                            WideStepOp::VOr => self.asm.vpor_xxm(d, l, m),
+                            WideStepOp::VXor => self.asm.vpxor_xxm(d, l, m),
+                            _ => unreachable!(),
+                        }
+                    }
+                    WideStep::TerMem {
+                        op,
+                        acc_slot,
+                        a_slot,
+                        load_idx,
+                        offset,
+                    } => {
+                        let acc = slot_reg(acc_slot);
+                        let a = slot_reg(a_slot);
+                        let m = mem_at(self, load_vals[load_idx as usize], offset + delta);
+                        match op {
+                            WideStepOp::F32Madd => self.asm.vfmadd231ps_xxm(acc, a, m),
+                            WideStepOp::F32Nmadd => self.asm.vfnmadd231ps_xxm(acc, a, m),
+                            WideStepOp::F64Madd => self.asm.vfmadd231pd_xxm(acc, a, m),
+                            WideStepOp::F64Nmadd => self.asm.vfnmadd231pd_xxm(acc, a, m),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
+            let m = mem_at(self, dst_val, desc.dst_off + c * 16);
+            self.asm.vmovdqu_mx(m, slot_reg(desc.result_slot));
+        }
+    }
+
     fn emit_term(
         &mut self,
         term: Term,
@@ -8005,6 +9073,13 @@ pub fn lower_ir_to_x64_with_budget(
         .saturating_add(128)
         .min(MAX_FN_CODE_BYTES);
     let mut asm = Asm::with_capacity(init_cap);
+    asm.use_vex = isa.has_avx2;
+    asm.guard_legacy_sse_vzeroupper = isa.has_avx2
+        && ir.blocks.iter().any(|bb| {
+            bb.insts
+                .iter()
+                .any(|ins| matches!(ins.op, Op::SlpWideChain { .. } | Op::F64x4BinMem { .. }))
+        });
     let bb_labels: Vec<Label> = (0..ir.blocks.len()).map(|_| asm.new_label()).collect();
 
     let mut l = Lower {
@@ -8027,6 +9102,7 @@ pub fn lower_ir_to_x64_with_budget(
         epilogue_trap: None,
         edge_tramps: Vec::new(),
         edge_tramp_cache: HashMap::new(),
+        wide_slow_tramps: Vec::new(),
         fp_nz_consts: None,
         val_upper32_zero: None,
         live_flags: None,
@@ -8248,6 +9324,20 @@ pub fn lower_ir_to_x64_with_budget(
         l.asm.bind(lbl);
         l.emit_edge_moves(target_bb, args);
         l.asm.jmp(l.bb_labels[target_bb as usize]);
+        check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
+    }
+
+    // ---- Cold out-of-line 128-bit overlap fallbacks for `Op::SlpWideChain` ----
+    let wide_tramps = std::mem::take(&mut l.wide_slow_tramps);
+    for (ti, (slow_lbl, resume_lbl, desc_idx, args)) in wide_tramps.into_iter().enumerate() {
+        if let Some(b) = budget
+            && (ti & 15) == 0
+        {
+            b.check_deadline()?;
+        }
+        l.asm.bind(slow_lbl);
+        l.emit_slp_wide_overlap_fallback(desc_idx, args);
+        l.asm.jmp(resume_lbl);
         check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     }
 

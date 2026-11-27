@@ -1846,6 +1846,7 @@ fn compile_wasm_to_x64_so_inner(
         allow_r12: layout.pinned_global.is_none(),
         allow_r13: layout.fixed_mem_bytes.is_some() && layout.pinned_global_2.is_none(),
         has_bmi2: opts.isa.has_bmi2,
+        allow_xmm16_31: opts.isa.has_avx512,
     };
 
     type IncCtx = (

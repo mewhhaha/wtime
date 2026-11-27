@@ -4613,6 +4613,189 @@ impl<'a> LowerA64<'a> {
                 self.asm.str_q_uimm(SFP2, SGP1, 0);
                 self.asm.str_q_uimm(SFP1, SGP1, 16);
             }
+            Op::SlpWideChain { desc_idx, args } => {
+                use crate::x64::ir::{WideStep, WideStepOp};
+                let desc = self.ir.wide_chains[desc_idx as usize].clone();
+                let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+                let dst_val = arg_vals[0];
+                let load_vals = &arg_vals[1..1 + desc.n_loads as usize];
+                let bcast_vals = &arg_vals[1 + desc.n_loads as usize..];
+                let slot_reg = |s: u8| if s == 0 { SFP1 } else { SFP2 };
+                let emit_ptr = |this: &mut Self, addr_v: Val, off: u64, out_reg: Reg| {
+                    let ar = this.gp_read(addr_v, out_reg);
+                    if this.ir.memory64 {
+                        if ar != out_reg {
+                            this.asm.mov_r(true, out_reg, ar);
+                        }
+                    } else {
+                        this.asm.uxtw(out_reg, ar);
+                    }
+                    this.asm.add_r(true, out_reg, MEM_BASE_REG, out_reg);
+                    if off != 0 {
+                        if off < 4096 {
+                            this.asm.add_imm(true, out_reg, out_reg, off as u16);
+                        } else {
+                            this.asm.mov_imm64(SGP3, off);
+                            this.asm.add_r(true, out_reg, out_reg, SGP3);
+                        }
+                    }
+                };
+                let emit_bin =
+                    |asm: &mut A64Asm, op: WideStepOp, d: VReg, l: VReg, r: VReg| match op {
+                        WideStepOp::F32Add => asm.fadd_v128(false, d, l, r),
+                        WideStepOp::F32Sub => asm.fsub_v128(false, d, l, r),
+                        WideStepOp::F32Mul => asm.fmul_v128(false, d, l, r),
+                        WideStepOp::F32Div => asm.fdiv_v128(false, d, l, r),
+                        WideStepOp::F64Add => asm.fadd_v128(true, d, l, r),
+                        WideStepOp::F64Sub => asm.fsub_v128(true, d, l, r),
+                        WideStepOp::F64Mul => asm.fmul_v128(true, d, l, r),
+                        WideStepOp::F64Div => asm.fdiv_v128(true, d, l, r),
+                        WideStepOp::I32Add => asm.add_v128(2, d, l, r),
+                        WideStepOp::I32Sub => asm.sub_v128(2, d, l, r),
+                        WideStepOp::I32Mul => asm.mul_v128(2, d, l, r),
+                        WideStepOp::I64Add => asm.add_v128(3, d, l, r),
+                        WideStepOp::I64Sub => asm.sub_v128(3, d, l, r),
+                        WideStepOp::VAnd => asm.and_16b(d, l, r),
+                        WideStepOp::VOr => asm.orr_16b(d, l, r),
+                        WideStepOp::VXor => asm.eor_16b(d, l, r),
+                        WideStepOp::F32CanonNan | WideStepOp::F64CanonNan => {
+                            let is64 = matches!(op, WideStepOp::F64CanonNan);
+                            asm.fcmeq_v128(is64, VReg::V0, l, l);
+                            asm.bsl_16b(VReg::V0, l, r);
+                            if d != VReg::V0 {
+                                asm.mov_16b(d, VReg::V0);
+                            }
+                        }
+                        WideStepOp::F32Madd
+                        | WideStepOp::F32Nmadd
+                        | WideStepOp::F64Madd
+                        | WideStepOp::F64Nmadd => unreachable!(),
+                    };
+                let run_chunk = |this: &mut Self, c: u64| {
+                    let delta = c * 16;
+                    for &step in &desc.steps {
+                        match step {
+                            WideStep::Load {
+                                dst_slot,
+                                load_idx,
+                                offset,
+                            } => {
+                                emit_ptr(
+                                    this,
+                                    load_vals[load_idx as usize],
+                                    u64::from(offset) + delta,
+                                    SGP1,
+                                );
+                                this.asm.ldr_q_uimm(slot_reg(dst_slot), SGP1, 0);
+                            }
+                            WideStep::Broadcast {
+                                dst_slot,
+                                bcast_idx,
+                            } => {
+                                let d = slot_reg(dst_slot);
+                                let br = this.fp_read(bcast_vals[bcast_idx as usize], d);
+                                if br != d {
+                                    this.asm.mov_16b(d, br);
+                                }
+                            }
+                            WideStep::Bin {
+                                op,
+                                dst_slot,
+                                lhs_slot,
+                                rhs_slot,
+                            } => {
+                                emit_bin(
+                                    &mut this.asm,
+                                    op,
+                                    slot_reg(dst_slot),
+                                    slot_reg(lhs_slot),
+                                    slot_reg(rhs_slot),
+                                );
+                            }
+                            WideStep::BinMem {
+                                op,
+                                dst_slot,
+                                lhs_slot,
+                                load_idx,
+                                offset,
+                            } => {
+                                emit_ptr(
+                                    this,
+                                    load_vals[load_idx as usize],
+                                    u64::from(offset) + delta,
+                                    SGP1,
+                                );
+                                this.asm.ldr_q_uimm(VReg::V0, SGP1, 0);
+                                emit_bin(
+                                    &mut this.asm,
+                                    op,
+                                    slot_reg(dst_slot),
+                                    slot_reg(lhs_slot),
+                                    VReg::V0,
+                                );
+                            }
+                            WideStep::TerMem {
+                                op,
+                                acc_slot,
+                                a_slot,
+                                load_idx,
+                                offset,
+                            } => {
+                                emit_ptr(
+                                    this,
+                                    load_vals[load_idx as usize],
+                                    u64::from(offset) + delta,
+                                    SGP1,
+                                );
+                                this.asm.ldr_q_uimm(VReg::V0, SGP1, 0);
+                                let acc = slot_reg(acc_slot);
+                                let ar = slot_reg(a_slot);
+                                match op {
+                                    WideStepOp::F32Madd => {
+                                        this.asm.fmla_v128(false, acc, ar, VReg::V0)
+                                    }
+                                    WideStepOp::F32Nmadd => {
+                                        this.asm.fmls_v128(false, acc, ar, VReg::V0)
+                                    }
+                                    WideStepOp::F64Madd => {
+                                        this.asm.fmla_v128(true, acc, ar, VReg::V0)
+                                    }
+                                    WideStepOp::F64Nmadd => {
+                                        this.asm.fmls_v128(true, acc, ar, VReg::V0)
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+                        }
+                    }
+                };
+                if desc.buffer_all_loads {
+                    // `chunks == 2`: compute both chunks before storing either (overlap-exact).
+                    run_chunk(self, 0);
+                    self.asm.str_q_uimm(
+                        slot_reg(desc.result_slot),
+                        CTX_REG,
+                        OFF_SCRATCH_V128 as u32,
+                    );
+                    run_chunk(self, 1);
+                    self.asm
+                        .ldr_q_uimm(VReg::V0, CTX_REG, OFF_SCRATCH_V128 as u32);
+                    emit_ptr(self, dst_val, u64::from(desc.dst_off), SGP1);
+                    self.asm.str_q_uimm(VReg::V0, SGP1, 0);
+                    self.asm.str_q_uimm(slot_reg(desc.result_slot), SGP1, 16);
+                } else {
+                    for j in 0..u64::from(desc.chunks) {
+                        let c = if desc.descending {
+                            u64::from(desc.chunks) - 1 - j
+                        } else {
+                            j
+                        };
+                        run_chunk(self, c);
+                        emit_ptr(self, dst_val, u64::from(desc.dst_off) + c * 16, SGP1);
+                        self.asm.str_q_uimm(slot_reg(desc.result_slot), SGP1, 0);
+                    }
+                }
+            }
             Op::V128Splat { kind, val } => {
                 let r = res.unwrap();
                 let d = self.fp_write_reg(r);
@@ -4785,6 +4968,124 @@ impl<'a> LowerA64<'a> {
                 let sr = self.gp_read(shift, SGP1);
                 let d = self.fp_write_reg(r);
                 emit_a64_v128_shift(&mut self.asm, sop, d, vr, sr)?;
+                self.fp_commit(r, d);
+            }
+            Op::V128Ternary { op, a, b, c } if matches!(op, 0xfa05..=0xfa08) => {
+                // Wasm 3.0 relaxed FMA: `±(a * b) + c` via single-instruction ARMv8 NEON `fmla`/`fmls`!
+                let r = res.unwrap();
+                let is64 = op >= 0xfa07;
+                let is_neg = (op & 1) == 0;
+                let d = self.fp_write_reg(r);
+                if d != SFP1 && d != SFP2 {
+                    // Save `a`/`b` out of `d` BEFORE placing `c` into `d` (handles `d == a` or `d == b` cleanly).
+                    let ar = self.fp_read(a, SFP1);
+                    let a_use = if ar == d {
+                        self.asm.mov_16b(SFP1, ar);
+                        SFP1
+                    } else {
+                        ar
+                    };
+                    let br = self.fp_read(b, SFP2);
+                    let b_use = if br == d {
+                        self.asm.mov_16b(SFP2, br);
+                        SFP2
+                    } else {
+                        br
+                    };
+                    match self.loc(c) {
+                        A64Loc::Fp(v) => {
+                            if v != d {
+                                self.asm.mov_16b(d, v);
+                            }
+                        }
+                        A64Loc::Spill(off) => {
+                            emit_load_off(
+                                &mut self.asm,
+                                Ty::V128,
+                                None,
+                                Some(d),
+                                Reg::SP,
+                                off,
+                                SGP3,
+                            );
+                        }
+                        A64Loc::Gp(_) | A64Loc::Remat(_) | A64Loc::RematAddr { .. } => {
+                            unreachable!()
+                        }
+                    }
+                    if is_neg {
+                        self.asm.fmls_v128(is64, d, a_use, b_use);
+                    } else {
+                        self.asm.fmla_v128(is64, d, a_use, b_use);
+                    }
+                } else {
+                    // Spilled destination (`d == SFP1`): save `a` in `[CTX + OFF_SCRATCH_V128]` if `ar == SFP1`
+                    // so loading `c` into `SFP1` never clobbers `a` or `b`.
+                    let ar = self.fp_read(a, SFP1);
+                    let a_in_tmp = ar == SFP1;
+                    if a_in_tmp {
+                        self.asm
+                            .str_q_uimm(ar, CTX_REG, crate::x64::OFF_SCRATCH_V128 as u32);
+                    }
+                    let br = self.fp_read(b, SFP2);
+                    let b_in_tmp = br == SFP2;
+                    let cr = self.fp_read(c, SFP1);
+                    if cr != d {
+                        self.asm.mov_16b(d, cr);
+                    }
+                    if a_in_tmp {
+                        if b_in_tmp {
+                            // Both `a` and `b` were spilled (`b` is already in `SFP2`, `a` is in `tmp`, `d == SFP1` holds `c`).
+                            // Move `c` (`d`) to a temp? Wait: we only have `SFP1`, `SFP2`, `tmp`:
+                            // Compute `SFP2 = a * b` isn't single-round FMA! Instead stash `c` on stack or save `b` into `X16:X17`!
+                            self.asm.umov(3, SGP1, SFP2, 0);
+                            self.asm.umov(3, SGP2, SFP2, 1);
+                            self.asm
+                                .ldr_q_uimm(SFP2, CTX_REG, crate::x64::OFF_SCRATCH_V128 as u32); // SFP2 = a
+                            // Stash `a`? Wait: we still need `b` in a VReg for `fmla(d, a, b)`.
+                            // Move `SFP2` (`a`) -> `tmp` isn't helpful; we have `d` (`SFP1` = c), `SFP2` = a, `X16:X17` = b.
+                            // Use `str_q` of `c` (`SFP1`)? We only have 2 scratch VRegs (`SFP1`/`SFP2`) so we can't hold 3 spilled operands in 2 VRegs!
+                            // Save a callee-free scratch VReg (`V0`) into `[CTX + OFF_SCRATCH_V128]` after reading `a` into `V0`!
+                            // Even simpler: save `V0` to `X16:X17`, load `a` from `tmp` into `V0`, reload `b`? Wait `SGP1/SGP2` already hold `b`!
+                            // Cleanest 6-insn sequence: save `V0` into `[CTX+OFF_SCRATCH_V128]` after loading `a` into `SFP2` (`b` is in `SGP1:SGP2`):
+                            // 1. `SFP2` holds `a` (loaded above!)
+                            // 2. `str_q(V0, CTX+tmp)` -> saves `V0`!
+                            // 3. `ins_gp(3, V0, 0, SGP1); ins_gp(3, V0, 1, SGP2)` -> `V0 = b`!
+                            // 4. `fmla/fmls(d (=SFP1=c), SFP2 (=a), V0 (=b))`!
+                            // 5. `ldr_q(V0, CTX+tmp)` -> restores `V0`!
+                            self.asm.str_q_uimm(
+                                VReg(0),
+                                CTX_REG,
+                                crate::x64::OFF_SCRATCH_V128 as u32,
+                            );
+                            self.asm.ins_gp(3, VReg(0), 0, SGP1);
+                            self.asm.ins_gp(3, VReg(0), 1, SGP2);
+                            if is_neg {
+                                self.asm.fmls_v128(is64, d, SFP2, VReg(0));
+                            } else {
+                                self.asm.fmla_v128(is64, d, SFP2, VReg(0));
+                            }
+                            self.asm.ldr_q_uimm(
+                                VReg(0),
+                                CTX_REG,
+                                crate::x64::OFF_SCRATCH_V128 as u32,
+                            );
+                        } else {
+                            // `br` is an allocated register (`!= SFP1`, `!= SFP2`), `a` is in `tmp`, `d == SFP1` holds `c`:
+                            self.asm
+                                .ldr_q_uimm(SFP2, CTX_REG, crate::x64::OFF_SCRATCH_V128 as u32);
+                            if is_neg {
+                                self.asm.fmls_v128(is64, d, SFP2, br);
+                            } else {
+                                self.asm.fmla_v128(is64, d, SFP2, br);
+                            }
+                        }
+                    } else if is_neg {
+                        self.asm.fmls_v128(is64, d, ar, br);
+                    } else {
+                        self.asm.fmla_v128(is64, d, ar, br);
+                    }
+                }
                 self.fp_commit(r, d);
             }
             Op::V128Ternary {

@@ -72,6 +72,8 @@ pub struct AllocConfig {
     pub allow_r13: bool,
     /// True when BMI2 `shlx`/`shrx`/`sarx` are enabled, eliminating `RCX` clobbers on variable shifts.
     pub has_bmi2: bool,
+    /// True when AVX-512VL (`x64-v4`) is enabled, unlocking `Xmm16..Xmm31` (30 allocatable XMM regs).
+    pub allow_xmm16_31: bool,
 }
 
 impl AllocConfig {
@@ -129,6 +131,12 @@ impl AllocConfig {
             Gp::Rax | Gp::Rcx | Gp::Rdx | Gp::Rsi | Gp::Rdi | Gp::R8 | Gp::R9 | Gp::Rbx | Gp::Rbp
         ) || (self.allow_r12 && matches!(g, Gp::R12))
             || (self.allow_r13 && matches!(g, Gp::R13))
+    }
+
+    #[inline]
+    pub const fn is_alloc_xmm(self, x: Xmm) -> bool {
+        let id = x.id();
+        id <= 13 || (self.allow_xmm16_31 && id >= 16)
     }
 }
 
@@ -197,6 +205,38 @@ pub const XMM_ALLOC: [Xmm; 14] = [
     Xmm::Xmm12,
     Xmm::Xmm13,
 ];
+pub const XMM_ALLOC_30: [Xmm; 30] = [
+    Xmm::Xmm0,
+    Xmm::Xmm1,
+    Xmm::Xmm2,
+    Xmm::Xmm3,
+    Xmm::Xmm4,
+    Xmm::Xmm5,
+    Xmm::Xmm6,
+    Xmm::Xmm7,
+    Xmm::Xmm8,
+    Xmm::Xmm9,
+    Xmm::Xmm10,
+    Xmm::Xmm11,
+    Xmm::Xmm12,
+    Xmm::Xmm13,
+    Xmm::Xmm16,
+    Xmm::Xmm17,
+    Xmm::Xmm18,
+    Xmm::Xmm19,
+    Xmm::Xmm20,
+    Xmm::Xmm21,
+    Xmm::Xmm22,
+    Xmm::Xmm23,
+    Xmm::Xmm24,
+    Xmm::Xmm25,
+    Xmm::Xmm26,
+    Xmm::Xmm27,
+    Xmm::Xmm28,
+    Xmm::Xmm29,
+    Xmm::Xmm30,
+    Xmm::Xmm31,
+];
 
 /// Bitmask over `Gp::id()` (bits 0..15).
 pub const MASK_GP_CALLER: u16 =
@@ -204,13 +244,13 @@ pub const MASK_GP_CALLER: u16 =
 pub const MASK_RAX: u16 = 1 << 0;
 pub const MASK_RAX_RDX: u16 = (1 << 0) | (1 << 2);
 pub const MASK_RCX: u16 = 1 << 1;
-/// Bitmask over `Xmm::id()` (caller-saved `Xmm0..Xmm7`; `Xmm8..Xmm13` are callee-saved in Stage 2).
-pub const MASK_XMM_CALLER: u16 = (1 << 8) - 1;
+/// Bitmask over `Xmm::id()` (caller-saved `Xmm0..Xmm7` and `Xmm16..Xmm31`; `Xmm8..Xmm13` are callee-saved in Stage 2).
+pub const MASK_XMM_CALLER: u32 = ((1u32 << 8) - 1) | (0xffffu32 << 16);
 
 /// Single source of truth for internal runtime helper clobber masks `(gp_mask, xmm_mask)`.
 ///
 /// Every helper guarantees preservation of `Rbx, Rbp, R12..R15` (except `MemGrow` which updates
-/// `R13 = mem_len` in place) and all allocated `Xmm0..Xmm13` (helpers use only scratch `Xmm14`/`Xmm15`).
+/// `R13 = mem_len` in place) and all allocated `Xmm0..Xmm13` & `Xmm16..Xmm31` (helpers use only scratch `Xmm14`/`Xmm15`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HelperKind {
     /// Input in `Xmm15`, returns int in `Rax` + trap code in `R11d`; clobbers only `Rax, R10, R11, Xmm14, Xmm15`.
@@ -224,7 +264,7 @@ pub enum HelperKind {
 }
 
 #[inline]
-pub const fn helper_clobbers(kind: HelperKind) -> (u16, u16) {
+pub const fn helper_clobbers(kind: HelperKind) -> (u16, u32) {
     match kind {
         HelperKind::Trunc => (MASK_RAX, 0),
         HelperKind::MemGrow | HelperKind::MemCopy | HelperKind::MemFill => (MASK_GP_CALLER, 0),
@@ -401,14 +441,14 @@ pub struct AllocResult {
     /// Per-block (`block_id`-indexed) bitmask of GP registers live-in at block entry (excluding `block.params`).
     pub block_live_in_gp: Vec<u16>,
     /// Per-block (`block_id`-indexed) bitmask of XMM registers live-in at block entry (excluding `block.params`).
-    pub block_live_in_xmm: Vec<u16>,
+    pub block_live_in_xmm: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
 struct Clobber {
     pos: u32,
     gp_mask: u16,
-    xmm_mask: u16,
+    xmm_mask: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -421,7 +461,7 @@ struct Interval {
     seg_len: u16,
     ty: Ty,
     clob_gp: u16,
-    clob_xmm: u16,
+    clob_xmm: u32,
     score: u64,
     remat: Option<RematConst>,
     remat_addr: Option<(u32, i32, bool)>,
@@ -539,7 +579,7 @@ pub struct RegallocScratch {
     val_remat_addr: Vec<Option<(u32, i32, bool)>>,
     val_iv_span: Vec<(u32, u32, u16)>,
     clobbers: Vec<Clobber>,
-    clob_seg: Vec<(u16, u16)>,
+    clob_seg: Vec<(u16, u32)>,
     live_use: Vec<u64>,
     live_def: Vec<u64>,
     live_in: Vec<u64>,
@@ -559,7 +599,7 @@ pub struct RegallocScratch {
     first_edge_arg: Vec<u32>,
     assigned: Vec<bool>,
     val_clob_gp: Vec<u16>,
-    val_clob_xmm: Vec<u16>,
+    val_clob_xmm: Vec<u32>,
     gp_intervals: Vec<Interval>,
     fp_intervals: Vec<Interval>,
     active_gp: Vec<ActiveEntry>,
@@ -949,6 +989,7 @@ pub fn allocate_with_config_and_scratch(
     let val_remat = &mut scratch.val_remat;
     let val_remat_addr = &mut scratch.val_remat_addr;
     let clobbers = &mut scratch.clobbers;
+    let mut slp_bcast_avoid_xmm0: Vec<u32> = Vec::new();
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
     let self_param_stack_bytes =
@@ -1127,6 +1168,17 @@ pub fn allocate_with_config_and_scratch(
                         gp_mask: 1 << Gp::Rax.id(),
                         xmm_mask: 0,
                     });
+                }
+                Op::SlpWideChain { desc_idx, args } if !cfg.allow_xmm16_31 => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: 0,
+                        xmm_mask: 1 << 0,
+                    });
+                    let n_loads = ir.wide_chains[desc_idx as usize].n_loads as usize;
+                    for &bv in &ir.pool_slice(args)[1 + n_loads..] {
+                        slp_bcast_avoid_xmm0.push(bv.0);
+                    }
                 }
                 _ => {}
             }
@@ -1711,7 +1763,7 @@ pub fn allocate_with_config_and_scratch(
 
     // 4. Build O(log C) segment tree over clobbers and build exact intervals.
     let n_clob = clobbers.len();
-    reset_fill(&mut scratch.clob_seg, n_clob * 2, (0u16, 0u16));
+    reset_fill(&mut scratch.clob_seg, n_clob * 2, (0u16, 0u32));
     let clob_seg = &mut scratch.clob_seg;
     for (i, c) in clobbers.iter().enumerate() {
         clob_seg[n_clob + i] = (c.gp_mask, c.xmm_mask);
@@ -1721,13 +1773,13 @@ pub fn allocate_with_config_and_scratch(
         let b = clob_seg[(i << 1) | 1];
         clob_seg[i] = (a.0 | b.0, a.1 | b.1);
     }
-    let query_clobbers = |mut l: usize, mut r: usize| -> (u16, u16) {
+    let query_clobbers = |mut l: usize, mut r: usize| -> (u16, u32) {
         if l >= r || n_clob == 0 {
             return (0, 0);
         }
         l += n_clob;
         r += n_clob;
-        let (mut gp, mut xmm) = (0u16, 0u16);
+        let (mut gp, mut xmm) = (0u16, 0u32);
         while l < r {
             if (l & 1) != 0 {
                 gp |= clob_seg[l].0;
@@ -2163,7 +2215,10 @@ pub fn allocate_with_config_and_scratch(
         segs_pool.reserve_exact(total_exact_seg_pairs - segs_pool.len());
     }
     reset_fill(&mut scratch.val_clob_gp, n_vals, 0u16);
-    reset_fill(&mut scratch.val_clob_xmm, n_vals, 0u16);
+    reset_fill(&mut scratch.val_clob_xmm, n_vals, 0u32);
+    for &bv in &slp_bcast_avoid_xmm0 {
+        scratch.val_clob_xmm[bv as usize] |= 1 << 0;
+    }
     reset_fill(&mut scratch.val_iv_span, n_vals, (0u32, 0u32, 0u16));
     scratch.gp_intervals.clear();
     scratch.fp_intervals.clear();
@@ -2217,7 +2272,7 @@ pub fn allocate_with_config_and_scratch(
                         let segs = &cb_extra_vecs[ex_idx as usize];
                         let s0 = segs[0].0;
                         let e_last = segs[segs.len() - 1].1;
-                        let (mut cg, mut cx) = (0u16, 0u16);
+                        let (mut cg, mut cx) = (0u16, 0u32);
                         let mut act = 0u64;
                         for &(s, e) in segs {
                             act += u64::from(e.saturating_sub(s).max(1));
@@ -2261,6 +2316,7 @@ pub fn allocate_with_config_and_scratch(
                 let (cg, cx) = query_clobbers(lo, hi);
                 (s, e, 0, 0, u64::from((e - s).max(1)), cg, cx)
             };
+        let clob_xmm = clob_xmm | val_clob_xmm[vi];
         val_clob_gp[vi] = clob_gp;
         val_clob_xmm[vi] = clob_xmm;
         val_iv_span[vi] = (start, end, seg_len);
@@ -2706,8 +2762,23 @@ pub fn allocate_with_config_and_scratch(
     scratch.active_fp.clear();
     let free_spills16 = &mut scratch.free_spills16;
     let active_fp = &mut scratch.active_fp;
-    const XMM_CALLER_COUNT: usize = 8;
-    const XMM_PREF_ORDER: [usize; 14] = [7, 6, 5, 4, 3, 2, 1, 0, 8, 9, 10, 11, 12, 13];
+    const XMM_PREF_ORDER_14: [usize; 14] = [7, 6, 5, 4, 3, 2, 1, 0, 8, 9, 10, 11, 12, 13];
+    // On `x64-v4`, prefer caller-saved `Xmm0..Xmm7`, then caller-saved `Xmm16..Xmm31` (zero prologue save cost!),
+    // and finally callee-saved `Xmm8..Xmm13` (indices 8..14).
+    const XMM_PREF_ORDER_30: [usize; 30] = [
+        7, 6, 5, 4, 3, 2, 1, 0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 8,
+        9, 10, 11, 12, 13,
+    ];
+    let xmm_pool: &[Xmm] = if cfg.allow_xmm16_31 {
+        &XMM_ALLOC_30
+    } else {
+        &XMM_ALLOC
+    };
+    let xmm_pref: &[usize] = if cfg.allow_xmm16_31 {
+        &XMM_PREF_ORDER_30
+    } else {
+        &XMM_PREF_ORDER_14
+    };
 
     let alloc_spill_fp = |val: u32,
                           ty: Ty,
@@ -2753,18 +2824,15 @@ pub fn allocate_with_config_and_scratch(
             bg.check_deadline()?;
         }
         active_fp.retain(|a| a.end > iv.start);
-        let mut used_regs = 0u16;
+        let mut used_regs = 0u32;
         for a in active_fp.iter() {
             if active_overlaps_iv(a, iv, &segs_pool) {
-                used_regs |= 1 << XMM_ALLOC[a.reg_idx as usize].id();
+                used_regs |= 1u32 << xmm_pool[a.reg_idx as usize].id();
             }
         }
         let forbidden = used_regs | iv.clob_xmm;
-        let max_ri = if iv.remat.is_some() {
-            XMM_CALLER_COUNT
-        } else {
-            XMM_ALLOC.len()
-        };
+        let remat_only_caller = iv.remat.is_some();
+        let xmm_allowed = |ri: usize| -> bool { !remat_only_caller || !(8..14).contains(&ri) };
 
         let mut chosen: Option<(usize, Xmm)> = None;
         {
@@ -2774,8 +2842,9 @@ pub fn allocate_with_config_and_scratch(
                 if peer != u32::MAX
                     && assigned[peer as usize]
                     && let Loc::Xmm(x) = locs[peer as usize]
-                    && (forbidden & (1 << x.id())) == 0
-                    && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
+                    && (forbidden & (1u32 << x.id())) == 0
+                    && let Some(ri) = xmm_pool.iter().position(|&r| r == x)
+                    && xmm_allowed(ri)
                 {
                     if let Some(slot) = cands[..n_cands].iter_mut().find(|c| c.0 == ri) {
                         slot.2 += 1;
@@ -2795,13 +2864,14 @@ pub fn allocate_with_config_and_scratch(
         }
         if chosen.is_none()
             && let Some(x) = hint_xmm[iv.val as usize]
-            && (forbidden & (1 << x.id())) == 0
-            && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
+            && (forbidden & (1u32 << x.id())) == 0
+            && let Some(ri) = xmm_pool.iter().position(|&r| r == x)
+            && xmm_allowed(ri)
         {
             chosen = Some((ri, x));
         }
         if chosen.is_none() {
-            let mut peer_avoid = 0u16;
+            let mut peer_avoid = 0u32;
             let mut peer_hint: Option<Xmm> = None;
             for &peer in &hint_peers[iv.val as usize] {
                 if peer != u32::MAX && !assigned[peer as usize] {
@@ -2812,24 +2882,25 @@ pub fn allocate_with_config_and_scratch(
                 }
             }
             if let Some(x) = peer_hint
-                && ((forbidden | peer_avoid) & (1 << x.id())) == 0
-                && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
+                && ((forbidden | peer_avoid) & (1u32 << x.id())) == 0
+                && let Some(ri) = xmm_pool.iter().position(|&r| r == x)
+                && xmm_allowed(ri)
             {
                 chosen = Some((ri, x));
             }
             if chosen.is_none() && peer_avoid != 0 {
                 let avoid_mask = forbidden | peer_avoid;
-                for &ri in &XMM_PREF_ORDER {
-                    if ri < max_ri && (avoid_mask & (1 << XMM_ALLOC[ri].id())) == 0 {
-                        chosen = Some((ri, XMM_ALLOC[ri]));
+                for &ri in xmm_pref {
+                    if xmm_allowed(ri) && (avoid_mask & (1u32 << xmm_pool[ri].id())) == 0 {
+                        chosen = Some((ri, xmm_pool[ri]));
                         break;
                     }
                 }
             }
             if chosen.is_none() {
-                for &ri in &XMM_PREF_ORDER {
-                    if ri < max_ri && (forbidden & (1 << XMM_ALLOC[ri].id())) == 0 {
-                        chosen = Some((ri, XMM_ALLOC[ri]));
+                for &ri in xmm_pref {
+                    if xmm_allowed(ri) && (forbidden & (1u32 << xmm_pool[ri].id())) == 0 {
+                        chosen = Some((ri, xmm_pool[ri]));
                         break;
                     }
                 }
@@ -2856,8 +2927,8 @@ pub fn allocate_with_config_and_scratch(
             assigned[iv.val as usize] = true;
         } else {
             let mut best_ri: Option<(usize, u64, usize, u32)> = None;
-            for (ri, &x) in XMM_ALLOC.iter().enumerate() {
-                if (iv.clob_xmm & (1 << x.id())) != 0 {
+            for (ri, &x) in xmm_pool.iter().enumerate() {
+                if (iv.clob_xmm & (1u32 << x.id())) != 0 {
                     continue;
                 }
                 let (mut cnt, mut max_sc, mut max_end) = (0usize, 0u64, 0u32);
@@ -2894,7 +2965,7 @@ pub fn allocate_with_config_and_scratch(
                 }
             }
             if let Some((ri, _, _, _)) = best_ri {
-                let x = XMM_ALLOC[ri];
+                let x = xmm_pool[ri];
                 let mut i = active_fp.len();
                 while i > 0 {
                     i -= 1;
@@ -2969,7 +3040,7 @@ pub fn allocate_with_config_and_scratch(
         }
         match loc {
             Loc::Gp(g) if cfg.is_callee_saved_gp(g) => used_callee_gp_mask |= 1 << g.id(),
-            Loc::Xmm(x) if x.id() >= 8 => used_callee_xmm_mask |= 1 << x.id(),
+            Loc::Xmm(x) if (8..=13).contains(&x.id()) => used_callee_xmm_mask |= 1 << x.id(),
             _ => {}
         }
     }
@@ -3061,11 +3132,11 @@ pub fn allocate_with_config_and_scratch(
     }
 
     let mut block_live_in_gp = vec![0u16; n_blocks];
-    let mut block_live_in_xmm = vec![0u16; n_blocks];
+    let mut block_live_in_xmm = vec![0u32; n_blocks];
     if saved_live_words > 0 {
         for (oi, &bid) in block_order.iter().enumerate() {
             let mut gp_m = 0u16;
-            let mut xmm_m = 0u16;
+            let mut xmm_m = 0u32;
             let base = oi * saved_live_words;
             for w in 0..saved_live_words {
                 let mut bits = saved_live_in[base + w];
@@ -3077,7 +3148,7 @@ pub fn allocate_with_config_and_scratch(
                     if assigned[vi] {
                         match locs[vi] {
                             Loc::Gp(g) => gp_m |= 1u16 << g.id(),
-                            Loc::Xmm(x) => xmm_m |= 1u16 << x.id(),
+                            Loc::Xmm(x) => xmm_m |= 1u32 << x.id(),
                             Loc::RematAddr { base_reg, .. } => gp_m |= 1u16 << base_reg.id(),
                             Loc::Spill(_) | Loc::Remat(_) => {}
                         }

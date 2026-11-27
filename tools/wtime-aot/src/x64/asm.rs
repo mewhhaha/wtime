@@ -86,6 +86,22 @@ pub enum Xmm {
     Xmm13 = 13,
     Xmm14 = 14,
     Xmm15 = 15,
+    Xmm16 = 16,
+    Xmm17 = 17,
+    Xmm18 = 18,
+    Xmm19 = 19,
+    Xmm20 = 20,
+    Xmm21 = 21,
+    Xmm22 = 22,
+    Xmm23 = 23,
+    Xmm24 = 24,
+    Xmm25 = 25,
+    Xmm26 = 26,
+    Xmm27 = 27,
+    Xmm28 = 28,
+    Xmm29 = 29,
+    Xmm30 = 30,
+    Xmm31 = 31,
 }
 
 impl Xmm {
@@ -101,7 +117,12 @@ impl Xmm {
 
     #[inline]
     pub const fn hi(self) -> u8 {
-        (self as u8) >> 3
+        ((self as u8) >> 3) & 1
+    }
+
+    #[inline]
+    pub const fn hi4(self) -> u8 {
+        (self as u8) >> 4
     }
 
     pub const fn from_id(id: u8) -> Self {
@@ -121,7 +142,23 @@ impl Xmm {
             12 => Xmm::Xmm12,
             13 => Xmm::Xmm13,
             14 => Xmm::Xmm14,
-            _ => Xmm::Xmm15,
+            15 => Xmm::Xmm15,
+            16 => Xmm::Xmm16,
+            17 => Xmm::Xmm17,
+            18 => Xmm::Xmm18,
+            19 => Xmm::Xmm19,
+            20 => Xmm::Xmm20,
+            21 => Xmm::Xmm21,
+            22 => Xmm::Xmm22,
+            23 => Xmm::Xmm23,
+            24 => Xmm::Xmm24,
+            25 => Xmm::Xmm25,
+            26 => Xmm::Xmm26,
+            27 => Xmm::Xmm27,
+            28 => Xmm::Xmm28,
+            29 => Xmm::Xmm29,
+            30 => Xmm::Xmm30,
+            _ => Xmm::Xmm31,
         }
     }
 }
@@ -275,6 +312,13 @@ pub struct Asm {
     align_labels: Vec<u8>,
     /// True when at least one label requested 32-byte alignment (so the linker aligns the function to 32B).
     pub has_align32: bool,
+    /// When true (`x64-v3`/`x64-v4`), basic FP/V128 moves, loads, stores, and RIP ops emit VEX encodings
+    /// automatically so functions never mix legacy SSE and VEX instructions.
+    pub use_vex: bool,
+    /// When true, the function emits wide 256/512-bit YMM/ZMM instructions without per-op
+    /// `vzeroupper`, so `vzeroupper` is inserted automatically before `ret`, calls, tail-calls,
+    /// and any legacy non-VEX SSE instruction.
+    pub guard_legacy_sse_vzeroupper: bool,
     fixups: Vec<LocalFixup>,
     f32_pool: HashMap<u32, u32>,
     f64_pool: HashMap<u64, u32>,
@@ -291,6 +335,8 @@ impl Asm {
             labels: Vec::new(),
             align_labels: Vec::new(),
             has_align32: false,
+            use_vex: false,
+            guard_legacy_sse_vzeroupper: false,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -307,6 +353,8 @@ impl Asm {
             labels: Vec::new(),
             align_labels: Vec::new(),
             has_align32: false,
+            use_vex: false,
+            guard_legacy_sse_vzeroupper: false,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -784,6 +832,8 @@ impl Asm {
             labels,
             align_labels: Vec::new(),
             has_align32: false,
+            use_vex: false,
+            guard_legacy_sse_vzeroupper: false,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -1025,7 +1075,15 @@ impl Asm {
         self.emit_u8(0x0b);
     }
 
+    #[inline]
+    fn maybe_vzeroupper(&mut self) {
+        if self.guard_legacy_sse_vzeroupper {
+            self.vzeroupper();
+        }
+    }
+
     pub fn ret(&mut self) {
+        self.maybe_vzeroupper();
         self.emit_u8(0xc3);
     }
 
@@ -1098,6 +1156,7 @@ impl Asm {
     }
 
     pub fn call_reloc(&mut self, target: RelocTarget) {
+        self.maybe_vzeroupper();
         self.emit_u8(0xe8);
         let patch_off = self.pos();
         self.emit_i32(0);
@@ -1110,6 +1169,7 @@ impl Asm {
     }
 
     pub fn jmp_reloc(&mut self, target: RelocTarget) {
+        self.maybe_vzeroupper();
         self.emit_u8(0xe9);
         let patch_off = self.pos();
         self.emit_i32(0);
@@ -1122,6 +1182,7 @@ impl Asm {
     }
 
     pub fn call_reg(&mut self, r: Gp) {
+        self.maybe_vzeroupper();
         self.rex(false, 0, 0, r.hi(), false);
         self.emit_u8(0xff);
         self.modrm_reg(2, r.lo());
@@ -1168,6 +1229,10 @@ impl Asm {
     }
 
     pub fn movss_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        if self.use_vex {
+            self.vmovss_rip(dst, target);
+            return;
+        }
         self.emit_u8(0xf3);
         self.rex(false, dst.hi(), 0, 0, false);
         self.emit_u8(0x0f);
@@ -1184,6 +1249,10 @@ impl Asm {
     }
 
     pub fn movsd_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        if self.use_vex {
+            self.vmovsd_rip(dst, target);
+            return;
+        }
         self.emit_u8(0xf2);
         self.rex(false, dst.hi(), 0, 0, false);
         self.emit_u8(0x0f);
@@ -1200,6 +1269,10 @@ impl Asm {
     }
 
     pub fn movdqu_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        if self.use_vex {
+            self.vmovdqu_rip(dst, target);
+            return;
+        }
         self.emit_u8(0xf3);
         self.rex(false, dst.hi(), 0, 0, false);
         self.emit_u8(0x0f);
@@ -1216,6 +1289,25 @@ impl Asm {
     }
 
     pub fn xmm_rip_op(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, target: RelocTarget) {
+        if self.use_vex {
+            let (pp, evex_w) = match prefix {
+                None => (0, false),
+                Some(0x66) => (1, true),
+                Some(0xf3) => (2, false),
+                Some(0xf2) => (3, true),
+                _ => unreachable!(),
+            };
+            // 2-operand VEX/EVEX ops (`vucomiss/d`, `vcomiss/d`, `vmovss/d`) require `vvvv = 1111` (`None`);
+            // binary ops (`vand/or/xor`, `vadd/sub/mul/div/min/max`) take `vvvv = Some(dst)`.
+            let vvvv = if matches!(op, 0x10 | 0x2e | 0x2f) {
+                None
+            } else {
+                Some(dst)
+            };
+            self.vex_or_evex_rip(1, pp, false, evex_w, dst, vvvv, op, target);
+            return;
+        }
+        assert!(dst.id() < 16, "SSE xmm_rip_op cannot encode Xmm16..31");
         if let Some(p) = prefix {
             self.emit_u8(p);
         }
@@ -1708,6 +1800,11 @@ impl Asm {
     // ---- SSE2 / SSE4.1 FP & V128 ----
 
     fn sse_rr(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, src: Xmm) {
+        self.maybe_vzeroupper();
+        assert!(
+            dst.id() < 16 && src.id() < 16,
+            "legacy SSE encoder cannot encode Xmm16..31: dst={dst:?} src={src:?} op={op:#x}"
+        );
         if let Some(p) = prefix {
             self.emit_u8(p);
         }
@@ -1719,11 +1816,19 @@ impl Asm {
 
     pub fn movaps_rr(&mut self, dst: Xmm, src: Xmm) {
         if dst != src {
-            self.sse_rr(None, 0x28, dst, src);
+            if self.use_vex {
+                self.vmovaps_rr(dst, src);
+            } else {
+                self.sse_rr(None, 0x28, dst, src);
+            }
         }
     }
 
     pub fn movss_xm(&mut self, dst: Xmm, mem: Mem) {
+        if self.use_vex {
+            self.vmovss_xm(dst, mem);
+            return;
+        }
         self.emit_u8(0xf3);
         self.rex_mem(false, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -1732,6 +1837,10 @@ impl Asm {
     }
 
     pub fn movss_mx(&mut self, mem: Mem, src: Xmm) {
+        if self.use_vex {
+            self.vmovss_mx(mem, src);
+            return;
+        }
         self.emit_u8(0xf3);
         self.rex_mem(false, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -1740,6 +1849,10 @@ impl Asm {
     }
 
     pub fn movsd_xm(&mut self, dst: Xmm, mem: Mem) {
+        if self.use_vex {
+            self.vmovsd_xm(dst, mem);
+            return;
+        }
         self.emit_u8(0xf2);
         self.rex_mem(false, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -1748,6 +1861,10 @@ impl Asm {
     }
 
     pub fn movsd_mx(&mut self, mem: Mem, src: Xmm) {
+        if self.use_vex {
+            self.vmovsd_mx(mem, src);
+            return;
+        }
         self.emit_u8(0xf2);
         self.rex_mem(false, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -1756,6 +1873,10 @@ impl Asm {
     }
 
     pub fn movdqu_xm(&mut self, dst: Xmm, mem: Mem) {
+        if self.use_vex {
+            self.vmovdqu_xm(dst, mem);
+            return;
+        }
         self.emit_u8(0xf3);
         self.rex_mem(false, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -1764,6 +1885,10 @@ impl Asm {
     }
 
     pub fn movdqu_mx(&mut self, mem: Mem, src: Xmm) {
+        if self.use_vex {
+            self.vmovdqu_mx(mem, src);
+            return;
+        }
         self.emit_u8(0xf3);
         self.rex_mem(false, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -1772,6 +1897,10 @@ impl Asm {
     }
 
     pub fn movd_xr(&mut self, dst: Xmm, src: Gp) {
+        if self.use_vex {
+            self.vmovd_xr(dst, src);
+            return;
+        }
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -1780,6 +1909,10 @@ impl Asm {
     }
 
     pub fn movq_xr(&mut self, dst: Xmm, src: Gp) {
+        if self.use_vex {
+            self.vmovq_xr(dst, src);
+            return;
+        }
         self.emit_u8(0x66);
         self.rex(true, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -1788,6 +1921,10 @@ impl Asm {
     }
 
     pub fn movd_rx(&mut self, dst: Gp, src: Xmm) {
+        if self.use_vex {
+            self.vmovd_rx(dst, src);
+            return;
+        }
         self.emit_u8(0x66);
         self.rex(false, src.hi(), 0, dst.hi(), false);
         self.emit_u8(0x0f);
@@ -1796,6 +1933,10 @@ impl Asm {
     }
 
     pub fn movq_rx(&mut self, dst: Gp, src: Xmm) {
+        if self.use_vex {
+            self.vmovq_rx(dst, src);
+            return;
+        }
         self.emit_u8(0x66);
         self.rex(true, src.hi(), 0, dst.hi(), false);
         self.emit_u8(0x0f);
@@ -1804,6 +1945,11 @@ impl Asm {
     }
 
     fn sse_xm(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, mem: Mem) {
+        self.maybe_vzeroupper();
+        assert!(
+            dst.id() < 16,
+            "legacy SSE memory encoder cannot encode Xmm16..31: dst={dst:?} op={op:#x}"
+        );
         if let Some(p) = prefix {
             self.emit_u8(p);
         }
@@ -1814,120 +1960,269 @@ impl Asm {
     }
 
     pub fn addss_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(d), m, 0x58);
+            return;
+        }
         self.sse_xm(Some(0xf3), 0x58, d, m);
     }
     pub fn subss_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(d), m, 0x5c);
+            return;
+        }
         self.sse_xm(Some(0xf3), 0x5c, d, m);
     }
     pub fn mulss_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(d), m, 0x59);
+            return;
+        }
         self.sse_xm(Some(0xf3), 0x59, d, m);
     }
     pub fn divss_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(d), m, 0x5e);
+            return;
+        }
         self.sse_xm(Some(0xf3), 0x5e, d, m);
     }
     pub fn minss_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(d), m, 0x5d);
+            return;
+        }
         self.sse_xm(Some(0xf3), 0x5d, d, m);
     }
     pub fn maxss_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(d), m, 0x5f);
+            return;
+        }
         self.sse_xm(Some(0xf3), 0x5f, d, m);
     }
     pub fn ucomiss_xm(&mut self, a: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 0, false, false, 4, a, None, m, 0x2e);
+            return;
+        }
         self.sse_xm(None, 0x2e, a, m);
     }
 
     pub fn addsd_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(d), m, 0x58);
+            return;
+        }
         self.sse_xm(Some(0xf2), 0x58, d, m);
     }
     pub fn subsd_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(d), m, 0x5c);
+            return;
+        }
         self.sse_xm(Some(0xf2), 0x5c, d, m);
     }
     pub fn mulsd_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(d), m, 0x59);
+            return;
+        }
         self.sse_xm(Some(0xf2), 0x59, d, m);
     }
     pub fn divsd_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(d), m, 0x5e);
+            return;
+        }
         self.sse_xm(Some(0xf2), 0x5e, d, m);
     }
     pub fn minsd_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(d), m, 0x5d);
+            return;
+        }
         self.sse_xm(Some(0xf2), 0x5d, d, m);
     }
     pub fn maxsd_xm(&mut self, d: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(d), m, 0x5f);
+            return;
+        }
         self.sse_xm(Some(0xf2), 0x5f, d, m);
     }
     pub fn ucomisd_xm(&mut self, a: Xmm, m: Mem) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 1, false, true, 8, a, None, m, 0x2e);
+            return;
+        }
         self.sse_xm(Some(0x66), 0x2e, a, m);
     }
 
     pub fn addss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x58);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x58, d, s);
     }
     pub fn subss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x5c);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x5c, d, s);
     }
     pub fn mulss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x59);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x59, d, s);
     }
     pub fn divss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x5e);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x5e, d, s);
     }
     pub fn sqrtss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x51);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x51, d, s);
     }
     pub fn minss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x5d);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x5d, d, s);
     }
     pub fn maxss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x5f);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x5f, d, s);
     }
     pub fn ucomiss(&mut self, a: Xmm, b: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 0, false, false, a, None, b, 0x2e);
+            return;
+        }
         self.sse_rr(None, 0x2e, a, b);
     }
 
     pub fn addsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x58);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x58, d, s);
     }
     pub fn subsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x5c);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x5c, d, s);
     }
     pub fn mulsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x59);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x59, d, s);
     }
     pub fn divsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x5e);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x5e, d, s);
     }
     pub fn sqrtsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x51);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x51, d, s);
     }
     pub fn minsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x5d);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x5d, d, s);
     }
     pub fn maxsd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x5f);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x5f, d, s);
     }
     pub fn ucomisd(&mut self, a: Xmm, b: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 1, false, true, a, None, b, 0x2e);
+            return;
+        }
         self.sse_rr(Some(0x66), 0x2e, a, b);
     }
 
     pub fn andps(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vandps_xxx(d, d, s);
+            return;
+        }
         self.sse_rr(None, 0x54, d, s);
     }
     pub fn andnps(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vandnps_xxx(d, d, s);
+            return;
+        }
         self.sse_rr(None, 0x55, d, s);
     }
     pub fn orps(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vorps_xxx(d, d, s);
+            return;
+        }
         self.sse_rr(None, 0x56, d, s);
     }
     pub fn xorps(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vxorps_xxx(d, d, s);
+            return;
+        }
         self.sse_rr(None, 0x57, d, s);
     }
 
     pub fn cvtss2sd(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 2, false, false, d, Some(d), s, 0x5a);
+            return;
+        }
         self.sse_rr(Some(0xf3), 0x5a, d, s);
     }
     pub fn cvtsd2ss(&mut self, d: Xmm, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_rr(1, 3, false, true, d, Some(d), s, 0x5a);
+            return;
+        }
         self.sse_rr(Some(0xf2), 0x5a, d, s);
     }
 
     pub fn cvtsi2ss(&mut self, is64: bool, d: Xmm, s: Gp) {
+        if self.use_vex {
+            self.vex_or_evex_xmm_gp(1, 2, is64, d, Some(d), s, 0x2a);
+            return;
+        }
+        assert!(d.id() < 16, "SSE cvtsi2ss cannot encode Xmm16..31");
         self.emit_u8(0xf3);
         self.rex(is64, d.hi(), 0, s.hi(), false);
         self.emit_u8(0x0f);
@@ -1936,6 +2231,11 @@ impl Asm {
     }
 
     pub fn cvtsi2sd(&mut self, is64: bool, d: Xmm, s: Gp) {
+        if self.use_vex {
+            self.vex_or_evex_xmm_gp(1, 3, is64, d, Some(d), s, 0x2a);
+            return;
+        }
+        assert!(d.id() < 16, "SSE cvtsi2sd cannot encode Xmm16..31");
         self.emit_u8(0xf2);
         self.rex(is64, d.hi(), 0, s.hi(), false);
         self.emit_u8(0x0f);
@@ -1944,6 +2244,11 @@ impl Asm {
     }
 
     pub fn cvttss2si(&mut self, is64: bool, d: Gp, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_gp_xmm(1, 2, is64, d, s, 0x2c);
+            return;
+        }
+        assert!(s.id() < 16, "SSE cvttss2si cannot encode Xmm16..31");
         self.emit_u8(0xf3);
         self.rex(is64, d.hi(), 0, s.hi(), false);
         self.emit_u8(0x0f);
@@ -1952,6 +2257,11 @@ impl Asm {
     }
 
     pub fn cvttsd2si(&mut self, is64: bool, d: Gp, s: Xmm) {
+        if self.use_vex {
+            self.vex_or_evex_gp_xmm(1, 3, is64, d, s, 0x2c);
+            return;
+        }
+        assert!(s.id() < 16, "SSE cvttsd2si cannot encode Xmm16..31");
         self.emit_u8(0xf2);
         self.rex(is64, d.hi(), 0, s.hi(), false);
         self.emit_u8(0x0f);
@@ -1961,6 +2271,11 @@ impl Asm {
 
     /// SSE4.1 `roundss dst, src, imm8` (`0x08`=nearest, `0x09`=floor, `0x0a`=ceil, `0x0b`=trunc).
     pub fn roundss(&mut self, d: Xmm, s: Xmm, mode: u8) {
+        self.maybe_vzeroupper();
+        assert!(
+            d.id() < 16 && s.id() < 16,
+            "roundss cannot encode Xmm16..31"
+        );
         self.emit_u8(0x66);
         self.rex(false, d.hi(), 0, s.hi(), false);
         self.emit_u8(0x0f);
@@ -1972,6 +2287,11 @@ impl Asm {
 
     /// SSE4.1 `roundsd dst, src, imm8` (`0x08`=nearest, `0x09`=floor, `0x0a`=ceil, `0x0b`=trunc).
     pub fn roundsd(&mut self, d: Xmm, s: Xmm, mode: u8) {
+        self.maybe_vzeroupper();
+        assert!(
+            d.id() < 16 && s.id() < 16,
+            "roundsd cannot encode Xmm16..31"
+        );
         self.emit_u8(0x66);
         self.rex(false, d.hi(), 0, s.hi(), false);
         self.emit_u8(0x0f);
@@ -1984,6 +2304,11 @@ impl Asm {
     // ---- Complete SSE2 / SSSE3 / SSE4.1 / SSE4.2 SIMD encoders ----
 
     fn sse_38_rr(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, src: Xmm) {
+        self.maybe_vzeroupper();
+        assert!(
+            dst.id() < 16 && src.id() < 16,
+            "legacy SSE 0F38 encoder cannot encode Xmm16..31: dst={dst:?} src={src:?} op={op:#x}"
+        );
         if let Some(p) = prefix {
             self.emit_u8(p);
         }
@@ -1995,6 +2320,11 @@ impl Asm {
     }
 
     fn sse_38_xm(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, mem: Mem) {
+        self.maybe_vzeroupper();
+        assert!(
+            dst.id() < 16,
+            "legacy SSE 0F38 mem encoder cannot encode Xmm16..31: dst={dst:?} op={op:#x}"
+        );
         if let Some(p) = prefix {
             self.emit_u8(p);
         }
@@ -2011,6 +2341,11 @@ impl Asm {
     }
 
     fn sse_3a_rri(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, src: Xmm, imm: u8) {
+        self.maybe_vzeroupper();
+        assert!(
+            dst.id() < 16 && src.id() < 16,
+            "legacy SSE 0F3A encoder cannot encode Xmm16..31: dst={dst:?} src={src:?} op={op:#x}"
+        );
         if let Some(p) = prefix {
             self.emit_u8(p);
         }
@@ -2023,6 +2358,11 @@ impl Asm {
     }
 
     fn sse_shift_imm(&mut self, op: u8, ext: u8, dst: Xmm, imm: u8) {
+        self.maybe_vzeroupper();
+        assert!(
+            dst.id() < 16,
+            "legacy SSE shift_imm cannot encode Xmm16..31"
+        );
         self.emit_u8(0x66);
         self.rex(false, 0, 0, dst.hi(), false);
         self.emit_u8(0x0f);
@@ -2034,17 +2374,29 @@ impl Asm {
     pub fn punpcklbw(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x60, d, s);
     }
+    pub fn punpckhbw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x68, d, s);
+    }
     pub fn punpcklwd(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x61, d, s);
     }
+    pub fn punpckhwd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x69, d, s);
+    }
     pub fn punpckldq(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x62, d, s);
+    }
+    pub fn punpckhdq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x6a, d, s);
     }
     pub fn punpcklqdq(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x6c, d, s);
     }
     pub fn punpckhqdq(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x6d, d, s);
+    }
+    pub fn palignr(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.sse_3a_rri(Some(0x66), 0x0f, d, s, imm);
     }
     pub fn unpcklps(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(None, 0x14, d, s);
@@ -2086,6 +2438,12 @@ impl Asm {
         self.sse_38_rr(Some(0x66), 0x00, d, s);
     }
     pub fn pshufb_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        if self.use_vex {
+            self.vex_or_evex_rip(2, 1, false, false, dst, Some(dst), 0x00, target);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pshufb_rip cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, 0, false);
         self.emit_u8(0x0f);
@@ -2131,6 +2489,7 @@ impl Asm {
         self.sse_38_rr(Some(0x66), 0x17, a, b);
     }
     pub fn pmovmskb(&mut self, dst: Gp, src: Xmm) {
+        self.maybe_vzeroupper();
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2138,12 +2497,14 @@ impl Asm {
         self.modrm_reg(dst.lo(), src.lo());
     }
     pub fn movmskps(&mut self, dst: Gp, src: Xmm) {
+        self.maybe_vzeroupper();
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
         self.emit_u8(0x50);
         self.modrm_reg(dst.lo(), src.lo());
     }
     pub fn movmskpd(&mut self, dst: Gp, src: Xmm) {
+        self.maybe_vzeroupper();
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2517,6 +2878,8 @@ impl Asm {
 
     // Lane extract / insert (SSE2/SSE4.1)
     pub fn pextrb(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrb cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, src.hi(), 0, dst.hi(), false);
         self.emit_u8(0x0f);
@@ -2526,6 +2889,8 @@ impl Asm {
         self.emit_u8(lane & 15);
     }
     pub fn pextrw(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrw cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2534,6 +2899,8 @@ impl Asm {
         self.emit_u8(lane & 7);
     }
     pub fn pextrd(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrd cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, src.hi(), 0, dst.hi(), false);
         self.emit_u8(0x0f);
@@ -2543,6 +2910,8 @@ impl Asm {
         self.emit_u8(lane & 3);
     }
     pub fn pextrq(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrq cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(true, src.hi(), 0, dst.hi(), false);
         self.emit_u8(0x0f);
@@ -2552,6 +2921,8 @@ impl Asm {
         self.emit_u8(lane & 1);
     }
     pub fn pinsrb(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrb cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2561,6 +2932,8 @@ impl Asm {
         self.emit_u8(lane & 15);
     }
     pub fn pinsrw(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrw cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2569,6 +2942,8 @@ impl Asm {
         self.emit_u8(lane & 7);
     }
     pub fn pinsrd(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrd cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(false, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2578,6 +2953,8 @@ impl Asm {
         self.emit_u8(lane & 3);
     }
     pub fn pinsrq(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrq cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex(true, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -2587,8 +2964,15 @@ impl Asm {
         self.emit_u8(lane & 1);
     }
 
-    // Memory-lane extract/insert (SSE4.1)
+    // Memory-lane extract/insert (SSE4.1 / AVX / AVX-512VL+BW+DQ)
     pub fn pinsrb_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, false, false, 1, dst, Some(dst), mem, 0x20);
+            self.emit_u8(lane & 15);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrb_xm cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(false, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2598,6 +2982,13 @@ impl Asm {
         self.emit_u8(lane & 15);
     }
     pub fn pinsrw_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(1, 1, false, false, 2, dst, Some(dst), mem, 0xc4);
+            self.emit_u8(lane & 7);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrw_xm cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(false, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2606,6 +2997,13 @@ impl Asm {
         self.emit_u8(lane & 7);
     }
     pub fn pinsrd_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, false, false, 4, dst, Some(dst), mem, 0x22);
+            self.emit_u8(lane & 3);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrd_xm cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(false, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2615,6 +3013,13 @@ impl Asm {
         self.emit_u8(lane & 3);
     }
     pub fn pinsrq_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, true, true, 8, dst, Some(dst), mem, 0x22);
+            self.emit_u8(lane & 1);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(dst.id() < 16, "SSE pinsrq_xm cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(true, dst.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2624,6 +3029,13 @@ impl Asm {
         self.emit_u8(lane & 1);
     }
     pub fn pextrb_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, false, false, 1, src, None, mem, 0x14);
+            self.emit_u8(lane & 15);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrb_mx cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(false, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2633,6 +3045,13 @@ impl Asm {
         self.emit_u8(lane & 15);
     }
     pub fn pextrw_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, false, false, 2, src, None, mem, 0x15);
+            self.emit_u8(lane & 7);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrw_mx cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(false, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2642,6 +3061,13 @@ impl Asm {
         self.emit_u8(lane & 7);
     }
     pub fn pextrd_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, false, false, 4, src, None, mem, 0x16);
+            self.emit_u8(lane & 3);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrd_mx cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(false, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2651,6 +3077,13 @@ impl Asm {
         self.emit_u8(lane & 3);
     }
     pub fn pextrq_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        if self.use_vex {
+            self.vex_or_evex_mem(3, 1, true, true, 8, src, None, mem, 0x16);
+            self.emit_u8(lane & 1);
+            return;
+        }
+        self.maybe_vzeroupper();
+        assert!(src.id() < 16, "SSE pextrq_mx cannot encode Xmm16..31");
         self.emit_u8(0x66);
         self.rex_mem(true, src.hi(), mem, false);
         self.emit_u8(0x0f);
@@ -2660,17 +3093,9 @@ impl Asm {
         self.emit_u8(lane & 1);
     }
 
-    /// 3-byte VEX FMA3 (`x64-v3`): `vfmadd213{ss,sd,ps,pd} dst, vsrc, src` (`dst = dst * vsrc + src`).
+    /// 3-byte VEX (or 4-byte EVEX for `Xmm16..31`) FMA3: `vfmadd213{ss,sd,ps,pd} dst, vsrc, src`.
     fn vex3_fma(&mut self, is64: bool, op: u8, dst: Xmm, vsrc: Xmm, src: Xmm) {
-        let r_inv = if dst.hi() != 0 { 0 } else { 1 };
-        let b_inv = if src.hi() != 0 { 0 } else { 1 };
-        let w = u8::from(is64);
-        let vvvv = (!vsrc.id()) & 0x0f;
-        self.emit_u8(0xc4);
-        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | 0x02); // map 0F38
-        self.emit_u8((w << 7) | (vvvv << 3) | 0x01); // L=0 (128-bit), pp=01 (66)
-        self.emit_u8(op);
-        self.modrm_reg(dst.lo(), src.lo());
+        self.vex_or_evex_rr(2, 1, is64, is64, dst, Some(vsrc), src, op);
     }
     pub fn vfmadd213ss(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_fma(false, 0xa9, d, a, b);
@@ -2683,6 +3108,54 @@ impl Asm {
     }
     pub fn vfmadd213pd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_fma(true, 0xa8, d, a, b);
+    }
+    pub fn vfnmadd213ss(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(false, 0xad, d, a, b);
+    }
+    pub fn vfnmadd213sd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(true, 0xad, d, a, b);
+    }
+    pub fn vfnmadd213ps(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(false, 0xac, d, a, b);
+    }
+    pub fn vfnmadd213pd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(true, 0xac, d, a, b);
+    }
+    pub fn vfmadd231ps(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(false, 0xb8, d, a, b);
+    }
+    pub fn vfmadd231pd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(true, 0xb8, d, a, b);
+    }
+    pub fn vfnmadd231ps(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(false, 0xbc, d, a, b);
+    }
+    pub fn vfnmadd231pd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(true, 0xbc, d, a, b);
+    }
+    pub fn vfmadd213ps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 16, d, Some(a), mem, 0xa8);
+    }
+    pub fn vfnmadd213ps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 16, d, Some(a), mem, 0xac);
+    }
+    pub fn vfmadd213pd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, true, true, 16, d, Some(a), mem, 0xa8);
+    }
+    pub fn vfnmadd213pd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, true, true, 16, d, Some(a), mem, 0xac);
+    }
+    pub fn vfmadd231ps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 16, d, Some(a), mem, 0xb8);
+    }
+    pub fn vfnmadd231ps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 16, d, Some(a), mem, 0xbc);
+    }
+    pub fn vfmadd231pd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, true, true, 16, d, Some(a), mem, 0xb8);
+    }
+    pub fn vfnmadd231pd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, true, true, 16, d, Some(a), mem, 0xbc);
     }
 
     // ---- AVX2 (256-bit YMM) VEX Encoders + XGETBV + VZEROUPPER ----
@@ -2699,6 +3172,10 @@ impl Asm {
         rm: Xmm,
         op: u8,
     ) {
+        assert!(
+            reg.id() < 16 && rm.id() < 16 && vvvv.is_none_or(|x| x.id() < 16),
+            "VEX 256-bit rr cannot encode Xmm16..31"
+        );
         let r_inv = u8::from(reg.hi() == 0);
         let b_inv = u8::from(rm.hi() == 0);
         let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
@@ -2721,6 +3198,10 @@ impl Asm {
         mem: Mem,
         op: u8,
     ) {
+        assert!(
+            reg.id() < 16 && vvvv.is_none_or(|x| x.id() < 16),
+            "VEX 256-bit mem cannot encode Xmm16..31"
+        );
         let (x_hi, b_hi) = match mem {
             Mem::BaseDisp { base, .. } => (0, base.hi()),
             Mem::BaseIndexDisp { base, index, .. } => (index.hi(), base.hi()),
@@ -2784,6 +3265,10 @@ impl Asm {
         rm: Xmm,
         op: u8,
     ) {
+        assert!(
+            reg.id() < 16 && rm.id() < 16 && vvvv.is_none_or(|x| x.id() < 16),
+            "VEX 128-bit rr cannot encode Xmm16..31: reg={reg:?} vvvv={vvvv:?} rm={rm:?} op={op:#x}"
+        );
         let r_inv = u8::from(reg.hi() == 0);
         let b_inv = u8::from(rm.hi() == 0);
         let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
@@ -2806,6 +3291,10 @@ impl Asm {
         mem: Mem,
         op: u8,
     ) {
+        assert!(
+            reg.id() < 16 && vvvv.is_none_or(|x| x.id() < 16),
+            "VEX 128-bit mem cannot encode Xmm16..31: reg={reg:?} vvvv={vvvv:?} op={op:#x}"
+        );
         let (x_hi, b_hi) = match mem {
             Mem::BaseDisp { base, .. } => (0, base.hi()),
             Mem::BaseIndexDisp { base, index, .. } => (index.hi(), base.hi()),
@@ -2821,8 +3310,99 @@ impl Asm {
         self.modrm_mem(reg.lo(), mem);
     }
 
+    /// Emits a 3-byte VEX prefix (`0xC4`) for 128-bit (`L=0`) RIP-relative memory instructions.
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_xmm_rip(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        op: u8,
+        target: RelocTarget,
+    ) {
+        assert!(
+            reg.id() < 16 && vvvv.is_none_or(|x| x.id() < 16),
+            "VEX 128-bit rip cannot encode Xmm16..31: reg={reg:?} vvvv={vvvv:?} op={op:#x}"
+        );
+        let r_inv = u8::from(reg.hi() == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (1 << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (pp & 0x03));
+        self.emit_u8(op);
+        self.emit_u8((reg.lo() << 3) | 5);
+        let patch_off = self.pos();
+        self.emit_i32(0);
+        let next_ip_off = self.pos();
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
+    }
+
+    /// Emits a 3-byte VEX 128-bit instruction with `reg = Xmm`, optional `vvvv = Xmm`, `rm = Gp`.
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_xmm_gp(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm_gp: Gp,
+        op: u8,
+    ) {
+        assert!(
+            reg.id() < 16 && vvvv.is_none_or(|x| x.id() < 16),
+            "VEX 128-bit xmm_gp cannot encode Xmm16..31"
+        );
+        let r_inv = u8::from(reg.hi() == 0);
+        let b_inv = u8::from(rm_gp.hi() == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (pp & 0x03));
+        self.emit_u8(op);
+        self.modrm_reg(reg.lo(), rm_gp.lo());
+    }
+
+    /// Emits a 3-byte VEX 128-bit instruction with `reg = Gp`, `rm = Xmm` (e.g. `vpmovmskb`/`vmovmskps`/`vpextrw`).
+    fn vex3_gp_xmm(&mut self, map: u8, pp: u8, w: bool, reg_gp: Gp, rm: Xmm, op: u8) {
+        assert!(rm.id() < 16, "VEX 128-bit gp_xmm cannot encode Xmm16..31");
+        let r_inv = u8::from(reg_gp.hi() == 0);
+        let b_inv = u8::from(rm.hi() == 0);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (0x0f << 3) | (pp & 0x03));
+        self.emit_u8(op);
+        self.modrm_reg(reg_gp.lo(), rm.lo());
+    }
+
+    /// Emits a 3-byte VEX 128-bit immediate shift (`VEX.128.66.0F.WIG op /reg_ext ib`).
+    fn vex3_xmm_shift_imm(&mut self, op: u8, reg_ext: u8, dst: Xmm, src: Xmm, imm: u8) {
+        assert!(
+            dst.id() < 16 && src.id() < 16,
+            "VEX 128-bit shift_imm cannot encode Xmm16..31"
+        );
+        let b_inv = u8::from(src.hi() == 0);
+        let v = (!dst.id()) & 0x0f;
+        self.emit_u8(0xc4);
+        self.emit_u8((1 << 7) | (1 << 6) | (b_inv << 5) | 1);
+        self.emit_u8((v << 3) | 1);
+        self.emit_u8(op);
+        self.modrm_reg(reg_ext, src.lo());
+        self.emit_u8(imm);
+    }
+
     /// Emits a 3-byte VEX 256-bit immediate shift (`VEX.256.66.0F.WIG op /reg_ext ib`).
     fn vex3_ymm_shift_imm(&mut self, op: u8, reg_ext: u8, dst: Xmm, src: Xmm, imm: u8) {
+        assert!(
+            dst.id() < 16 && src.id() < 16,
+            "VEX 256-bit shift_imm cannot encode Xmm16..31"
+        );
         let b_inv = u8::from(src.hi() == 0);
         let v = (!dst.id()) & 0x0f;
         self.emit_u8(0xc4);
@@ -2833,84 +3413,787 @@ impl Asm {
         self.emit_u8(imm);
     }
 
-    // ---- AVX 128-bit 3-operand FP / SIMD instructions (L=0, zero upper YMM cleanly) ----
+    /// Emits 128-bit VEX when all XMM operands are `< 16`, or 128-bit EVEX (`AVX-512VL`) when any operand is `Xmm16..Xmm31`.
+    #[allow(clippy::too_many_arguments)]
+    fn vex_or_evex_rr(
+        &mut self,
+        map: u8,
+        pp: u8,
+        vex_w: bool,
+        evex_w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm: Xmm,
+        op: u8,
+    ) {
+        if reg.id() >= 16 || rm.id() >= 16 || vvvv.is_some_and(|x| x.id() >= 16) {
+            self.evex_rr(map, pp, evex_w, 0, reg, vvvv, rm, op);
+        } else {
+            self.vex3_xmm_rr(map, pp, vex_w, reg, vvvv, rm, op);
+        }
+    }
 
+    /// Emits 128-bit VEX memory op when all XMM operands are `< 16`, or 128-bit EVEX when any operand is `Xmm16..Xmm31`.
+    #[allow(clippy::too_many_arguments)]
+    fn vex_or_evex_mem(
+        &mut self,
+        map: u8,
+        pp: u8,
+        vex_w: bool,
+        evex_w: bool,
+        disp8_scale: i32,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        mem: Mem,
+        op: u8,
+    ) {
+        if reg.id() >= 16 || vvvv.is_some_and(|x| x.id() >= 16) {
+            self.evex_mem(map, pp, evex_w, 0, disp8_scale, reg, vvvv, mem, op);
+        } else {
+            self.vex3_xmm_mem(map, pp, vex_w, reg, vvvv, mem, op);
+        }
+    }
+
+    /// Emits 128-bit VEX RIP-relative op when all XMM operands are `< 16`, or 128-bit EVEX when any operand is `Xmm16..Xmm31`.
+    #[allow(clippy::too_many_arguments)]
+    fn vex_or_evex_rip(
+        &mut self,
+        map: u8,
+        pp: u8,
+        vex_w: bool,
+        evex_w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        op: u8,
+        target: RelocTarget,
+    ) {
+        if reg.id() >= 16 || vvvv.is_some_and(|x| x.id() >= 16) {
+            self.evex_rip(map, pp, evex_w, 0, reg, vvvv, op, target);
+        } else {
+            self.vex3_xmm_rip(map, pp, vex_w, reg, vvvv, op, target);
+        }
+    }
+
+    /// Emits 128-bit VEX `reg=Xmm, rm=Gp` when all XMM operands are `< 16`, or 128-bit EVEX for `Xmm16..Xmm31`.
+    #[allow(clippy::too_many_arguments)]
+    fn vex_or_evex_xmm_gp(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm_gp: Gp,
+        op: u8,
+    ) {
+        if reg.id() >= 16 || vvvv.is_some_and(|x| x.id() >= 16) {
+            self.evex_xmm_gp(map, pp, w, reg, vvvv, rm_gp, op);
+        } else {
+            self.vex3_xmm_gp(map, pp, w, reg, vvvv, rm_gp, op);
+        }
+    }
+
+    /// Emits 128-bit VEX `reg=Gp, rm=Xmm` when `rm < 16`, or 128-bit EVEX for `Xmm16..Xmm31`.
+    fn vex_or_evex_gp_xmm(&mut self, map: u8, pp: u8, w: bool, reg_gp: Gp, rm: Xmm, op: u8) {
+        if rm.id() >= 16 {
+            self.evex_gp_xmm(map, pp, w, reg_gp, rm, op);
+        } else {
+            self.vex3_gp_xmm(map, pp, w, reg_gp, rm, op);
+        }
+    }
+
+    /// Emits 128-bit VEX immediate shift when both XMM operands are `< 16`, or 128-bit EVEX for `Xmm16..Xmm31`.
+    fn vex_or_evex_xmm_shift_imm(
+        &mut self,
+        evex_w: bool,
+        op: u8,
+        reg_ext: u8,
+        dst: Xmm,
+        src: Xmm,
+        imm: u8,
+    ) {
+        if dst.id() >= 16 || src.id() >= 16 {
+            self.evex_xmm_shift_imm(evex_w, op, reg_ext, dst, src, imm);
+        } else {
+            self.vex3_xmm_shift_imm(op, reg_ext, dst, src, imm);
+        }
+    }
+
+    // ---- AVX 128-bit 3-operand FP / SIMD instructions (L=0, auto-EVEX for Xmm16..Xmm31) ----
+
+    pub fn vmovaps_rr(&mut self, dst: Xmm, src: Xmm) {
+        if dst != src {
+            self.vex_or_evex_rr(1, 0, false, false, dst, None, src, 0x28);
+        }
+    }
+    pub fn vmovss_xm(&mut self, dst: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 2, false, false, 4, dst, None, mem, 0x10);
+    }
+    pub fn vmovss_mx(&mut self, mem: Mem, src: Xmm) {
+        self.vex_or_evex_mem(1, 2, false, false, 4, src, None, mem, 0x11);
+    }
+    pub fn vmovsd_xm(&mut self, dst: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 3, false, true, 8, dst, None, mem, 0x10);
+    }
+    pub fn vmovsd_mx(&mut self, mem: Mem, src: Xmm) {
+        self.vex_or_evex_mem(1, 3, false, true, 8, src, None, mem, 0x11);
+    }
+    pub fn vmovss_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 2, false, false, dst, None, 0x10, target);
+    }
+    pub fn vmovsd_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 3, false, true, dst, None, 0x10, target);
+    }
+    pub fn vmovdqu_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 2, false, false, dst, None, 0x6f, target);
+    }
+    pub fn vmovd_xr(&mut self, dst: Xmm, src: Gp) {
+        self.vex_or_evex_xmm_gp(1, 1, false, dst, None, src, 0x6e);
+    }
+    pub fn vmovq_xr(&mut self, dst: Xmm, src: Gp) {
+        self.vex_or_evex_xmm_gp(1, 1, true, dst, None, src, 0x6e);
+    }
+    pub fn vmovd_rx(&mut self, dst: Gp, src: Xmm) {
+        self.vex_or_evex_xmm_gp(1, 1, false, src, None, dst, 0x7e);
+    }
+    pub fn vmovq_rx(&mut self, dst: Gp, src: Xmm) {
+        self.vex_or_evex_xmm_gp(1, 1, true, src, None, dst, 0x7e);
+    }
     pub fn vmovdqu_xm(&mut self, dst: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 2, false, dst, None, mem, 0x6f);
+        self.vex_or_evex_mem(1, 2, false, false, 16, dst, None, mem, 0x6f);
     }
     pub fn vmovdqu_mx(&mut self, mem: Mem, src: Xmm) {
-        self.vex3_xmm_mem(1, 2, false, src, None, mem, 0x7f);
+        self.vex_or_evex_mem(1, 2, false, false, 16, src, None, mem, 0x7f);
     }
-    /// `vpshufd xmm, xmm, imm8` (`VEX.128.66.0F.WIG 70 /r ib`).
+    /// `vpshufd xmm, xmm, imm8` (`VEX.128.66.0F.WIG 70 /r ib` or `EVEX.128.66.0F.W0 70 /r ib`).
     pub fn vpshufd(&mut self, d: Xmm, s: Xmm, imm: u8) {
-        self.vex3_xmm_rr(1, 1, false, d, None, s, 0x70);
+        self.vex_or_evex_rr(1, 1, false, false, d, None, s, 0x70);
         self.emit_u8(imm);
     }
+    pub fn vaddps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x58);
+    }
+    pub fn vsubps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x5c);
+    }
+    pub fn vmulps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x59);
+    }
+    pub fn vdivps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x5e);
+    }
+    pub fn vminps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x5d);
+    }
+    pub fn vmaxps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x5f);
+    }
+    pub fn vaddps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 0, false, false, 16, d, Some(a), mem, 0x58);
+    }
+    pub fn vsubps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 0, false, false, 16, d, Some(a), mem, 0x5c);
+    }
+    pub fn vmulps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 0, false, false, 16, d, Some(a), mem, 0x59);
+    }
+    pub fn vdivps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 0, false, false, 16, d, Some(a), mem, 0x5e);
+    }
+    pub fn vminps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 0, false, false, 16, d, Some(a), mem, 0x5d);
+    }
+    pub fn vmaxps_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 0, false, false, 16, d, Some(a), mem, 0x5f);
+    }
+    pub fn vsqrtps_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, None, s, 0x51);
+    }
+    pub fn vsqrtpd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, None, s, 0x51);
+    }
+    pub fn vcmpps_xxxi(&mut self, d: Xmm, a: Xmm, b: Xmm, pred: u8) {
+        self.vex3_xmm_rr(1, 0, false, d, Some(a), b, 0xc2);
+        self.emit_u8(pred);
+    }
+    pub fn vcmppd_xxxi(&mut self, d: Xmm, a: Xmm, b: Xmm, pred: u8) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0xc2);
+        self.emit_u8(pred);
+    }
+    pub fn vandps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x54);
+    }
+    pub fn vandnps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x55);
+    }
+    pub fn vorps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x56);
+    }
+    pub fn vxorps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x57);
+    }
+    pub fn vandps_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 0, false, false, d, Some(a), 0x54, target);
+    }
+    pub fn vxorps_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 0, false, false, d, Some(a), 0x57, target);
+    }
+    pub fn vandpd_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 1, false, true, d, Some(a), 0x54, target);
+    }
+    pub fn vxorpd_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 1, false, true, d, Some(a), 0x57, target);
+    }
+    pub fn vroundps_xxi(&mut self, d: Xmm, s: Xmm, mode: u8) {
+        self.vex3_xmm_rr(3, 1, false, d, None, s, 0x08);
+        self.emit_u8(mode);
+    }
+    pub fn vroundpd_xxi(&mut self, d: Xmm, s: Xmm, mode: u8) {
+        self.vex3_xmm_rr(3, 1, false, d, None, s, 0x09);
+        self.emit_u8(mode);
+    }
+    pub fn vcvtdq2ps_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, None, s, 0x5b);
+    }
+    pub fn vcvttps2dq_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 2, false, false, d, None, s, 0x5b);
+    }
+    pub fn vcvtdq2pd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 2, false, false, d, None, s, 0xe6);
+    }
+    pub fn vcvttpd2dq_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, None, s, 0xe6);
+    }
+    pub fn vcvtps2pd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, None, s, 0x5a);
+    }
+    pub fn vcvtpd2ps_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, None, s, 0x5a);
+    }
+    pub fn vaddpd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0x58);
+    }
+    pub fn vsubpd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0x5c);
+    }
+    pub fn vmulpd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0x59);
+    }
+    pub fn vdivpd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0x5e);
+    }
+    pub fn vminpd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0x5d);
+    }
+    pub fn vmaxpd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0x5f);
+    }
+    // VEX/EVEX 128-bit integer arithmetic / bitwise / cmp / shuffle / broadcast / shift
+    pub fn vpand_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xdb);
+    }
+    pub fn vpandn_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xdf);
+    }
+    pub fn vpor_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xeb);
+    }
+    pub fn vpxor_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xef);
+    }
+    pub fn vpand_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xdb);
+    }
+    pub fn vpandn_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xdf);
+    }
+    pub fn vpor_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xeb);
+    }
+    pub fn vpxor_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xef);
+    }
+    pub fn vpaddb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xfc);
+    }
+    pub fn vpaddw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xfd);
+    }
+    pub fn vpaddd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xfe);
+    }
+    pub fn vpaddq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0xd4);
+    }
+    pub fn vpaddb_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xfc);
+    }
+    pub fn vpaddw_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xfd);
+    }
+    pub fn vpaddd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xfe);
+    }
+    pub fn vpaddq_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0xd4);
+    }
+    pub fn vpsubb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xf8);
+    }
+    pub fn vpsubw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xf9);
+    }
+    pub fn vpsubd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xfa);
+    }
+    pub fn vpsubq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0xfb);
+    }
+    pub fn vpsubb_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xf8);
+    }
+    pub fn vpsubw_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xf9);
+    }
+    pub fn vpsubd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xfa);
+    }
+    pub fn vpsubq_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, true, 16, d, Some(a), mem, 0xfb);
+    }
+    pub fn vpaddsb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xec);
+    }
+    pub fn vpaddsw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xed);
+    }
+    pub fn vpaddusb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xdc);
+    }
+    pub fn vpaddusw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xdd);
+    }
+    pub fn vpsubsb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xe8);
+    }
+    pub fn vpsubsw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xe9);
+    }
+    pub fn vpsubusb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xd8);
+    }
+    pub fn vpsubusw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xd9);
+    }
+    pub fn vpmullw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xd5);
+    }
+    pub fn vpmullw_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 1, false, false, 16, d, Some(a), mem, 0xd5);
+    }
+    pub fn vpmulld_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x40);
+    }
+    pub fn vpmulld_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 16, d, Some(a), mem, 0x40);
+    }
+    pub fn vpmuldq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, true, d, Some(a), b, 0x28);
+    }
+    pub fn vpmuludq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0xf4);
+    }
+    pub fn vpmulhrsw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x0b);
+    }
+    pub fn vpmaddwd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xf5);
+    }
+    pub fn vpmaddubsw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x04);
+    }
+    pub fn vpsadbw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xf6);
+    }
+    pub fn vpminsb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x38);
+    }
+    pub fn vpminub_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xda);
+    }
+    pub fn vpminsw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xea);
+    }
+    pub fn vpminuw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x3a);
+    }
+    pub fn vpminsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x39);
+    }
+    pub fn vpminud_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x3b);
+    }
+    pub fn vpmaxsb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x3c);
+    }
+    pub fn vpmaxub_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xde);
+    }
+    pub fn vpmaxsw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xee);
+    }
+    pub fn vpmaxuw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x3e);
+    }
+    pub fn vpmaxsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x3d);
+    }
+    pub fn vpmaxud_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x3f);
+    }
+    pub fn vpavgb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xe0);
+    }
+    pub fn vpavgw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0xe3);
+    }
+    pub fn vpabsb_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x1c);
+    }
+    pub fn vpabsw_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x1d);
+    }
+    pub fn vpabsd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x1e);
+    }
+    pub fn vpcmpeqb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x74);
+    }
+    pub fn vpcmpeqw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x75);
+    }
+    pub fn vpcmpeqd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x76);
+    }
+    pub fn vpcmpeqq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(2, 1, false, d, Some(a), b, 0x29);
+    }
+    pub fn vpcmpgtb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x64);
+    }
+    pub fn vpcmpgtw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x65);
+    }
+    pub fn vpcmpgtd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x66);
+    }
+    pub fn vpcmpgtq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(2, 1, false, d, Some(a), b, 0x37);
+    }
+    pub fn vpacksswb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x63);
+    }
+    pub fn vpackuswb_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x67);
+    }
+    pub fn vpackssdw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x6b);
+    }
+    pub fn vpackusdw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), b, 0x2b);
+    }
+    pub fn vpmovsxbw_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x20);
+    }
+    pub fn vpmovzxbw_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x30);
+    }
+    pub fn vpmovsxwd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x23);
+    }
+    pub fn vpmovzxwd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x33);
+    }
+    pub fn vpmovsxdq_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x25);
+    }
+    pub fn vpmovzxdq_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x35);
+    }
+    pub fn vpmovsxbw_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 8, d, None, mem, 0x20);
+    }
+    pub fn vpmovzxbw_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 8, d, None, mem, 0x30);
+    }
+    pub fn vpmovsxwd_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 8, d, None, mem, 0x23);
+    }
+    pub fn vpmovzxwd_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 8, d, None, mem, 0x33);
+    }
+    pub fn vpmovsxdq_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 8, d, None, mem, 0x25);
+    }
+    pub fn vpmovzxdq_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 8, d, None, mem, 0x35);
+    }
+    pub fn vunpcklps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x14);
+    }
+    pub fn vunpckhps_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0x15);
+    }
+    pub fn vunpcklpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x14);
+    }
+    pub fn vunpckhpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x15);
+    }
+    pub fn vshufps_xxxi(&mut self, d: Xmm, a: Xmm, b: Xmm, imm: u8) {
+        self.vex_or_evex_rr(1, 0, false, false, d, Some(a), b, 0xc6);
+        self.emit_u8(imm);
+    }
+    pub fn vshufpd_xxxi(&mut self, d: Xmm, a: Xmm, b: Xmm, imm: u8) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0xc6);
+        self.emit_u8(imm);
+    }
+    pub fn vpunpcklbw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x60);
+    }
+    pub fn vpunpckhbw_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x68);
+    }
+    pub fn vpunpcklwd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x61);
+    }
+    pub fn vpunpckhwd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x69);
+    }
+    pub fn vpunpckldq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x62);
+    }
+    pub fn vpunpckhdq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), b, 0x6a);
+    }
+    pub fn vpunpcklqdq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x6c);
+    }
+    pub fn vpunpckhqdq_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x6d);
+    }
+    pub fn vpalignr_xxxi(&mut self, d: Xmm, hi: Xmm, lo: Xmm, imm: u8) {
+        self.vex_or_evex_rr(3, 1, false, false, d, Some(hi), lo, 0x0f);
+        self.emit_u8(imm);
+    }
+    pub fn vpshufb_xxx(&mut self, d: Xmm, a: Xmm, mask: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, Some(a), mask, 0x00);
+    }
+    pub fn vpshufb_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(2, 1, false, false, d, Some(a), 0x00, target);
+    }
+    pub fn vpaddusb_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 1, false, false, d, Some(a), 0xdc, target);
+    }
+    pub fn vpand_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 1, false, false, d, Some(a), 0xdb, target);
+    }
+    pub fn vmulps_xx_rip(&mut self, d: Xmm, a: Xmm, target: RelocTarget) {
+        self.vex_or_evex_rip(1, 0, false, false, d, Some(a), 0x59, target);
+    }
+    pub fn vbroadcastss_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x18);
+    }
+    pub fn vbroadcastss_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 4, d, None, mem, 0x18);
+    }
+    pub fn vpbroadcastb_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x78);
+    }
+    pub fn vpbroadcastb_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 1, d, None, mem, 0x78);
+    }
+    pub fn vpbroadcastw_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x79);
+    }
+    pub fn vpbroadcastw_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 2, d, None, mem, 0x79);
+    }
+    pub fn vpbroadcastd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x58);
+    }
+    pub fn vpbroadcastd_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(2, 1, false, false, 4, d, None, mem, 0x58);
+    }
+    pub fn vpbroadcastq_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, true, d, None, s, 0x59);
+    }
+    pub fn vmovddup_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(1, 3, false, true, d, None, s, 0x12);
+    }
+    pub fn vmovddup_xm(&mut self, d: Xmm, mem: Mem) {
+        self.vex_or_evex_mem(1, 3, false, true, 8, d, None, mem, 0x12);
+    }
+    pub fn vpsllw_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), cnt, 0xf1);
+    }
+    pub fn vpsrlw_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), cnt, 0xd1);
+    }
+    pub fn vpsraw_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), cnt, 0xe1);
+    }
+    pub fn vpslld_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), cnt, 0xf2);
+    }
+    pub fn vpsrld_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), cnt, 0xd2);
+    }
+    pub fn vpsrad_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, false, d, Some(a), cnt, 0xe2);
+    }
+    pub fn vpsllq_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), cnt, 0xf3);
+    }
+    pub fn vpsrlq_xxx(&mut self, d: Xmm, a: Xmm, cnt: Xmm) {
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), cnt, 0xd3);
+    }
+    pub fn vpsllw_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x71, 6, d, s, imm);
+    }
+    pub fn vpsrlw_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x71, 2, d, s, imm);
+    }
+    pub fn vpsraw_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x71, 4, d, s, imm);
+    }
+    pub fn vpslld_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x72, 6, d, s, imm);
+    }
+    pub fn vpsrld_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x72, 2, d, s, imm);
+    }
+    pub fn vpsrad_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x72, 4, d, s, imm);
+    }
+    pub fn vpsllq_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(true, 0x73, 6, d, s, imm);
+    }
+    pub fn vpsrlq_xxi(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex_or_evex_xmm_shift_imm(true, 0x73, 2, d, s, imm);
+    }
+    pub fn vpsrldq_xxi(&mut self, d: Xmm, s: Xmm, imm_bytes: u8) {
+        self.vex_or_evex_xmm_shift_imm(false, 0x73, 3, d, s, imm_bytes);
+    }
+    pub fn vptest(&mut self, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(2, 1, false, a, None, b, 0x17);
+    }
+    pub fn vpmovmskb(&mut self, dst: Gp, src: Xmm) {
+        self.vex3_gp_xmm(1, 1, false, dst, src, 0xd7);
+    }
+    pub fn vmovmskps(&mut self, dst: Gp, src: Xmm) {
+        self.vex3_gp_xmm(1, 0, false, dst, src, 0x50);
+    }
+    pub fn vmovmskpd(&mut self, dst: Gp, src: Xmm) {
+        self.vex3_gp_xmm(1, 1, false, dst, src, 0x50);
+    }
+    pub fn vpinsrb(&mut self, d: Xmm, v: Xmm, src: Gp, lane: u8) {
+        self.vex_or_evex_xmm_gp(3, 1, false, d, Some(v), src, 0x20);
+        self.emit_u8(lane & 15);
+    }
+    pub fn vpinsrw(&mut self, d: Xmm, v: Xmm, src: Gp, lane: u8) {
+        self.vex_or_evex_xmm_gp(1, 1, false, d, Some(v), src, 0xc4);
+        self.emit_u8(lane & 7);
+    }
+    pub fn vpinsrd(&mut self, d: Xmm, v: Xmm, src: Gp, lane: u8) {
+        self.vex_or_evex_xmm_gp(3, 1, false, d, Some(v), src, 0x22);
+        self.emit_u8(lane & 3);
+    }
+    pub fn vpinsrq(&mut self, d: Xmm, v: Xmm, src: Gp, lane: u8) {
+        self.vex_or_evex_xmm_gp(3, 1, true, d, Some(v), src, 0x22);
+        self.emit_u8(lane & 1);
+    }
+    pub fn vpextrb(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.vex_or_evex_xmm_gp(3, 1, false, src, None, dst, 0x14);
+        self.emit_u8(lane & 15);
+    }
+    pub fn vpextrw(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.vex_or_evex_gp_xmm(1, 1, false, dst, src, 0xc5);
+        self.emit_u8(lane & 7);
+    }
+    pub fn vpextrd(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.vex_or_evex_xmm_gp(3, 1, false, src, None, dst, 0x16);
+        self.emit_u8(lane & 3);
+    }
+    pub fn vpextrq(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.vex_or_evex_xmm_gp(3, 1, true, src, None, dst, 0x16);
+        self.emit_u8(lane & 1);
+    }
     pub fn vaddss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x58);
+        self.vex_or_evex_rr(1, 2, false, false, d, Some(a), b, 0x58);
     }
     pub fn vsubss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x5c);
+        self.vex_or_evex_rr(1, 2, false, false, d, Some(a), b, 0x5c);
     }
     pub fn vmulss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x59);
+        self.vex_or_evex_rr(1, 2, false, false, d, Some(a), b, 0x59);
     }
     pub fn vdivss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x5e);
+        self.vex_or_evex_rr(1, 2, false, false, d, Some(a), b, 0x5e);
     }
     pub fn vaddss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x58);
+        self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(a), mem, 0x58);
     }
     pub fn vsubss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x5c);
+        self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(a), mem, 0x5c);
     }
     pub fn vmulss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x59);
+        self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(a), mem, 0x59);
     }
     pub fn vdivss_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 2, false, d, Some(a), mem, 0x5e);
+        self.vex_or_evex_mem(1, 2, false, false, 4, d, Some(a), mem, 0x5e);
     }
     pub fn vaddsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x58);
+        self.vex_or_evex_rr(1, 3, false, true, d, Some(a), b, 0x58);
     }
     pub fn vsubsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x5c);
+        self.vex_or_evex_rr(1, 3, false, true, d, Some(a), b, 0x5c);
     }
     pub fn vmulsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x59);
+        self.vex_or_evex_rr(1, 3, false, true, d, Some(a), b, 0x59);
     }
     pub fn vdivsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x5e);
+        self.vex_or_evex_rr(1, 3, false, true, d, Some(a), b, 0x5e);
     }
     pub fn vaddsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x58);
+        self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(a), mem, 0x58);
     }
     pub fn vsubsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x5c);
+        self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(a), mem, 0x5c);
     }
     pub fn vmulsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x59);
+        self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(a), mem, 0x59);
     }
     pub fn vdivsd_xxm(&mut self, d: Xmm, a: Xmm, mem: Mem) {
-        self.vex3_xmm_mem(1, 3, false, d, Some(a), mem, 0x5e);
+        self.vex_or_evex_mem(1, 3, false, true, 8, d, Some(a), mem, 0x5e);
     }
     pub fn vaddpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x58);
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x58);
     }
     pub fn vsubpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5c);
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x5c);
     }
     pub fn vmulpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x59);
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x59);
     }
     pub fn vdivpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5e);
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x5e);
     }
     pub fn vminpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5d);
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x5d);
     }
     pub fn vmaxpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
-        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5f);
+        self.vex_or_evex_rr(1, 1, false, true, d, Some(a), b, 0x5f);
     }
 
     // ---- AVX2 256-bit YMM byte-stencil & f64x4 instructions ----
@@ -3071,6 +4354,77 @@ impl Asm {
     pub fn vpsubq_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
         self.vex3_ymm_mem(1, 1, false, dst, Some(a), mem, 0xfb);
     }
+    /// `vfmadd231ps ymm, ymm, ymm` (`VEX.256.66.0F38.W0 B8 /r`).
+    pub fn vfmadd231ps_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, dst, Some(a), b, 0xb8);
+    }
+    /// `vfmadd231ps ymm, ymm, m256` (`VEX.256.66.0F38.W0 B8 /r`).
+    pub fn vfmadd231ps_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(2, 1, false, dst, Some(a), mem, 0xb8);
+    }
+    /// `vfnmadd231ps ymm, ymm, ymm` (`VEX.256.66.0F38.W0 BC /r`).
+    pub fn vfnmadd231ps_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, dst, Some(a), b, 0xbc);
+    }
+    /// `vfnmadd231ps ymm, ymm, m256` (`VEX.256.66.0F38.W0 BC /r`).
+    pub fn vfnmadd231ps_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(2, 1, false, dst, Some(a), mem, 0xbc);
+    }
+    /// `vfmadd231pd ymm, ymm, ymm` (`VEX.256.66.0F38.W1 B8 /r`).
+    pub fn vfmadd231pd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(2, 1, true, dst, Some(a), b, 0xb8);
+    }
+    /// `vfmadd231pd ymm, ymm, m256` (`VEX.256.66.0F38.W1 B8 /r`).
+    pub fn vfmadd231pd_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(2, 1, true, dst, Some(a), mem, 0xb8);
+    }
+    /// `vfnmadd231pd ymm, ymm, ymm` (`VEX.256.66.0F38.W1 BC /r`).
+    pub fn vfnmadd231pd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(2, 1, true, dst, Some(a), b, 0xbc);
+    }
+    /// `vfnmadd231pd ymm, ymm, m256` (`VEX.256.66.0F38.W1 BC /r`).
+    pub fn vfnmadd231pd_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(2, 1, true, dst, Some(a), mem, 0xbc);
+    }
+    /// `vinsertf128 ymm, ymm, xmm, imm8` (`VEX.256.66.0F3A.W0 18 /r ib`).
+    pub fn vinsertf128_yyx(&mut self, dst: Xmm, a: Xmm, b: Xmm, imm: u8) {
+        self.vex3_ymm_rr(3, 1, false, dst, Some(a), b, 0x18);
+        self.emit_u8(imm & 1);
+    }
+    /// `vcmpeqps ymm, ymm, ymm` (`VEX.256.0F.WIG C2 /r 00`).
+    pub fn vcmpeqps_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 0, false, dst, Some(a), b, 0xc2);
+        self.emit_u8(0);
+    }
+    /// `vcmpeqpd ymm, ymm, ymm` (`VEX.256.66.0F.WIG C2 /r 00`).
+    pub fn vcmpeqpd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0xc2);
+        self.emit_u8(0);
+    }
+    /// `vblendvps ymm, ymm, ymm, ymm` (`VEX.256.66.0F3A.W0 4A /r /is4`).
+    pub fn vblendvps_yyyy(&mut self, dst: Xmm, a: Xmm, b: Xmm, mask: Xmm) {
+        assert!(mask.id() < 16);
+        self.vex3_ymm_rr(3, 1, false, dst, Some(a), b, 0x4a);
+        self.emit_u8(mask.id() << 4);
+    }
+    /// `vblendvpd ymm, ymm, ymm, ymm` (`VEX.256.66.0F3A.W0 4B /r /is4`).
+    pub fn vblendvpd_yyyy(&mut self, dst: Xmm, a: Xmm, b: Xmm, mask: Xmm) {
+        assert!(mask.id() < 16);
+        self.vex3_ymm_rr(3, 1, false, dst, Some(a), b, 0x4b);
+        self.emit_u8(mask.id() << 4);
+    }
+    /// `vblendvps xmm, xmm, xmm, xmm` (`VEX.128.66.0F3A.W0 4A /r /is4`).
+    pub fn vblendvps_xxxx(&mut self, dst: Xmm, a: Xmm, b: Xmm, mask: Xmm) {
+        assert!(mask.id() < 16);
+        self.vex3_xmm_rr(3, 1, false, dst, Some(a), b, 0x4a);
+        self.emit_u8(mask.id() << 4);
+    }
+    /// `vblendvpd xmm, xmm, xmm, xmm` (`VEX.128.66.0F3A.W0 4B /r /is4`).
+    pub fn vblendvpd_xxxx(&mut self, dst: Xmm, a: Xmm, b: Xmm, mask: Xmm) {
+        assert!(mask.id() < 16);
+        self.vex3_xmm_rr(3, 1, false, dst, Some(a), b, 0x4b);
+        self.emit_u8(mask.id() << 4);
+    }
 
     // ---- AVX-512 (EVEX 512-bit ZMM + 128-bit VL `vpternlogd`) Encoders (`x64-v4`) ----
 
@@ -3136,6 +4490,33 @@ impl Asm {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn evex_rr_mask(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        ll: u8,
+        k_mask: u8,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm: Xmm,
+        op: u8,
+    ) {
+        let r_inv = u8::from(reg.hi() == 0);
+        let x_inv = u8::from(rm.hi4() == 0); // EVEX.X = ~rm[4] for reg-reg
+        let b_inv = u8::from(rm.hi() == 0);
+        let rp_inv = u8::from(reg.hi4() == 0); // EVEX.R' = ~reg[4]
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        let vp_inv = vvvv.map_or(1u8, |x| u8::from(x.hi4() == 0)); // EVEX.V' = ~vvvv[4]
+        self.emit_u8(0x62);
+        self.emit_u8((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0x03));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
+        self.emit_u8(((ll & 0x03) << 5) | (vp_inv << 3) | (k_mask & 0x07));
+        self.emit_u8(op);
+        self.modrm_reg(reg.lo(), rm.lo());
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn evex_rr(
         &mut self,
         map: u8,
@@ -3147,15 +4528,7 @@ impl Asm {
         rm: Xmm,
         op: u8,
     ) {
-        let r_inv = u8::from(reg.hi() == 0);
-        let b_inv = u8::from(rm.hi() == 0);
-        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
-        self.emit_u8(0x62);
-        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (1 << 4) | (map & 0x03));
-        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
-        self.emit_u8(((ll & 0x03) << 5) | (1 << 3));
-        self.emit_u8(op);
-        self.modrm_reg(reg.lo(), rm.lo());
+        self.evex_rr_mask(map, pp, w, ll, 0, reg, vvvv, rm, op);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3178,19 +4551,111 @@ impl Asm {
         let r_inv = u8::from(reg.hi() == 0);
         let x_inv = u8::from(x_hi == 0);
         let b_inv = u8::from(b_hi == 0);
+        let rp_inv = u8::from(reg.hi4() == 0);
         let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        let vp_inv = vvvv.map_or(1u8, |x| u8::from(x.hi4() == 0));
         self.emit_u8(0x62);
-        self.emit_u8((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (1 << 4) | (map & 0x03));
+        self.emit_u8((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0x03));
         self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
-        self.emit_u8(((ll & 0x03) << 5) | (1 << 3));
+        self.emit_u8(((ll & 0x03) << 5) | (vp_inv << 3));
         self.emit_u8(op);
         self.modrm_mem_evex(reg.lo(), mem, disp8_scale);
+    }
+
+    /// Emits a 4-byte EVEX RIP-relative memory instruction (full 5-bit `reg` / `vvvv`, raw `disp32`).
+    #[allow(clippy::too_many_arguments)]
+    fn evex_rip(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        ll: u8,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        op: u8,
+        target: RelocTarget,
+    ) {
+        let r_inv = u8::from(reg.hi() == 0);
+        let rp_inv = u8::from(reg.hi4() == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        let vp_inv = vvvv.map_or(1u8, |x| u8::from(x.hi4() == 0));
+        self.emit_u8(0x62);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (1 << 5) | (rp_inv << 4) | (map & 0x03));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
+        self.emit_u8(((ll & 0x03) << 5) | (vp_inv << 3));
+        self.emit_u8(op);
+        self.emit_u8((reg.lo() << 3) | 5);
+        let patch_off = self.pos();
+        self.emit_i32(0);
+        let next_ip_off = self.pos();
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
+    }
+
+    /// Emits a 4-byte EVEX 128-bit instruction with `reg = Xmm`, optional `vvvv = Xmm`, `rm = Gp`.
+    #[allow(clippy::too_many_arguments)]
+    fn evex_xmm_gp(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm_gp: Gp,
+        op: u8,
+    ) {
+        let r_inv = u8::from(reg.hi() == 0);
+        let b_inv = u8::from(rm_gp.hi() == 0);
+        let rp_inv = u8::from(reg.hi4() == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        let vp_inv = vvvv.map_or(1u8, |x| u8::from(x.hi4() == 0));
+        self.emit_u8(0x62);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0x03));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
+        self.emit_u8(vp_inv << 3);
+        self.emit_u8(op);
+        self.modrm_reg(reg.lo(), rm_gp.lo());
+    }
+
+    /// Emits a 4-byte EVEX 128-bit instruction with `reg = Gp`, `rm = Xmm` (e.g. `vcvttss2si`, `vpextrw`).
+    fn evex_gp_xmm(&mut self, map: u8, pp: u8, w: bool, reg_gp: Gp, rm: Xmm, op: u8) {
+        let r_inv = u8::from(reg_gp.hi() == 0);
+        let x_inv = u8::from(rm.hi4() == 0);
+        let b_inv = u8::from(rm.hi() == 0);
+        self.emit_u8(0x62);
+        self.emit_u8((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (1 << 4) | (map & 0x03));
+        self.emit_u8((u8::from(w) << 7) | (0x0f << 3) | (1 << 2) | (pp & 0x03));
+        self.emit_u8(1 << 3);
+        self.emit_u8(op);
+        self.modrm_reg(reg_gp.lo(), rm.lo());
+    }
+
+    /// Emits a 4-byte EVEX 128-bit immediate shift (`EVEX.128.66.0F.{W0/W1} op /reg_ext ib`, `vvvv=dst`, `rm=src`).
+    fn evex_xmm_shift_imm(&mut self, w: bool, op: u8, reg_ext: u8, dst: Xmm, src: Xmm, imm: u8) {
+        let x_inv = u8::from(src.hi4() == 0);
+        let b_inv = u8::from(src.hi() == 0);
+        let v = (!dst.id()) & 0x0f;
+        let vp_inv = u8::from(dst.hi4() == 0);
+        self.emit_u8(0x62);
+        self.emit_u8((1 << 7) | (x_inv << 6) | (b_inv << 5) | (1 << 4) | 1);
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | 1);
+        self.emit_u8(vp_inv << 3);
+        self.emit_u8(op);
+        self.modrm_reg(reg_ext, src.lo());
+        self.emit_u8(imm);
     }
 
     /// `vpternlogd xmm, xmm, xmm, imm8` (`EVEX.128.66.0F3A.W0 25 /r ib`; AVX-512VL).
     pub fn vpternlogd_xxx(&mut self, dst: Xmm, vsrc: Xmm, rm: Xmm, imm: u8) {
         self.evex_rr(3, 1, false, 0, dst, Some(vsrc), rm, 0x25);
         self.emit_u8(imm);
+    }
+    /// `vcvtudq2ps xmm, xmm` (`EVEX.128.F2.0F.W0 7A /r`; AVX-512VL).
+    pub fn vcvtudq2ps_xx(&mut self, dst: Xmm, src: Xmm) {
+        self.evex_rr(1, 3, false, 0, dst, None, src, 0x7a);
     }
     /// `vbroadcastsd zmm, xmm` (`EVEX.512.66.0F38.W1 19 /r`).
     pub fn vbroadcastsd_zx(&mut self, dst: Xmm, src: Xmm) {
@@ -3366,6 +4831,66 @@ impl Asm {
     pub fn vextracti64x4_yz(&mut self, dst: Xmm, src: Xmm, imm: u8) {
         self.evex_rr(3, 1, true, 2, src, None, dst, 0x3b);
         self.emit_u8(imm & 1);
+    }
+    /// `vshufi32x4 zmm, zmm, zmm, imm8` (`EVEX.512.66.0F3A.W0 43 /r ib`).
+    pub fn vshufi32x4_zzz(&mut self, dst: Xmm, a: Xmm, b: Xmm, imm: u8) {
+        self.evex_rr(3, 1, false, 2, dst, Some(a), b, 0x43);
+        self.emit_u8(imm);
+    }
+    /// `vinsertf32x4 ymm, ymm, xmm, imm8` (`EVEX.256.66.0F3A.W0 18 /r ib`; AVX-512VL).
+    pub fn vinsertf32x4_yyx(&mut self, dst: Xmm, a: Xmm, b: Xmm, imm: u8) {
+        self.evex_rr(3, 1, false, 1, dst, Some(a), b, 0x18);
+        self.emit_u8(imm & 1);
+    }
+    /// `vfmadd231ps zmm, zmm, zmm` (`EVEX.512.66.0F38.W0 B8 /r`).
+    pub fn vfmadd231ps_zzz(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.evex_rr(2, 1, false, 2, dst, Some(a), b, 0xb8);
+    }
+    /// `vfmadd231ps zmm, zmm, m512` (`EVEX.512.66.0F38.W0 B8 /r`).
+    pub fn vfmadd231ps_zzm(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.evex_mem(2, 1, false, 2, 64, dst, Some(a), mem, 0xb8);
+    }
+    /// `vfnmadd231ps zmm, zmm, zmm` (`EVEX.512.66.0F38.W0 BC /r`).
+    pub fn vfnmadd231ps_zzz(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.evex_rr(2, 1, false, 2, dst, Some(a), b, 0xbc);
+    }
+    /// `vfnmadd231ps zmm, zmm, m512` (`EVEX.512.66.0F38.W0 BC /r`).
+    pub fn vfnmadd231ps_zzm(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.evex_mem(2, 1, false, 2, 64, dst, Some(a), mem, 0xbc);
+    }
+    /// `vfmadd231pd zmm, zmm, zmm` (`EVEX.512.66.0F38.W1 B8 /r`).
+    pub fn vfmadd231pd_zzz(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.evex_rr(2, 1, true, 2, dst, Some(a), b, 0xb8);
+    }
+    /// `vfmadd231pd zmm, zmm, m512` (`EVEX.512.66.0F38.W1 B8 /r`).
+    pub fn vfmadd231pd_zzm(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.evex_mem(2, 1, true, 2, 64, dst, Some(a), mem, 0xb8);
+    }
+    /// `vfnmadd231pd zmm, zmm, zmm` (`EVEX.512.66.0F38.W1 BC /r`).
+    pub fn vfnmadd231pd_zzz(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.evex_rr(2, 1, true, 2, dst, Some(a), b, 0xbc);
+    }
+    /// `vfnmadd231pd zmm, zmm, m512` (`EVEX.512.66.0F38.W1 BC /r`).
+    pub fn vfnmadd231pd_zzm(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.evex_mem(2, 1, true, 2, 64, dst, Some(a), mem, 0xbc);
+    }
+    /// `vcmpps k1, zmm/ymm/xmm, zmm/ymm/xmm, imm8` (`EVEX.{128,256,512}.0F.W0 C2 /r ib`; `ll`: 0=128, 1=256, 2=512).
+    pub fn vcmpps_k1_evex(&mut self, ll: u8, a: Xmm, b: Xmm, imm: u8) {
+        self.evex_rr(1, 0, false, ll, Xmm::Xmm1, Some(a), b, 0xc2);
+        self.emit_u8(imm);
+    }
+    /// `vcmppd k1, zmm/ymm/xmm, zmm/ymm/xmm, imm8` (`EVEX.{128,256,512}.66.0F.W1 C2 /r ib`; `ll`: 0=128, 1=256, 2=512).
+    pub fn vcmppd_k1_evex(&mut self, ll: u8, a: Xmm, b: Xmm, imm: u8) {
+        self.evex_rr(1, 1, true, ll, Xmm::Xmm1, Some(a), b, 0xc2);
+        self.emit_u8(imm);
+    }
+    /// `vmovaps zmm/ymm/xmm {k1}, zmm/ymm/xmm` (`EVEX.{128,256,512}.0F.W0 28 /r`, merge-masked with `k1`).
+    pub fn vmovaps_k1_evex(&mut self, ll: u8, dst: Xmm, src: Xmm) {
+        self.evex_rr_mask(1, 0, false, ll, 1, dst, None, src, 0x28);
+    }
+    /// `vmovapd zmm/ymm/xmm {k1}, zmm/ymm/xmm` (`EVEX.{128,256,512}.66.0F.W1 28 /r`, merge-masked with `k1`).
+    pub fn vmovapd_k1_evex(&mut self, ll: u8, dst: Xmm, src: Xmm) {
+        self.evex_rr_mask(1, 1, true, ll, 1, dst, None, src, 0x28);
     }
 
     // ---- CPUID, XGETBV, MXCSR, and portable BSR/BSF ----

@@ -795,6 +795,15 @@ pub enum Op {
         rhs_off: u64,
         rhs_is_splat: bool,
     },
+    /// Bounds-checked-by-caller contiguous 2× (`32 B`, `YMM`) or 4× (`64 B`, `ZMM` / 2×`YMM`)
+    /// widened `v128` elementwise load→compute→store chain described by `IrFunc::wide_chains[desc_idx]`.
+    /// `args` holds `[dst_addr, load_addr_0..n_loads, bcast_v128_0..n_bcasts]`.
+    /// When `desc.need_overlap_check` is set, lowering checks partial overlap against `dst` and
+    /// falls back to exact original lane order (`16 B` chunks) on overlap.
+    SlpWideChain {
+        desc_idx: u32,
+        args: ValRange,
+    },
     /// Bounds-checked-by-caller, non-overlapping (or exact-same-base) `f64` AXPY loop over
     /// `k in 0..count` (`count: I32` elements):
     /// `mem[dst + k*8] = mem[dst + k*8] (+/-) (mem[src + k*8] * scale)` (strictly bit-exact
@@ -971,6 +980,7 @@ impl Op {
             | Op::MemFillConst { .. }
             | Op::MemByteBlur3Div { .. }
             | Op::F64x4BinMem { .. }
+            | Op::SlpWideChain { .. }
             | Op::F64AxpyLoop { .. }
             | Op::VecElemLoop { .. }
             | Op::VecReduceLoop { .. }
@@ -1154,6 +1164,11 @@ impl Op {
                 f(dst);
                 f(lhs);
                 f(rhs);
+            }
+            Op::SlpWideChain { args, .. } => {
+                for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
+                    f(v);
+                }
             }
             Op::F64AxpyLoop {
                 dst,
@@ -1416,6 +1431,154 @@ impl Block {
     }
 }
 
+/// Elementwise operation inside a widened 256-bit/512-bit `Op::SlpWideChain`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WideStepOp {
+    F32Add,
+    F32Sub,
+    F32Mul,
+    F32Div,
+    F64Add,
+    F64Sub,
+    F64Mul,
+    F64Div,
+    I32Add,
+    I32Sub,
+    I32Mul,
+    I64Add,
+    I64Sub,
+    VAnd,
+    VOr,
+    VXor,
+    /// Wasm 3.0 relaxed FMA: `+(a * b) + c` / `-(a * b) + c`.
+    F32Madd,
+    F32Nmadd,
+    F64Madd,
+    F64Nmadd,
+    /// NaN canonicalization `bitselect(x, qnan, x == x)` (`dst = isnan(dst) ? rhs : dst`).
+    F32CanonNan,
+    F64CanonNan,
+}
+
+impl WideStepOp {
+    #[inline]
+    pub const fn is_commutative(self) -> bool {
+        matches!(
+            self,
+            Self::F32Add
+                | Self::F32Mul
+                | Self::F64Add
+                | Self::F64Mul
+                | Self::I32Add
+                | Self::I32Mul
+                | Self::I64Add
+                | Self::VAnd
+                | Self::VOr
+                | Self::VXor
+        )
+    }
+
+    #[inline]
+    pub const fn supports_mem_rhs(self) -> bool {
+        matches!(
+            self,
+            Self::F32Add
+                | Self::F32Sub
+                | Self::F32Mul
+                | Self::F32Div
+                | Self::F64Add
+                | Self::F64Sub
+                | Self::F64Mul
+                | Self::F64Div
+                | Self::I32Add
+                | Self::I32Sub
+                | Self::I32Mul
+                | Self::I64Add
+                | Self::I64Sub
+                | Self::VAnd
+                | Self::VOr
+                | Self::VXor
+        )
+    }
+
+    #[inline]
+    pub const fn is_fma(self) -> bool {
+        matches!(
+            self,
+            Self::F32Madd | Self::F32Nmadd | Self::F64Madd | Self::F64Nmadd
+        )
+    }
+
+    #[inline]
+    pub const fn is_canon_nan(self) -> bool {
+        matches!(self, Self::F32CanonNan | Self::F64CanonNan)
+    }
+}
+
+/// Single step in a 2-slot (`0` = `SCRATCH_FP1`, `1` = `SCRATCH_FP2`) widened SIMD micro-program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WideStep {
+    /// Load contiguous `16 * chunks` bytes from `args[1 + load_idx] + offset` into `dst_slot`.
+    Load {
+        dst_slot: u8,
+        load_idx: u8,
+        offset: u32,
+    },
+    /// Broadcast 128-bit `V128` SSA value `args[1 + n_loads + bcast_idx]` across all 128-bit lanes.
+    Broadcast { dst_slot: u8, bcast_idx: u8 },
+    /// Binary elementwise op `dst_slot = op(lhs_slot, rhs_slot)` (also `CanonNan`: `dst_slot == lhs_slot`).
+    Bin {
+        op: WideStepOp,
+        dst_slot: u8,
+        lhs_slot: u8,
+        rhs_slot: u8,
+    },
+    /// Binary elementwise op with contiguous memory RHS: `dst_slot = op(lhs_slot, mem[load_idx + offset])`.
+    BinMem {
+        op: WideStepOp,
+        dst_slot: u8,
+        lhs_slot: u8,
+        load_idx: u8,
+        offset: u32,
+    },
+    /// Relaxed FMA with memory multiplicand: `acc_slot = ±(a_slot * mem[load_idx + offset]) + acc_slot`.
+    TerMem {
+        op: WideStepOp,
+        acc_slot: u8,
+        a_slot: u8,
+        load_idx: u8,
+        offset: u32,
+    },
+}
+
+/// Metadata for one `Op::SlpWideChain` stored on `IrFunc::wide_chains`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WideChainDesc {
+    /// `2` (`32 B`, `YMM`) or `4` (`64 B`, `ZMM` on `x64-v4`, 2×`YMM` on `x64-v3`).
+    pub chunks: u8,
+    /// `true` iff original stores executed in descending chunk order (preserved by overlap fallback).
+    pub descending: bool,
+    /// `true` iff any original store preceded a load (requires runtime overlap guard on non-identical bases).
+    pub need_overlap_check: bool,
+    /// `true` iff original loads all preceded all stores (`chunks == 2`, `!uses_fma`, non-identical base):
+    /// scalar/128-bit backends compute both chunks before storing either to preserve exact overlap semantics.
+    pub buffer_all_loads: bool,
+    /// `true` iff `steps` contains `F32CanonNan` or `F64CanonNan`.
+    pub uses_canon_nan: bool,
+    /// Base byte offset of `dst` (lowest chunk; chunks span `dst_off .. dst_off + 16*chunks`).
+    pub dst_off: u32,
+    /// Number of load address `Val`s in `args[1 .. 1 + n_loads]`.
+    pub n_loads: u8,
+    /// Number of broadcast `V128` `Val`s in `args[1 + n_loads .. 1 + n_loads + n_bcasts]`.
+    pub n_bcasts: u8,
+    /// Slot (`0` or `1`) holding the final wide result to store to `[dst + dst_off]`.
+    pub result_slot: u8,
+    /// Base byte offset of each load stream `0..n_loads` (for runtime overlap checks).
+    pub load_offs: Vec<u32>,
+    /// Straight-line 2-slot wide micro-program.
+    pub steps: Vec<WideStep>,
+}
+
 #[derive(Clone)]
 pub struct IrFunc {
     pub func_index: usize,
@@ -1427,6 +1590,7 @@ pub struct IrFunc {
     pub val_pool: Vec<Val>,
     pub v128_consts: Vec<[u8; 16]>,
     pub br_tables: Vec<BrTableData>,
+    pub wide_chains: Vec<WideChainDesc>,
     pub needs_stack_check: bool,
     /// Extra native stack headroom reserved by a stack-check-retaining caller on behalf of
     /// direct stack-check-elided callees (Step 8a).
@@ -1475,6 +1639,24 @@ impl IrFunc {
             });
         }
 
+        let mut wide_chains = Vec::new();
+        wide_chains.try_reserve_exact(self.wide_chains.len()).ok()?;
+        for wc in &self.wide_chains {
+            wide_chains.push(WideChainDesc {
+                chunks: wc.chunks,
+                descending: wc.descending,
+                need_overlap_check: wc.need_overlap_check,
+                buffer_all_loads: wc.buffer_all_loads,
+                uses_canon_nan: wc.uses_canon_nan,
+                dst_off: wc.dst_off,
+                n_loads: wc.n_loads,
+                n_bcasts: wc.n_bcasts,
+                result_slot: wc.result_slot,
+                load_offs: try_copy(&wc.load_offs)?,
+                steps: try_copy(&wc.steps)?,
+            });
+        }
+
         Some(Self {
             func_index: self.func_index,
             memory64: self.memory64,
@@ -1485,6 +1667,7 @@ impl IrFunc {
             val_pool,
             v128_consts,
             br_tables,
+            wide_chains,
             needs_stack_check: self.needs_stack_check,
             elided_callee_stack_bytes: self.elided_callee_stack_bytes,
             early_pruned: self.early_pruned,
@@ -1730,6 +1913,7 @@ impl Builder {
             val_pool: Vec::with_capacity(est_vals / 2),
             v128_consts: Vec::new(),
             br_tables: Vec::new(),
+            wide_chains: Vec::new(),
             needs_stack_check,
             elided_callee_stack_bytes: 0,
             early_pruned: 0,
@@ -3977,30 +4161,13 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                         let cv = stack.pop().ok_or("relaxed_madd c")?;
                         let bv = stack.pop().ok_or("relaxed_madd b")?;
                         let av = stack.pop().ok_or("relaxed_madd a")?;
-                        let (neg_op, mul_op, add_op) = if op <= 0xfa06 {
-                            (0xfde1, 0xfde6, 0xfde4)
-                        } else {
-                            (0xfded, 0xfdf2, 0xfdf0)
-                        };
-                        let lhs = if (op & 1) == 0 {
-                            b.emit(Ty::V128, Op::V128Un { op: neg_op, a: av })
-                        } else {
-                            av
-                        };
-                        let prod = b.emit(
-                            Ty::V128,
-                            Op::V128Bin {
-                                op: mul_op,
-                                a: lhs,
-                                b: bv,
-                            },
-                        );
                         b.emit(
                             Ty::V128,
-                            Op::V128Bin {
-                                op: add_op,
-                                a: prod,
-                                b: cv,
+                            Op::V128Ternary {
+                                op,
+                                a: av,
+                                b: bv,
+                                c: cv,
                             },
                         )
                     }

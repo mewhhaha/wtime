@@ -903,6 +903,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         elided_callee_stack_bytes: 0,
         memory64: false,
         early_pruned: 0,
+        wide_chains: Vec::new(),
     };
     verify_ir(&good_ir, &empty_mod).unwrap();
     let good_alloc = allocate(&good_ir).unwrap();
@@ -933,6 +934,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         elided_callee_stack_bytes: 0,
         memory64: false,
         early_pruned: 0,
+        wide_chains: Vec::new(),
     };
     assert!(verify_ir(&bad_ty, &empty_mod).is_err());
 
@@ -992,6 +994,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         elided_callee_stack_bytes: 0,
         memory64: false,
         early_pruned: 0,
+        wide_chains: Vec::new(),
     };
     assert!(verify_ir(&bad_dom, &empty_mod).is_err());
 
@@ -1027,6 +1030,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         elided_callee_stack_bytes: 0,
         memory64: false,
         early_pruned: 0,
+        wide_chains: Vec::new(),
     };
     verify_ir(&two_live_ir, &empty_mod).unwrap();
     let mut bad_alloc = allocate(&two_live_ir).unwrap();
@@ -2234,6 +2238,7 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
         allow_r12: true,
         allow_r13: true,
         has_bmi2: false,
+        allow_xmm16_31: false,
     };
     let alloc = super::regalloc::allocate_with_config(&irs[1], cfg, None).unwrap();
     super::verify::verify_alloc_with_config(&irs[1], &alloc, cfg).unwrap();
@@ -2370,6 +2375,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
         elided_callee_stack_bytes: 0,
         memory64: false,
         early_pruned: 0,
+        wide_chains: Vec::new(),
     };
     let alloc = allocate_with_config(&ir, AllocConfig::default(), None).unwrap();
     verify_alloc_with_config(&ir, &alloc, AllocConfig::default()).unwrap();
@@ -2386,6 +2392,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
             allow_r12: false,
             allow_r13: false,
             has_bmi2: true,
+            allow_xmm16_31: false,
         },
         None,
     )
@@ -2404,6 +2411,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
             allow_r12: false,
             allow_r13: false,
             has_bmi2: true,
+            allow_xmm16_31: false,
         },
     )
     .expect("BMI2 mode must allow RCX live across Shl");
@@ -2415,6 +2423,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
                 allow_r12: false,
                 allow_r13: false,
                 has_bmi2: false,
+                allow_xmm16_31: false,
             },
         )
         .is_err(),
@@ -3248,6 +3257,7 @@ fn stage3_council_round1_regressions() {
                     elided_callee_stack_bytes: 0,
                     memory64: false,
                     early_pruned: 0,
+                    wide_chains: Vec::new(),
                 };
                 let empty = ValRange { start: 0, len: 0 };
                 let ret_v0 = ValRange { start: 0, len: 1 };
@@ -3994,6 +4004,21 @@ pub(crate) fn build_relaxed_simd_test_wasm() -> Vec<u8> {
         }
         // Relaxed SIMD opcodes 0x100..=0x113 encode as `0xfd, 0x80 + (sub), 0x02`.
         out.extend_from_slice(&[0xfd, 0x80 | op_sub, 0x02]);
+        // Wasm 3.0 Relaxed SIMD leaves NaN sign/payload bits non-deterministic across x86-64 `vfnmadd`
+        // and ARM64 `fmls` / Rust `mul_add`; canonicalize NaN lanes while keeping every finite,
+        // subnormal, ±0.0, and ±Inf lane 100% bit-exact.
+        if matches!(op_sub, 5..=8) {
+            // local 6 = v; bitselect(v, qNaN, v == v)
+            out.extend_from_slice(&[0x22, 6]); // local.tee 6
+            if op_sub <= 6 {
+                vconst(out, f32x4(f32::NAN, f32::NAN, f32::NAN, f32::NAN));
+                out.extend_from_slice(&[0x20, 6, 0x20, 6, 0xfd, 0x41]); // f32x4.eq
+            } else {
+                vconst(out, f64x2(f64::NAN, f64::NAN));
+                out.extend_from_slice(&[0x20, 6, 0x20, 6, 0xfd, 0x47]); // f64x2.eq
+            }
+            out.extend_from_slice(&[0xfd, 0x52]); // v128.bitselect
+        }
         // v128.store align=4 offset=0
         out.extend_from_slice(&[0xfd, 0x0b, 0x04, 0x00]);
     };
@@ -4037,7 +4062,7 @@ pub(crate) fn build_relaxed_simd_test_wasm() -> Vec<u8> {
         func_sec(&[0]),
         section(5, &[1, 0x01, 1, 1]),
         export_sec(&[("blot:memory", 2, 0), ("test_relaxed", 0, 0)]),
-        code_sec(&[enc_body(&[(3, 0x7b), (2, 0x7f)], &b)]),
+        code_sec(&[enc_body(&[(3, 0x7b), (2, 0x7f), (1, 0x7b)], &b)]),
     ])
 }
 
@@ -4967,6 +4992,7 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
         v128_consts: vec![],
         br_tables: vec![],
         early_pruned: 0,
+        wide_chains: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
     };
@@ -5087,6 +5113,7 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
         v128_consts: vec![],
         br_tables: vec![],
         early_pruned: 0,
+        wide_chains: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
     };
@@ -5146,6 +5173,7 @@ fn x64_spectre_branchless_slh_bitwise_bce_and_dual_pinned_globals() {
         allow_r12: layout.pinned_global.is_none(),
         allow_r13: layout.fixed_mem_bytes.is_some() && layout.pinned_global_2.is_none(),
         has_bmi2: false,
+        allow_xmm16_31: false,
     };
     let alloc = super::regalloc::allocate_with_config(&ir, cfg, None).unwrap();
     let asm = super::lower::lower_ir_to_x64(
@@ -6245,6 +6273,1188 @@ fn x64_audit_spectre_dropped_load_oob_and_remat_addr_select() {
                 ),
                 "mismatch on {name}"
             );
+        }
+    }
+}
+
+#[test]
+fn x64_xmm16_31_evex_zero_spill_disasm_and_native_parity() {
+    use super::asm::{Asm, Gp, Mem, RelocTarget, Xmm};
+    use super::regalloc::{AllocConfig, Loc, allocate_with_config};
+    use super::verify::verify_alloc_with_config;
+
+    // 1. Exhaustive EVEX 5-bit `Xmm16..Xmm31` encoding verification via GNU `objdump` (x86-64 only).
+    {
+        let mut a = Asm::new();
+        a.use_vex = true;
+        let loff = a.add_local_rodata(16, &[0u8; 16]);
+        let rip = RelocTarget::LocalRodata(loff);
+        a.vmovaps_rr(Xmm::Xmm16, Xmm::Xmm31);
+        a.vmovdqu_xm(Xmm::Xmm17, Mem::base_disp(Gp::Rsp, 32));
+        a.vmovdqu_mx(Mem::base_disp(Gp::Rsp, 48), Xmm::Xmm18);
+        a.vmovss_xm(Xmm::Xmm19, Mem::base_disp(Gp::Rsp, 8));
+        a.vmovsd_xm(Xmm::Xmm20, Mem::base_disp(Gp::Rsp, 16));
+        a.vmovdqu_rip(Xmm::Xmm21, rip);
+        a.vaddps_xxx(Xmm::Xmm22, Xmm::Xmm23, Xmm::Xmm24);
+        a.vmulpd_xxx(Xmm::Xmm25, Xmm::Xmm26, Xmm::Xmm27);
+        a.vfmadd231ps(Xmm::Xmm28, Xmm::Xmm29, Xmm::Xmm30);
+        a.vfnmadd213pd(Xmm::Xmm31, Xmm::Xmm16, Xmm::Xmm17);
+        a.vfmadd213ps_xxm(Xmm::Xmm18, Xmm::Xmm19, Mem::base_disp(Gp::Rsp, 64));
+        a.vpaddb_xxx(Xmm::Xmm20, Xmm::Xmm21, Xmm::Xmm22);
+        a.vpaddd_xxx(Xmm::Xmm23, Xmm::Xmm24, Xmm::Xmm25);
+        a.vpaddq_xxx(Xmm::Xmm26, Xmm::Xmm27, Xmm::Xmm28);
+        a.vpand_xxx(Xmm::Xmm29, Xmm::Xmm30, Xmm::Xmm31);
+        a.vpor_xxx(Xmm::Xmm16, Xmm::Xmm17, Xmm::Xmm18);
+        a.vpxor_xxx(Xmm::Xmm19, Xmm::Xmm20, Xmm::Xmm21);
+        a.vpshufd(Xmm::Xmm22, Xmm::Xmm23, 0xe4);
+        a.vpshufb_xxx(Xmm::Xmm24, Xmm::Xmm25, Xmm::Xmm26);
+        a.vunpcklps_xxx(Xmm::Xmm27, Xmm::Xmm28, Xmm::Xmm29);
+        a.vunpckhpd_xxx(Xmm::Xmm30, Xmm::Xmm31, Xmm::Xmm16);
+        a.vpalignr_xxxi(Xmm::Xmm17, Xmm::Xmm18, Xmm::Xmm19, 4);
+        a.vbroadcastss_xm(Xmm::Xmm20, Mem::base_disp(Gp::Rax, 12));
+        a.vpbroadcastb_xm(Xmm::Xmm21, Mem::base_disp(Gp::Rax, 3));
+        a.vpbroadcastw_xm(Xmm::Xmm22, Mem::base_disp(Gp::Rax, 6));
+        a.vpbroadcastd_xm(Xmm::Xmm23, Mem::base_disp(Gp::Rax, 12));
+        a.vpbroadcastq_xx(Xmm::Xmm24, Xmm::Xmm25);
+        a.vmovddup_xm(Xmm::Xmm26, Mem::base_disp(Gp::Rax, 24));
+        a.vpmovsxbw_xm(Xmm::Xmm27, Mem::base_disp(Gp::Rax, 16));
+        a.vpsllw_xxi(Xmm::Xmm28, Xmm::Xmm29, 3);
+        a.vpslld_xxi(Xmm::Xmm30, Xmm::Xmm31, 5);
+        a.vpsrlq_xxi(Xmm::Xmm16, Xmm::Xmm17, 7);
+        a.vpsrldq_xxi(Xmm::Xmm18, Xmm::Xmm19, 8);
+        a.vmovd_xr(Xmm::Xmm20, Gp::Rax);
+        a.vmovq_rx(Gp::Rcx, Xmm::Xmm21);
+        a.vpinsrb(Xmm::Xmm22, Xmm::Xmm23, Gp::Rdx, 3);
+        a.vpinsrw(Xmm::Xmm24, Xmm::Xmm25, Gp::Rdx, 2);
+        a.vpinsrd(Xmm::Xmm26, Xmm::Xmm27, Gp::Rdx, 1);
+        a.vpinsrq(Xmm::Xmm28, Xmm::Xmm29, Gp::Rdx, 1);
+        a.vpextrb(Gp::Rax, Xmm::Xmm30, 5);
+        a.vpextrw(Gp::Rax, Xmm::Xmm31, 4);
+        a.vpextrd(Gp::Rax, Xmm::Xmm16, 2);
+        a.vpextrq(Gp::Rax, Xmm::Xmm17, 1);
+        a.ucomiss(Xmm::Xmm18, Xmm::Xmm19);
+        a.ucomisd(Xmm::Xmm20, Xmm::Xmm21);
+        a.addss(Xmm::Xmm22, Xmm::Xmm23);
+        a.mulsd(Xmm::Xmm24, Xmm::Xmm25);
+        a.cvtss2sd(Xmm::Xmm26, Xmm::Xmm27);
+        a.cvtsd2ss(Xmm::Xmm28, Xmm::Xmm29);
+        a.cvtsi2ss(true, Xmm::Xmm30, Gp::Rax);
+        a.cvtsi2sd(false, Xmm::Xmm31, Gp::Rcx);
+        a.cvttss2si(true, Gp::Rax, Xmm::Xmm16);
+        a.cvttsd2si(false, Gp::Rcx, Xmm::Xmm17);
+        a.vpternlogd_xxx(Xmm::Xmm18, Xmm::Xmm19, Xmm::Xmm20, 0xe4);
+        a.vcvtudq2ps_xx(Xmm::Xmm21, Xmm::Xmm22);
+        a.xmm_rip_op(None, 0x54, Xmm::Xmm23, rip);
+        a.xmm_rip_op(Some(0x66), 0x57, Xmm::Xmm24, rip);
+
+        #[cfg(target_arch = "x86_64")]
+        if let Ok(status) = std::process::Command::new("objdump")
+            .arg("--version")
+            .output()
+            && status.status.success()
+        {
+            let root = crate::build::create_fresh_test_root("wtime-aot-xmm16-31-disasm");
+            let bin = root.0.join("evex_high.bin");
+            std::fs::write(&bin, &a.code).unwrap();
+            let out = std::process::Command::new("objdump")
+                .args(["-D", "-b", "binary", "-m", "i386:x86-64", "-M", "intel"])
+                .arg(&bin)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "objdump failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let text = String::from_utf8(out.stdout).unwrap();
+            assert!(
+                !text.contains("(bad)") && !text.contains(".byte"),
+                "EVEX Xmm16..31 disassembly had undecoded bytes:\n{text}"
+            );
+            for needle in [
+                "vmovaps xmm16,xmm31",
+                "vmovdqu32 xmm17,XMMWORD PTR [rsp+0x20]",
+                "vmovdqu32 XMMWORD PTR [rsp+0x30],xmm18",
+                "vmovss xmm19,DWORD PTR [rsp+0x8]",
+                "vmovsd xmm20,QWORD PTR [rsp+0x10]",
+                "vaddps xmm22,xmm23,xmm24",
+                "vmulpd xmm25,xmm26,xmm27",
+                "vfmadd231ps xmm28,xmm29,xmm30",
+                "vfnmadd213pd xmm31,xmm16,xmm17",
+                "vfmadd213ps xmm18,xmm19,XMMWORD PTR [rsp+0x40]",
+                "vpaddb xmm20,xmm21,xmm22",
+                "vpaddd xmm23,xmm24,xmm25",
+                "vpaddq xmm26,xmm27,xmm28",
+                "vpandd xmm29,xmm30,xmm31",
+                "vpshufd xmm22,xmm23,0xe4",
+                "vpshufb xmm24,xmm25,xmm26",
+                "vunpcklps xmm27,xmm28,xmm29",
+                "vunpckhpd xmm30,xmm31,xmm16",
+                "vpalignr xmm17,xmm18,xmm19,0x4",
+                "vbroadcastss xmm20,DWORD PTR [rax+0xc]",
+                "vpbroadcastb xmm21,BYTE PTR [rax+0x3]",
+                "vpbroadcastw xmm22,WORD PTR [rax+0x6]",
+                "vpbroadcastd xmm23,DWORD PTR [rax+0xc]",
+                "vpbroadcastq xmm24,xmm25",
+                "vmovddup xmm26,QWORD PTR [rax+0x18]",
+                "vpmovsxbw xmm27,QWORD PTR [rax+0x10]",
+                "vpsllw xmm28,xmm29,0x3",
+                "vpslld xmm30,xmm31,0x5",
+                "vpsrlq xmm16,xmm17,0x7",
+                "vpsrldq xmm18,xmm19,0x8",
+                "vpinsrb xmm22,xmm23,edx,0x3",
+                "vpextrw eax,xmm31,0x4",
+                "vucomiss xmm18,xmm19",
+                "vucomisd xmm20,xmm21",
+                "vpternlogd xmm18,xmm19,xmm20,0xe4",
+                "vcvtudq2ps xmm21,xmm22",
+                "vandps xmm23,xmm23",
+                "vxorpd xmm24,xmm24",
+            ] {
+                assert!(
+                    text.contains(needle),
+                    "expected `{needle}` in EVEX Xmm16..31 disassembly:\n{text}"
+                );
+            }
+        }
+    }
+
+    // 2. Wasm function keeping 20 live `v128` accumulators in a counted loop (mixing EVEX-native
+    //    `f32x4.add`/`mul`/`relaxed_madd`/`v128.not`/`bitselect`/`i8x16.shuffle` AND non-EVEX
+    //    `f32x4.le`/`f32x4.ceil`/`i32x4.bitmask`): must allocate `Xmm16..Xmm31` with ZERO vector spills
+    //    on `x64-v4` and match `x64-v2`, `x64-v3`, and exact Rust semantics!
+    // Locals: 0=n(i32), 1=i(i32), 2..22=v0..v19(v128), 22=step(v128)
+    let mut body = Vec::new();
+    // Initialize v[k] = f32x4.splat(f32(k + 1) * 0.25) and step = f32x4.splat(0.125)
+    for k in 0u32..20 {
+        let f = ((k + 1) as f32) * 0.25;
+        body.push(0x43);
+        body.extend_from_slice(&f.to_bits().to_le_bytes());
+        body.extend_from_slice(&[0xfd, 0x13]); // f32x4.splat
+        body.push(0x21);
+        leb_u32(&mut body, 2 + k);
+    }
+    body.push(0x43);
+    body.extend_from_slice(&0.125f32.to_bits().to_le_bytes());
+    body.extend_from_slice(&[0xfd, 0x13]); // f32x4.splat
+    body.push(0x21);
+    leb_u32(&mut body, 22);
+
+    // Loop i in 0..n:
+    //   for k in 0..20: v[k] = v[k] + step * v[(k+1)%20] (relaxed_madd for even, add+mul for odd)
+    //   plus one non-EVEX `f32x4.le` + `v128.bitselect` + `f32x4.ceil` + `v128.not` on v[18], v[19]
+    body.extend_from_slice(&[
+        0x41, 0, 0x21, 1, // i = 0
+        0x02, 0x40, 0x03, 0x40, // block, loop
+        0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // br_if 1 (i >=u n)
+    ]);
+    for k in 0u32..18 {
+        body.push(0x20);
+        leb_u32(&mut body, 22); // step
+        body.push(0x20);
+        leb_u32(&mut body, 2 + ((k + 1) % 20));
+        if k % 2 == 0 {
+            body.push(0x20);
+            leb_u32(&mut body, 2 + k);
+            body.extend_from_slice(&[0xfd, 0x85, 0x02]); // f32x4.relaxed_madd (0x105)
+        } else {
+            body.extend_from_slice(&[0xfd, 0xe6, 0x01]); // f32x4.mul
+            body.push(0x20);
+            leb_u32(&mut body, 2 + k);
+            body.extend_from_slice(&[0xfd, 0xe4, 0x01]); // f32x4.add
+        }
+        body.push(0x21);
+        leb_u32(&mut body, 2 + k);
+    }
+    // Non-EVEX op exercise on high XMMs: v18 = bitselect(v18, ceil(v19), f32x4.le(v18, v19)), v19 = v19 + step
+    body.extend_from_slice(&[0x20, 20, 0x20, 21, 0xfd, 0x67]); // v18, f32x4.ceil(v19)
+    body.extend_from_slice(&[0x20, 20, 0x20, 21, 0xfd, 0x45]); // f32x4.le(v18, v19)
+    body.extend_from_slice(&[0xfd, 0x52, 0x21, 20]); // v128.bitselect -> v18
+    body.extend_from_slice(&[0x20, 21, 0x20, 22, 0xfd, 0xe4, 0x01, 0x21, 21]); // v19 += step
+    body.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
+
+    // Reduce all 20 accumulators with `f32x4.add`, then `v128.not` + `i32x4.bitmask` ^ `f32.reinterpret_i32(extract_lane 0)`.
+    body.extend_from_slice(&[0x20, 2]);
+    for k in 1u32..20 {
+        body.push(0x20);
+        leb_u32(&mut body, 2 + k);
+        body.extend_from_slice(&[0xfd, 0xe4, 0x01]); // f32x4.add
+    }
+    body.push(0x22);
+    leb_u32(&mut body, 2); // local.tee v0
+    body.extend_from_slice(&[0xfd, 0x1f, 0, 0xbc]); // f32x4.extract_lane 0; i32.reinterpret_f32
+    body.extend_from_slice(&[0x20, 2, 0xfd, 0x4d, 0xfd, 0xa4, 0x01, 0x73]); // v128.not; i32x4.bitmask; xor
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        export_sec(&[("run", 0, 0)]),
+        code_sec(&[enc_body(&[(1, 0x7f), (21, 0x7b)], &body)]),
+    ]);
+
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+    let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, 0).unwrap();
+    let effects = super::opt::compute_module_effects(&[ir.clone()], &module, None).unwrap();
+    super::opt::optimize_func_stage2(&mut ir, &module, &effects, None).unwrap();
+    verify_ir(&ir, &module).unwrap();
+
+    let cfg_v4 = AllocConfig {
+        allow_r12: true,
+        allow_r13: true,
+        has_bmi2: true,
+        allow_xmm16_31: true,
+    };
+    let alloc_v4 = allocate_with_config(&ir, cfg_v4, None).unwrap();
+    verify_alloc_with_config(&ir, &alloc_v4, cfg_v4).unwrap();
+    let mut live_vals = vec![false; ir.val_tys.len()];
+    for bb in &ir.blocks {
+        for &p in &bb.params {
+            live_vals[p.0 as usize] = true;
+        }
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                live_vals[r.0 as usize] = true;
+            }
+        }
+    }
+    let high_xmm_count = alloc_v4
+        .locs
+        .iter()
+        .enumerate()
+        .filter(|&(vi, l)| live_vals[vi] && matches!(l, Loc::Xmm(x) if x.id() >= 16))
+        .count();
+    let v128_spills = alloc_v4
+        .locs
+        .iter()
+        .enumerate()
+        .filter(|&(vi, l)| {
+            live_vals[vi] && ir.val_tys[vi] == Ty::V128 && matches!(l, Loc::Spill(_))
+        })
+        .count();
+    assert!(
+        high_xmm_count >= 6,
+        "expected x64-v4 regalloc to allocate Xmm16..Xmm31, got {high_xmm_count}"
+    );
+    assert_eq!(
+        v128_spills, 0,
+        "expected ZERO live v128 spills with 30 allocatable XMM registers on x64-v4, got {v128_spills}"
+    );
+    assert_eq!(
+        alloc_v4.frame_size, 0,
+        "expected zero spill frame on x64-v4, got {}",
+        alloc_v4.frame_size
+    );
+
+    let isa_v2 = TargetIsa::default();
+    let isa_v3 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: false,
+    };
+    let isa_v4 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: true,
+    };
+    let so_v2 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v3 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v3,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v4 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let expected = |n: u32, fused: bool| -> u32 {
+            let mut v = [0.0f32; 20];
+            for (k, slot) in v.iter_mut().enumerate() {
+                *slot = ((k + 1) as f32) * 0.25;
+            }
+            let step = 0.125f32;
+            for _ in 0..n {
+                for k in 0..18 {
+                    let next = v[(k + 1) % 20];
+                    if k % 2 == 0 {
+                        v[k] = if fused {
+                            step.mul_add(next, v[k])
+                        } else {
+                            step * next + v[k]
+                        };
+                    } else {
+                        v[k] += step * next;
+                    }
+                }
+                v[18] = if v[18] <= v[19] { v[18] } else { v[19].ceil() };
+                v[19] += step;
+            }
+            let mut sum = v[0];
+            for &x in &v[1..] {
+                sum += x;
+            }
+            let bits = sum.to_bits();
+            let not_mask = if ((!bits) & 0x8000_0000) != 0 { 0xf } else { 0 };
+            bits ^ not_mask
+        };
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-xmm16-31-parity");
+        for (name, bytes, fused, req_avx512) in [
+            ("v2.so", &so_v2, false, false),
+            ("v3.so", &so_v3, true, false),
+            ("v4.so", &so_v4, true, true),
+        ] {
+            if req_avx512
+                && !(std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512dq"))
+            {
+                continue;
+            }
+            if !req_avx512
+                && fused
+                && !(std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma"))
+            {
+                continue;
+            }
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"call run 0\ncall run 5\ncall run c\n")
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{name} failed: {out:?}");
+            assert_eq!(
+                std::str::from_utf8(&out.stdout).unwrap(),
+                format!(
+                    "NEW_OK\nCALL 0 {:016x} 0 0\nCALL 0 {:016x} 0 0\nCALL 0 {:016x} 0 0\n",
+                    u64::from(expected(0, fused)),
+                    u64::from(expected(5, fused)),
+                    u64::from(expected(12, fused)),
+                ),
+                "mismatch on {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn x64_dynamic_bce_and_slp_wide_zmm_ymm_overlap_and_trap_parity() {
+    use super::asm::{Asm, Gp, Mem, Xmm};
+    use super::ir::Op;
+
+    // 1. Disassemble every newly added YMM/ZMM FMA3, broadcast-128, and EVEX opmask encoder
+    //    via GNU `objdump` (gated on x86-64 hosts) to guarantee zero `(bad)` encodings.
+    let mut a = Asm::new();
+    a.use_vex = true;
+    let m0 = Mem::indexed(Gp::R14, Gp::Rbx, 1, 0);
+    let m64 = Mem::indexed(Gp::R14, Gp::Rcx, 1, 64);
+    a.vfmadd231ps_yyy(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm0);
+    a.vfmadd231ps_yym(Xmm::Xmm15, Xmm::Xmm14, m0);
+    a.vfnmadd231ps_yyy(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm0);
+    a.vfnmadd231ps_yym(Xmm::Xmm15, Xmm::Xmm14, m64);
+    a.vfmadd231pd_yyy(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm0);
+    a.vfmadd231pd_yym(Xmm::Xmm15, Xmm::Xmm14, m0);
+    a.vfnmadd231pd_yyy(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm0);
+    a.vfnmadd231pd_yym(Xmm::Xmm15, Xmm::Xmm14, m64);
+    a.vinsertf128_yyx(Xmm::Xmm14, Xmm::Xmm7, Xmm::Xmm7, 1);
+    a.vcmpeqps_yyy(Xmm::Xmm0, Xmm::Xmm15, Xmm::Xmm15);
+    a.vcmpeqpd_yyy(Xmm::Xmm0, Xmm::Xmm15, Xmm::Xmm15);
+    a.vblendvps_yyyy(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm15, Xmm::Xmm0);
+    a.vblendvpd_yyyy(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm15, Xmm::Xmm0);
+    a.vblendvps_xxxx(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm15, Xmm::Xmm0);
+    a.vblendvpd_xxxx(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm15, Xmm::Xmm0);
+    a.vshufi32x4_zzz(Xmm::Xmm14, Xmm::Xmm20, Xmm::Xmm20, 0x00);
+    a.vinsertf32x4_yyx(Xmm::Xmm14, Xmm::Xmm20, Xmm::Xmm20, 1);
+    a.vfmadd231ps_zzz(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm18);
+    a.vfmadd231ps_zzm(Xmm::Xmm15, Xmm::Xmm14, m64);
+    a.vfnmadd231ps_zzz(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm19);
+    a.vfnmadd231ps_zzm(Xmm::Xmm15, Xmm::Xmm14, m0);
+    a.vfmadd231pd_zzz(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm18);
+    a.vfmadd231pd_zzm(Xmm::Xmm15, Xmm::Xmm14, m64);
+    a.vfnmadd231pd_zzz(Xmm::Xmm15, Xmm::Xmm14, Xmm::Xmm19);
+    a.vfnmadd231pd_zzm(Xmm::Xmm15, Xmm::Xmm14, m0);
+    a.vcmpps_k1_evex(2, Xmm::Xmm15, Xmm::Xmm15, 3);
+    a.vmovaps_k1_evex(2, Xmm::Xmm15, Xmm::Xmm14);
+    a.vcmppd_k1_evex(2, Xmm::Xmm15, Xmm::Xmm15, 3);
+    a.vmovapd_k1_evex(2, Xmm::Xmm15, Xmm::Xmm14);
+    a.vcmpps_k1_evex(1, Xmm::Xmm15, Xmm::Xmm15, 3);
+    a.vmovaps_k1_evex(1, Xmm::Xmm15, Xmm::Xmm14);
+    a.vcmpps_k1_evex(0, Xmm::Xmm15, Xmm::Xmm15, 3);
+    a.vmovaps_k1_evex(0, Xmm::Xmm15, Xmm::Xmm14);
+    // Also verify EVEX memory-lane insert/extract & RIP-relative vpshufb on Xmm20 (`disp8*N` scaling!).
+    let m8 = Mem::indexed(Gp::R14, Gp::Rcx, 1, 8);
+    a.pinsrb_xm(Xmm::Xmm20, m8, 3);
+    a.pinsrw_xm(Xmm::Xmm20, m8, 2);
+    a.pinsrd_xm(Xmm::Xmm20, m8, 1);
+    a.pinsrq_xm(Xmm::Xmm20, m8, 1);
+    a.pextrb_mx(m8, Xmm::Xmm20, 3);
+    a.pextrw_mx(m8, Xmm::Xmm20, 2);
+    a.pextrd_mx(m8, Xmm::Xmm20, 1);
+    a.pextrq_mx(m8, Xmm::Xmm20, 1);
+    a.pshufb_rip(Xmm::Xmm20, super::asm::RelocTarget::LocalRodata(0));
+    a.finish_labels().unwrap();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let root = crate::build::create_fresh_test_root("wtime-aot-wide-zmm-disasm");
+        let bin_path = root.0.join("wide.bin");
+        std::fs::write(&bin_path, &a.code).unwrap();
+        let out = std::process::Command::new("objdump")
+            .args(["-D", "-b", "binary", "-m", "i386:x86-64", "-M", "intel"])
+            .arg(&bin_path)
+            .output()
+            .expect("objdump must succeed");
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.contains("(bad)"), "bad wide encoding:\n{text}");
+        for expect in [
+            "vfmadd231ps ymm15,ymm14,YMMWORD PTR [r14+rbx*1]",
+            "vfnmadd231pd ymm15,ymm14,YMMWORD PTR [r14+rcx*1+0x40]",
+            "vshufi32x4 zmm14,zmm20,zmm20,0x0",
+            "vinsertf32x4 ymm14,ymm20,xmm20,0x1",
+            "vfmadd231ps zmm15,zmm14,ZMMWORD PTR [r14+rcx*1+0x40]",
+            "vcmpunordps k1,zmm15,zmm15",
+            "vmovaps zmm15{k1},zmm14",
+            "vcmpunordpd k1,zmm15,zmm15",
+            "vmovapd zmm15{k1},zmm14",
+            "vpinsrb xmm20,xmm20,BYTE PTR [r14+rcx*1+0x8],0x3",
+            "vpinsrw xmm20,xmm20,WORD PTR [r14+rcx*1+0x8],0x2",
+            "vpinsrd xmm20,xmm20,DWORD PTR [r14+rcx*1+0x8],0x1",
+            "vpinsrq xmm20,xmm20,QWORD PTR [r14+rcx*1+0x8],0x1",
+            "vpextrb BYTE PTR [r14+rcx*1+0x8],xmm20,0x3",
+            "vpextrw WORD PTR [r14+rcx*1+0x8],xmm20,0x2",
+            "vpextrd DWORD PTR [r14+rcx*1+0x8],xmm20,0x1",
+            "vpextrq QWORD PTR [r14+rcx*1+0x8],xmm20,0x1",
+            "vpshufb xmm20,xmm20,XMMWORD PTR [rip+",
+        ] {
+            assert!(text.contains(expect), "missing `{expect}` in:\n{text}");
+        }
+    }
+
+    // 2. Wasm module with a bottom-tested 4× unrolled descending f32x4 FMA + NaN-canon loop
+    //    (exact shape of `particle_spark_simd` / `ink_ecs`):
+    //    `run(dst: i32, px: i32, vx: i32, n_elems: i32) -> i32`
+    //    For `i = 0, 16, 32, ... < n_elems` (`off += 64`):
+    //      for k in [48, 32, 16, 0]:
+    //        t = f32x4.relaxed_madd(load(vx + off + k), splat(0.5), load(px + off + k))
+    //        t = v128.bitselect(t, splat(qNaN 0x7fc00000), f32x4.eq(t, t))
+    //        store(dst + off + k, t)
+    //    Then returns XOR of first 16 words at `dst` (with bit-exact NaN payloads!).
+    //    Also tests:
+    //      - Disjoint buffers (hits fast ZMM / YMM path)
+    //      - Exact in-place `dst == px` (hits fast ZMM / YMM path)
+    //      - Forward partial overlap `dst == px + 16` (MUST hit slow exact-order fallback!)
+    //      - Backward partial overlap `dst == px - 16` (MUST hit slow exact-order fallback!)
+    //      - OOB boundary (`dst = 65536 - 48`) MUST trap with `TRAP_OOB` (code 1)!
+    let mut run_body = Vec::new();
+    // Locals: 0=dst, 1=px, 2=vx, 3=n_elems, 4=i, 5=off, 6=dt(v128), 7=qnan(v128), 8=tmp(v128)
+    // dt = f32x4.splat(0.5)
+    run_body.push(0x43);
+    run_body.extend_from_slice(&0.5f32.to_bits().to_le_bytes());
+    run_body.extend_from_slice(&[0xfd, 0x13, 0x21, 6]); // f32x4.splat; local.set 6
+    // qnan = v128.const [0x7fc00000; 4]
+    run_body.extend_from_slice(&[0xfd, 0x0c]);
+    for _ in 0..4 {
+        run_body.extend_from_slice(&0x7fc0_0000u32.to_le_bytes());
+    }
+    run_body.extend_from_slice(&[0x21, 7]); // local.set 7
+    // if (0 <u n_elems) { i = 0; off = 0; loop { ... i += 16; off += 64; br_if 0 (i <u n_elems) } }
+    run_body.extend_from_slice(&[
+        0x41, 0, 0x20, 3, 0x49, // 0 <u n_elems
+        0x04, 0x40, // if
+        0x41, 0, 0x21, 4, // i = 0
+        0x41, 0, 0x21, 5, // off = 0
+        0x03, 0x40, // loop
+    ]);
+    for &k in &[48u32, 32, 16, 0] {
+        // dst + off
+        run_body.extend_from_slice(&[0x20, 0, 0x20, 5, 0x6a]);
+        // vx + off -> load k
+        run_body.extend_from_slice(&[0x20, 2, 0x20, 5, 0x6a, 0xfd, 0x00, 0x02]);
+        leb_u32(&mut run_body, k);
+        // dt
+        run_body.extend_from_slice(&[0x20, 6]);
+        // px + off -> load k
+        run_body.extend_from_slice(&[0x20, 1, 0x20, 5, 0x6a, 0xfd, 0x00, 0x02]);
+        leb_u32(&mut run_body, k);
+        // f32x4.relaxed_madd -> local.tee 8
+        run_body.extend_from_slice(&[0xfd, 0x85, 0x02, 0x22, 8]);
+        // qnan
+        run_body.extend_from_slice(&[0x20, 7]);
+        // f32x4.eq(tmp, tmp)
+        run_body.extend_from_slice(&[0x20, 8, 0x20, 8, 0xfd, 0x41]);
+        // v128.bitselect
+        run_body.extend_from_slice(&[0xfd, 0x52]);
+        // v128.store offset=k
+        run_body.extend_from_slice(&[0xfd, 0x0b, 0x02]);
+        leb_u32(&mut run_body, k);
+    }
+    run_body.extend_from_slice(&[
+        0x20, 5, 0x41, 0xc0, 0x00, 0x6a, 0x21, 5, // off += 64
+        0x20, 4, 0x41, 16, 0x6a, 0x22, 4, // i = i + 16
+        0x20, 3, 0x49, 0x0d, 0, // br_if 0 (i <u n_elems)
+        0x0b, 0x0b, // end loop, end if
+    ]);
+    // Hash first 32 floats starting at `dst` (for n_elems >= 32) using rotating XOR of raw bits.
+    run_body.extend_from_slice(&[0x41, 0, 0x21, 4]); // acc = 0 in local 4
+    run_body.extend_from_slice(&[0x41, 0, 0x21, 5]); // j = 0 in local 5
+    run_body.extend_from_slice(&[
+        0x03, 0x40, // loop
+        0x20, 4, 0x41, 1, 0x77, // rotl(acc, 1)
+        0x20, 0, 0x20, 5, 0x41, 2, 0x74, 0x6a, // dst + (j << 2)
+        0x28, 0x02, 0x00, // i32.load
+        0x73, 0x21, 4, // xor -> acc
+        0x20, 5, 0x41, 1, 0x6a, 0x22, 5, 0x20, 3, 0x49, 0x0d, 0, // j += 1; br_if (j <u n)
+        0x0b, 0x20, 4, // end loop; return acc
+    ]);
+
+    // Helper `init(base: i32, n: i32, kind: i32)`: fills `n` f32 elements (including a signaling/payload NaN at lane 7!).
+    let mut init_body = Vec::new();
+    // Locals: 0=base, 1=n, 2=kind, 3=i
+    init_body.extend_from_slice(&[
+        0x41, 0, 0x21, 3, // i = 0
+        0x03, 0x40, // loop
+        0x20, 0, 0x20, 3, 0x41, 2, 0x74, 0x6a, // base + (i << 2)
+        // if kind == 1 && i == 7: store custom NaN payload 0x7fc01234, else f32(i + kind*10) * 0.25
+        0x20, 2, 0x41, 1, 0x46, 0x20, 3, 0x41, 7, 0x46, 0x71, // (kind == 1) & (i == 7)
+        0x04, 0x7f, // if -> i32
+        0x41,
+    ]);
+    leb_i32(&mut init_body, 0x7fc0_1234i32);
+    init_body.extend_from_slice(&[
+        0x05, // else
+        0x20, 3, 0x20, 2, 0x41, 10, 0x6c, 0x6a, // i + kind * 10
+        0xb3, // f32.convert_i32_u
+        0x43,
+    ]);
+    init_body.extend_from_slice(&0.25f32.to_bits().to_le_bytes());
+    init_body.extend_from_slice(&[
+        0x94, 0xbc, // f32.mul; i32.reinterpret_f32
+        0x0b, // end if
+        0x36, 0x02, 0x00, // i32.store
+        0x20, 3, 0x41, 1, 0x6a, 0x22, 3, 0x20, 1, 0x49, 0x0d, 0, // i += 1; br_if (i <u n)
+        0x0b,
+    ]);
+
+    // Wrapper `run(case_id: i32) -> i32` (1-arg Blot ABI export) calling `init` + `kernel` across
+    // 5 distinct call sites (preventing single-caller inlining so `dst`/`px`/`vx`/`n` stay dynamic!):
+    //   0: Disjoint: dst=0x3000, px=0x1000, vx=0x2000, n=32
+    //   1: Exact in-place: dst=0x1000, px=0x1000, vx=0x2000, n=32
+    //   2: Forward partial overlap (+16B): dst=0x1010, px=0x1000, vx=0x2000, n=32
+    //   3: Backward partial overlap (-16B): dst=0x0ff0, px=0x1000, vx=0x2000, n=32
+    //   4: OOB boundary (1 page = 65536 = 0x10000): dst=0xffd0 (+48..+64 exceeds 65536!), n=16 -> TRAP_OOB!
+    let cases: [(i32, i32, i32, i32); 5] = [
+        (0x3000, 0x1000, 0x2000, 32),
+        (0x1000, 0x1000, 0x2000, 32),
+        (0x1010, 0x1000, 0x2000, 32),
+        (0x0ff0, 0x1000, 0x2000, 32),
+        (0xffd0, 0x1000, 0x2000, 16),
+    ];
+    let mut dispatch_body = Vec::new();
+    // init(0x1000, 128, 1); init(0x2000, 128, 2);
+    dispatch_body.push(0x41);
+    leb_i32(&mut dispatch_body, 0x1000);
+    dispatch_body.push(0x41);
+    leb_i32(&mut dispatch_body, 128);
+    dispatch_body.extend_from_slice(&[0x41, 1, 0x10, 1]);
+    dispatch_body.push(0x41);
+    leb_i32(&mut dispatch_body, 0x2000);
+    dispatch_body.push(0x41);
+    leb_i32(&mut dispatch_body, 128);
+    dispatch_body.extend_from_slice(&[0x41, 2, 0x10, 1]);
+    for (idx, &(d, p, v, n)) in cases.iter().enumerate() {
+        dispatch_body.extend_from_slice(&[0x20, 0, 0x41, idx as u8, 0x46, 0x04, 0x40]);
+        dispatch_body.push(0x41);
+        leb_i32(&mut dispatch_body, d);
+        dispatch_body.push(0x41);
+        leb_i32(&mut dispatch_body, p);
+        dispatch_body.push(0x41);
+        leb_i32(&mut dispatch_body, v);
+        dispatch_body.push(0x41);
+        leb_i32(&mut dispatch_body, n);
+        dispatch_body.extend_from_slice(&[0x10, 0, 0x0f, 0x0b]); // call kernel; return; end
+    }
+    dispatch_body.extend_from_slice(&[0x41, 0]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[
+            (&[0x7f, 0x7f, 0x7f, 0x7f], &[0x7f]),
+            (&[0x7f, 0x7f, 0x7f], &[]),
+            (&[0x7f], &[0x7f]),
+        ]),
+        func_sec(&[0, 1, 2]),
+        section(5, &[1, 0x01, 1, 2]),
+        export_sec(&[("run", 0, 2)]),
+        code_sec(&[
+            enc_body(&[(2, 0x7f), (3, 0x7b)], &run_body),
+            enc_body(&[(1, 0x7f)], &init_body),
+            enc_body(&[], &dispatch_body),
+        ]),
+    ]);
+
+    // Verify Stage 2 emits `Op::SlpWideChain` on `kernel` in default mode, and does NOT emit it under `--spectre-mitigations`!
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+    let ir_raw = super::ir::lower_wasm_to_ir(val.decoded(), &module, 0).unwrap();
+    let effects =
+        super::opt::compute_module_effects(std::slice::from_ref(&ir_raw), &module, None).unwrap();
+
+    let mut ir_fast = ir_raw.clone();
+    super::opt::optimize_func_stage2(&mut ir_fast, &module, &effects, None).unwrap();
+    verify_ir(&ir_fast, &module).unwrap();
+    assert!(
+        ir_fast.blocks.iter().any(|bb| bb
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::SlpWideChain { .. }))),
+        "expected Stage 2 dynamic BCE + slp_fuse_v128_wide to emit Op::SlpWideChain"
+    );
+
+    let mut ir_spec = ir_raw;
+    let mut sc = super::opt::Stage2Scratch::default();
+    super::opt::optimize_func_stage2_with_options(
+        &mut ir_spec,
+        &module,
+        &effects,
+        true,
+        None,
+        &mut sc,
+    )
+    .unwrap();
+    verify_ir(&ir_spec, &module).unwrap();
+    assert!(
+        !ir_spec.blocks.iter().any(|bb| bb
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::SlpWideChain { .. }))),
+        "Spectre-mitigated build must NOT emit Op::SlpWideChain"
+    );
+
+    // Compile for x64-v2, x64-v3, x64-v4 AND AArch64, and verify live native execution parity
+    // against `wtime-runtime` across disjoint, in-place, forward/backward partial overlap, and OOB trap!
+    let isa_v2 = TargetIsa::default();
+    let isa_v3 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: false,
+    };
+    let isa_v4 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: true,
+    };
+    let so_v2 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v3 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v3,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v4 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let a64_so = crate::aarch64::compile_wasm_to_aarch64(
+        &wasm,
+        &crate::aarch64::A64CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(!a64_so.is_empty());
+
+    // Execute reference oracle in `wtime-runtime`!
+    let cfg = wtime_runtime::Config {
+        features: x64_validate_features(),
+        limits: x64_validate_limits(),
+    };
+    let engine = wtime_runtime::Engine::new(cfg).unwrap();
+    let rt_mod = engine.compile(&wasm).unwrap();
+    let mut store = wtime_runtime::Store::new(&engine);
+    let linker = wtime_runtime::Linker::new(&engine);
+    let inst = linker.instantiate(&mut store, &rt_mod).unwrap();
+    let wtime_runtime::External::Func(run_fn) = inst.export(&store, "run").unwrap() else {
+        panic!("export `run` is not a func");
+    };
+    let mut expected: Vec<Result<u32, u8>> = Vec::with_capacity(cases.len());
+    for case_id in 0..cases.len() {
+        match store.invoke(run_fn, &[wtime_runtime::Value::I32(case_id as i32)]) {
+            Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                wtime_runtime::Value::I32(x) => expected.push(Ok(x as u32)),
+                other => panic!("unexpected return value: {other:?}"),
+            },
+            Err(e) if e.trap_code == Some(wtime_types::TrapCode::MemoryOutOfBounds) => {
+                expected.push(Err(2));
+            }
+            other => panic!("unexpected oracle outcome for case {case_id}: {other:?}"),
+        }
+    }
+    assert_eq!(expected[4], Err(2), "case 4 must trap OOB in oracle");
+    // Sanity check: backward partial overlap (-16B) reads what k=48 just overwrote at px+32,
+    // so its hash must genuinely differ from exact in-place / disjoint!
+    assert_ne!(
+        expected[3], expected[0],
+        "backward partial overlap must produce a distinct bit-exact result"
+    );
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4, expected);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-wide-zmm-parity");
+        let mut script = String::new();
+        for case_id in 0..cases.len() {
+            script.push_str(&format!("call run {case_id:x}\n"));
+        }
+
+        for (name, bytes, req_avx2, req_avx512) in [
+            ("v2.so", &so_v2, false, false),
+            ("v3.so", &so_v3, true, false),
+            ("v4.so", &so_v4, true, true),
+        ] {
+            if req_avx512
+                && !(std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512dq"))
+            {
+                continue;
+            }
+            if req_avx2
+                && !(std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma"))
+            {
+                continue;
+            }
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{name} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"), "{name}: {stdout}");
+            for (case_id, &exp) in expected.iter().enumerate() {
+                let line = lines.next().expect("missing CALL line");
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                assert_eq!(parts[0], "CALL", "{name} case {case_id}: {line}");
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(val) => {
+                        assert_eq!(
+                            (rc, trap, res),
+                            (0, 0, u64::from(val)),
+                            "wide parity mismatch on {name} case {case_id}"
+                        );
+                    }
+                    Err(exp_trap) => {
+                        assert_ne!(rc, 0, "{name} case {case_id} should trap");
+                        assert_eq!(
+                            trap, exp_trap,
+                            "wide trap code mismatch on {name} case {case_id}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn x64_audit_dyn_bce_and_wrap_select_zero_flags_and_slp_bcast_xmm0() {
+    // Regression tests for the 3 concrete bugs caught by the independent AOT soundness audit:
+    //  1) `DynBound::Const` / `LoopBound::Const` wrapping overflow on `(x & mask) + k` and `(x & mask) * 3`
+    //     MUST NOT bypass bounds checks!
+    //  2) `Op::Select` zero-specialized `cmovcc` reusing live cond flags MUST NOT clobber RFLAGS via `xor`!
+    //  3) `Op::SlpWideChain` `bcast` operand dying at the chain (ABI-hinted to Xmm0 / V0) MUST NOT be
+    //     allocated to Xmm0 on x64-v2/v3 (verified by `verify_alloc` + native parity) or V0 on AArch64!
+
+    // Func 0: `bce_and_add(x: i32) -> i32`:
+    //   loop i = 0..4: acc += i32.load((x & 0xffff_fff0) + 16)
+    let mut bce_add = Vec::new();
+    // locals: 0=x, 1=i, 2=acc
+    bce_add.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2, // i=0; acc=0
+        0x03, 0x40, // loop
+        0x20, 2, // acc
+        0x20, 0, 0x41, // x, i32.const 0xffff_fff0
+    ]);
+    leb_i32(&mut bce_add, -16i32);
+    bce_add.extend_from_slice(&[
+        0x71, 0x41, 16, 0x6a, // (x & 0xffff_fff0) + 16
+        0x28, 0x02, 0x00, 0x6a, 0x21, 2, // i32.load; add -> acc
+        0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x41, 4, 0x49, 0x0d, 0, // i+=1; br_if (i <u 4)
+        0x0b, 0x20, 2,
+    ]);
+
+    // Func 1: `bce_and_mul(x: i32) -> i32`:
+    //   loop i = 0..4: acc += i32.load((x & 0x5555_5556) * 3)
+    let mut bce_mul = Vec::new();
+    bce_mul.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2, 0x03, 0x40, 0x20, 2, 0x20, 0, 0x41,
+    ]);
+    leb_i32(&mut bce_mul, 0x5555_5556i32);
+    bce_mul.extend_from_slice(&[
+        0x71, 0x41, 3, 0x6c, // (x & 0x5555_5556) * 3
+        0x28, 0x02, 0x00, 0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x41, 4, 0x49, 0x0d, 0,
+        0x0b, 0x20, 2,
+    ]);
+
+    // Func 2: `select_zero_flags(cond: i32) -> i32`:
+    //   a = cond + 100; b = cond + 200;
+    //   s1 = select(a, b, cond);        // sets live_flags = IntRI(cond, 0)
+    //   s2 = select(a, 0, cond);        // MUST preserve cond != 0!
+    //   s3 = select(0, b, cond);        // MUST preserve cond != 0!
+    //   return s1 + s2 * 10 + s3 * 100
+    let mut sel_body = Vec::new();
+    // locals: 0=cond, 1=a, 2=b, 3=s1, 4=s2, 5=s3
+    sel_body.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut sel_body, 100);
+    sel_body.extend_from_slice(&[0x6a, 0x21, 1, 0x20, 0, 0x41]);
+    leb_i32(&mut sel_body, 200);
+    sel_body.extend_from_slice(&[
+        0x6a, 0x21, 2, // b = cond + 200
+        0x20, 1, 0x20, 2, 0x20, 0, 0x1b, 0x21, 3, // s1 = select(a, b, cond)
+        0x20, 1, 0x41, 0, 0x20, 0, 0x1b, 0x21, 4, // s2 = select(a, 0, cond)
+        0x41, 0, 0x20, 2, 0x20, 0, 0x1b, 0x21, 5, // s3 = select(0, b, cond)
+        0x20, 3, 0x20, 4, 0x41, 10, 0x6c, 0x6a, 0x20, 5, 0x41,
+    ]);
+    leb_i32(&mut sel_body, 100);
+    sel_body.extend_from_slice(&[0x6c, 0x6a]);
+
+    // Func 3: `slp_bcast_fixed(dst: i32, a: i32, b: i32, scale: v128) -> i32`:
+    //   `scale` is the FIRST v128 param (ABI-hinted to Xmm0 / V0) and dies at the 4x SlpWideChain!
+    //   Masking `dst`/`a`/`b` with `0x3ff` sets `non_wrap_bound = 1023`, making all 4 chunks
+    //   `checked: true` straight in `bb0` while keeping `dst`/`a`/`b` distinct and `scale` dying!
+    let mut slp_bcast_fixed = Vec::new();
+    // dst &= 0x3ff; a &= 0x3ff; b &= 0x3ff
+    for local_i in 0..3u8 {
+        slp_bcast_fixed.extend_from_slice(&[0x20, local_i, 0x41]);
+        leb_i32(&mut slp_bcast_fixed, 0x3ff);
+        slp_bcast_fixed.extend_from_slice(&[0x71, 0x21, local_i]);
+    }
+    for &k in &[0u32, 16, 32, 48] {
+        slp_bcast_fixed.extend_from_slice(&[0x20, 0]);
+        slp_bcast_fixed.extend_from_slice(&[0x20, 1, 0xfd, 0x00, 0x02]);
+        leb_u32(&mut slp_bcast_fixed, k);
+        slp_bcast_fixed.extend_from_slice(&[0x20, 2, 0xfd, 0x00, 0x02]);
+        leb_u32(&mut slp_bcast_fixed, k);
+        slp_bcast_fixed.extend_from_slice(&[0xfd, 0xe4, 0x01]); // f32x4.add
+        slp_bcast_fixed.extend_from_slice(&[0x20, 3, 0xfd, 0xe4, 0x01]); // + scale (v128 param 0!)
+        slp_bcast_fixed.extend_from_slice(&[0xfd, 0x0b, 0x02]);
+        leb_u32(&mut slp_bcast_fixed, k);
+    }
+    slp_bcast_fixed.extend_from_slice(&[0x41, 0]);
+    for k in (0..64u32).step_by(4) {
+        slp_bcast_fixed.extend_from_slice(&[0x20, 0, 0x28, 0x02]);
+        leb_u32(&mut slp_bcast_fixed, k);
+        slp_bcast_fixed.push(0x73);
+    }
+
+    let mut run_slp_bcast = Vec::new();
+    // Initialize a[0..16] = 1.0 + i, b[0..16] = 10.0 + i
+    for i in 0..16u32 {
+        run_slp_bcast.push(0x41);
+        leb_i32(&mut run_slp_bcast, (0x100 + i * 4) as i32);
+        run_slp_bcast.push(0x43);
+        run_slp_bcast.extend_from_slice(&(1.0f32 + i as f32).to_bits().to_le_bytes());
+        run_slp_bcast.extend_from_slice(&[0x38, 0x02, 0x00]);
+        run_slp_bcast.push(0x41);
+        leb_i32(&mut run_slp_bcast, (0x200 + i * 4) as i32);
+        run_slp_bcast.push(0x43);
+        run_slp_bcast.extend_from_slice(&(10.0f32 + i as f32).to_bits().to_le_bytes());
+        run_slp_bcast.extend_from_slice(&[0x38, 0x02, 0x00]);
+    }
+    // Two distinct call sites so `slp_bcast_fixed` is NOT single-caller inlined!
+    run_slp_bcast.extend_from_slice(&[0x20, 0, 0x04, 0x7f]);
+    for &p in &[0x300i32, 0x100, 0x200] {
+        run_slp_bcast.push(0x41);
+        leb_i32(&mut run_slp_bcast, p);
+    }
+    run_slp_bcast.push(0x43);
+    run_slp_bcast.extend_from_slice(&100.5f32.to_bits().to_le_bytes());
+    run_slp_bcast.extend_from_slice(&[0xfd, 0x13, 0x10, 3, 0x05]);
+    for &p in &[0x300i32, 0x100, 0x200] {
+        run_slp_bcast.push(0x41);
+        leb_i32(&mut run_slp_bcast, p);
+    }
+    run_slp_bcast.push(0x43);
+    run_slp_bcast.extend_from_slice(&200.25f32.to_bits().to_le_bytes());
+    run_slp_bcast.extend_from_slice(&[0xfd, 0x13, 0x10, 3, 0x0b]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7f, 0x7f, 0x7f, 0x7b], &[0x7f])]),
+        func_sec(&[0, 0, 0, 1, 0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("bce_add", 0, 0),
+            ("bce_mul", 0, 1),
+            ("sel", 0, 2),
+            ("bcast", 0, 4),
+        ]),
+        code_sec(&[
+            enc_body(&[(2, 0x7f)], &bce_add),
+            enc_body(&[(2, 0x7f)], &bce_mul),
+            enc_body(&[(5, 0x7f)], &sel_body),
+            enc_body(&[], &slp_bcast_fixed),
+            enc_body(&[], &run_slp_bcast),
+        ]),
+    ]);
+
+    // Confirm func 3 (`slp_bcast_fixed`) actually lowered to `Op::SlpWideChain`!
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let module = admit_x64_module(val.decoded()).unwrap();
+    let ir_raw = super::ir::lower_wasm_to_ir(val.decoded(), &module, 3).unwrap();
+    let effects = super::opt::compute_module_effects(
+        &(0..5)
+            .map(|i| super::ir::lower_wasm_to_ir(val.decoded(), &module, i).unwrap())
+            .collect::<Vec<_>>(),
+        &module,
+        None,
+    )
+    .unwrap();
+    let mut ir_opt = ir_raw;
+    super::opt::optimize_func_stage2(&mut ir_opt, &module, &effects, None).unwrap();
+    verify_ir(&ir_opt, &module).unwrap();
+    assert!(
+        ir_opt.blocks.iter().any(|bb| bb
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, super::ir::Op::SlpWideChain { .. }))),
+        "expected slp_bcast_fixed to emit Op::SlpWideChain"
+    );
+
+    // Compile with `verify: true` on x64-v2, x64-v3, x64-v4 AND AArch64!
+    let isa_v2 = TargetIsa::default();
+    let isa_v3 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: false,
+    };
+    let isa_v4 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: true,
+    };
+    let so_v2 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v3 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v3,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v4 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            verify: true,
+            isa: isa_v4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let a64_so = crate::aarch64::compile_wasm_to_aarch64(
+        &wasm,
+        &crate::aarch64::A64CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(!a64_so.is_empty());
+
+    // Reference oracle via `wtime-runtime`.
+    let cfg = wtime_runtime::Config {
+        features: x64_validate_features(),
+        limits: x64_validate_limits(),
+    };
+    let engine = wtime_runtime::Engine::new(cfg).unwrap();
+    let rt_mod = engine.compile(&wasm).unwrap();
+    let mut store = wtime_runtime::Store::new(&engine);
+    let inst = wtime_runtime::Linker::new(&engine)
+        .instantiate(&mut store, &rt_mod)
+        .unwrap();
+    let calls: [(&str, u32); 6] = [
+        ("bce_add", 0x1000_0000),
+        ("bce_mul", 0x0001_0000),
+        ("sel", 0),
+        ("sel", 7),
+        ("bcast", 0),
+        ("bcast", 1),
+    ];
+    let mut expected: Vec<Result<u32, u8>> = Vec::new();
+    for &(name, arg) in &calls {
+        let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+            panic!()
+        };
+        match store.invoke(f, &[wtime_runtime::Value::I32(arg as i32)]) {
+            Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                wtime_runtime::Value::I32(v) => expected.push(Ok(v as u32)),
+                other => panic!("{other:?}"),
+            },
+            Err(e) if e.trap_code == Some(wtime_types::TrapCode::MemoryOutOfBounds) => {
+                expected.push(Err(2));
+            }
+            other => panic!("{name}({arg:#x}) -> {other:?}"),
+        }
+    }
+    assert_eq!(expected[0], Err(2), "bce_add(0x1000_0000) must trap OOB");
+    assert_eq!(expected[1], Err(2), "bce_mul(0x0001_0000) must trap OOB");
+    assert_eq!(expected[2], Ok(200 + 200 * 100));
+    assert_eq!(expected[3], Ok(107 + 107 * 10));
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4, expected);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-audit-regressions");
+        let mut script = String::new();
+        for &(name, arg) in &calls {
+            script.push_str(&format!("call {name} {arg:x}\n"));
+        }
+        for (name, bytes, req_avx2, req_avx512) in [
+            ("v2.so", &so_v2, false, false),
+            ("v3.so", &so_v3, true, false),
+            ("v4.so", &so_v4, true, true),
+        ] {
+            if req_avx512
+                && !(std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512dq"))
+            {
+                continue;
+            }
+            if req_avx2
+                && !(std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma"))
+            {
+                continue;
+            }
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{name} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"), "{name}: {stdout}");
+            for (idx, (&(cname, arg), &exp)) in calls.iter().zip(&expected).enumerate() {
+                let line = lines.next().expect("missing CALL line");
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                assert_eq!(parts[0], "CALL", "{name} #{idx}: {line}");
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(v) => assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(v)),
+                        "{name} {cname}({arg:#x}) mismatch"
+                    ),
+                    Err(et) => {
+                        assert_ne!(rc, 0, "{name} {cname}({arg:#x}) must trap");
+                        assert_eq!(trap, et, "{name} {cname}({arg:#x}) wrong trap");
+                    }
+                }
+            }
         }
     }
 }

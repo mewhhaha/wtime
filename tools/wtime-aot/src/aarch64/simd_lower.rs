@@ -16,8 +16,128 @@ fn load_v128_const(asm: &mut A64Asm, dst: VReg, bytes: [u8; 16]) {
     asm.ldr_q_uimm(dst, SGP3, 0);
 }
 
-/// Emits `i8x16.shuffle(a, b, lanes)` via 1-table NEON `TBL` (out-of-range index `0xff` yields 0).
+/// Checks whether `lanes` matches one of the 128-bit AdvSIMD permutes (`zip1`/`zip2`/`uzp1`/`uzp2`/`trn1`/`trn2`)
+/// at `size` (`0`=16b, `1`=8h, `2`=4s, `3`=2d) on `(lhs, rhs)` (with `lhs` = bytes 0..16, `rhs` = bytes 16..32).
+fn match_a64_perm(lanes: &[u8; 16], swapped: bool) -> Option<(u8, u8)> {
+    // Returns `(kind, size)` where `kind`: 0=uzp1, 1=uzp2, 2=trn1, 3=trn2, 4=zip1, 5=zip2.
+    for size in 0u8..=3 {
+        let elem = 1usize << size;
+        let n = 16 / elem;
+        let half = n / 2;
+        let map_byte = |b: u8| -> u8 {
+            if swapped {
+                if b < 16 { b + 16 } else { b - 16 }
+            } else {
+                b
+            }
+        };
+        let mut ok = [true; 6];
+        for i in 0..n {
+            // Expected source element index (0..n = lhs, n..2n = rhs) for each of the 6 permutes:
+            let exp_elems = [
+                // uzp1: even elements from lhs, then even elements from rhs
+                if i < half { 2 * i } else { n + 2 * (i - half) },
+                // uzp2: odd elements from lhs, then odd elements from rhs
+                if i < half {
+                    2 * i + 1
+                } else {
+                    n + 2 * (i - half) + 1
+                },
+                // trn1: [lhs[0], rhs[0], lhs[2], rhs[2], ...]
+                if (i & 1) == 0 { i } else { n + (i - 1) },
+                // trn2: [lhs[1], rhs[1], lhs[3], rhs[3], ...]
+                if (i & 1) == 0 { i + 1 } else { n + i },
+                // zip1: [lhs[0], rhs[0], lhs[1], rhs[1], ...]
+                if (i & 1) == 0 { i / 2 } else { n + (i / 2) },
+                // zip2: [lhs[half], rhs[half], ...]
+                if (i & 1) == 0 {
+                    half + i / 2
+                } else {
+                    n + half + i / 2
+                },
+            ];
+            for k in 0..6 {
+                if !ok[k] {
+                    continue;
+                }
+                let base = (exp_elems[k] * elem) as u8;
+                for j in 0..elem {
+                    if lanes[i * elem + j] != map_byte(base + j as u8) {
+                        ok[k] = false;
+                        break;
+                    }
+                }
+            }
+        }
+        // Prefer zip1/zip2/uzp1/uzp2/trn1/trn2
+        for k in [4usize, 5, 0, 1, 2, 3] {
+            if ok[k] {
+                return Some((k as u8, size));
+            }
+        }
+    }
+    None
+}
+
+/// Emits `i8x16.shuffle(a, b, lanes)` using 1-cycle NEON permute/EXT/DUP fast paths when possible,
+/// falling back to 1-table NEON `TBL` (out-of-range index `0xff` yields 0) for arbitrary shuffles.
 pub fn emit_a64_v128_shuffle(asm: &mut A64Asm, d: VReg, a: VReg, b: VReg, lanes: &[u8; 16]) {
+    // Fast path 0: identity copies
+    if (0..16u8).all(|i| lanes[i as usize] == i) {
+        asm.mov_16b(d, a);
+        return;
+    }
+    if (0..16u8).all(|i| lanes[i as usize] == i + 16) {
+        asm.mov_16b(d, b);
+        return;
+    }
+    // Fast path 1: contiguous 16-byte slide (`EXT Vd.16B, Vn.16B, Vm.16B, #imm4`)
+    let start = lanes[0];
+    if start < 16 && (0..16u8).all(|i| lanes[i as usize] == start + i) {
+        asm.ext_16b(d, a, b, start);
+        return;
+    }
+    if start >= 16 && (0..16u8).all(|i| lanes[i as usize] == (start + i) % 32) {
+        asm.ext_16b(d, b, a, start - 16);
+        return;
+    }
+    if start < 16 && (0..16u8).all(|i| lanes[i as usize] == (start + i) % 16) {
+        asm.ext_16b(d, a, a, start);
+        return;
+    }
+    if start >= 16 && (0..16u8).all(|i| lanes[i as usize] == 16 + ((start - 16 + i) % 16)) {
+        asm.ext_16b(d, b, b, start - 16);
+        return;
+    }
+    // Fast path 2: single-element broadcast (`DUP Vd.<T>, Vn.<T>[lane]`)
+    for size in (0u8..=3).rev() {
+        let elem = 1usize << size;
+        let first = lanes[0];
+        let src_is_b = first >= 16;
+        let base = if src_is_b { first - 16 } else { first };
+        if (base as usize).is_multiple_of(elem)
+            && (0..16).all(|i| lanes[i] == first + (i % elem) as u8)
+        {
+            let lane = base / (elem as u8);
+            asm.dup_elt_128(size, d, if src_is_b { b } else { a }, lane);
+            return;
+        }
+    }
+    // Fast path 3: `zip1`/`zip2`/`uzp1`/`uzp2`/`trn1`/`trn2` (covers ALL 4x4 AoS<->SoA transposes!)
+    for (swapped, vn, vm) in [(false, a, b), (true, b, a)] {
+        if let Some((kind, size)) = match_a64_perm(lanes, swapped) {
+            match kind {
+                0 => asm.uzp1_128(size, d, vn, vm),
+                1 => asm.uzp2_128(size, d, vn, vm),
+                2 => asm.trn1_128(size, d, vn, vm),
+                3 => asm.trn2_128(size, d, vn, vm),
+                4 => asm.zip1_128(size, d, vn, vm),
+                _ => asm.zip2_128(size, d, vn, vm),
+            }
+            return;
+        }
+    }
+
     let mut mask_a = [0xffu8; 16];
     let mut mask_b = [0xffu8; 16];
     let mut uses_a = false;

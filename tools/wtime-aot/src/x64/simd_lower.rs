@@ -7,6 +7,7 @@
 
 use super::asm::{Asm, Cond, Gp, Mem, RelocTarget, Xmm};
 use super::ir::{SimdLaneKind, SimdSplatKind};
+use super::lower::TargetIsa;
 use super::{OFF_SCRATCH_V128, RodataConsts};
 
 /// Internal `V128Bin` pseudo-opcode for SSE2 `psadbw` (sum of absolute differences of 8-bit lanes
@@ -65,7 +66,35 @@ pub fn emit_v128_splat(
     dst: Xmm,
     gp_src: Option<Gp>,
     fp_src: Option<Xmm>,
+    isa: TargetIsa,
 ) {
+    if isa.has_avx2 {
+        match kind {
+            SimdSplatKind::I8x16 => {
+                asm.vmovd_xr(dst, gp_src.unwrap());
+                asm.vpbroadcastb_xx(dst, dst);
+            }
+            SimdSplatKind::I16x8 => {
+                asm.vmovd_xr(dst, gp_src.unwrap());
+                asm.vpbroadcastw_xx(dst, dst);
+            }
+            SimdSplatKind::I32x4 => {
+                asm.vmovd_xr(dst, gp_src.unwrap());
+                asm.vpbroadcastd_xx(dst, dst);
+            }
+            SimdSplatKind::I64x2 => {
+                asm.vmovq_xr(dst, gp_src.unwrap());
+                asm.vpbroadcastq_xx(dst, dst);
+            }
+            SimdSplatKind::F32x4 => {
+                asm.vbroadcastss_xx(dst, fp_src.unwrap());
+            }
+            SimdSplatKind::F64x2 => {
+                asm.vmovddup_xx(dst, fp_src.unwrap());
+            }
+        }
+        return;
+    }
     match kind {
         SimdSplatKind::I8x16 => {
             asm.movd_xr(dst, gp_src.unwrap());
@@ -110,26 +139,44 @@ pub fn emit_v128_extract_lane(
     match kind {
         SimdLaneKind::I8x16S => {
             let d = gp_dst.unwrap();
-            asm.pextrb(d, v, lane);
+            if has_avx2 {
+                asm.vpextrb(d, v, lane);
+            } else {
+                asm.pextrb(d, v, lane);
+            }
             asm.movsx_rr8(false, d, d);
         }
         SimdLaneKind::I8x16U => {
             let d = gp_dst.unwrap();
-            asm.pextrb(d, v, lane);
+            if has_avx2 {
+                asm.vpextrb(d, v, lane);
+            } else {
+                asm.pextrb(d, v, lane);
+            }
         }
         SimdLaneKind::I16x8S => {
             let d = gp_dst.unwrap();
-            asm.pextrw(d, v, lane);
+            if has_avx2 {
+                asm.vpextrw(d, v, lane);
+            } else {
+                asm.pextrw(d, v, lane);
+            }
             asm.movsx_rr16(false, d, d);
         }
         SimdLaneKind::I16x8U => {
             let d = gp_dst.unwrap();
-            asm.pextrw(d, v, lane);
+            if has_avx2 {
+                asm.vpextrw(d, v, lane);
+            } else {
+                asm.pextrw(d, v, lane);
+            }
         }
         SimdLaneKind::I32x4 => {
             let d = gp_dst.unwrap();
             if lane == 0 {
                 asm.movd_rx(d, v);
+            } else if has_avx2 {
+                asm.vpextrd(d, v, lane);
             } else {
                 asm.pextrd(d, v, lane);
             }
@@ -138,6 +185,8 @@ pub fn emit_v128_extract_lane(
             let d = gp_dst.unwrap();
             if lane == 0 {
                 asm.movq_rx(d, v);
+            } else if has_avx2 {
+                asm.vpextrq(d, v, lane);
             } else {
                 asm.pextrq(d, v, lane);
             }
@@ -166,6 +215,7 @@ pub fn emit_v128_extract_lane(
 }
 
 /// Emits `V128ReplaceLane`: `dst` gets `v` with `lane` replaced by `x`.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_v128_replace_lane(
     asm: &mut Asm,
     kind: SimdLaneKind,
@@ -174,7 +224,33 @@ pub fn emit_v128_replace_lane(
     lane: u8,
     gp_x: Option<Gp>,
     fp_x: Option<Xmm>,
+    isa: TargetIsa,
 ) {
+    if isa.has_avx2 {
+        match kind {
+            SimdLaneKind::I8x16S | SimdLaneKind::I8x16U => {
+                asm.vpinsrb(dst, v, gp_x.unwrap(), lane);
+            }
+            SimdLaneKind::I16x8S | SimdLaneKind::I16x8U => {
+                asm.vpinsrw(dst, v, gp_x.unwrap(), lane);
+            }
+            SimdLaneKind::I32x4 => {
+                asm.vpinsrd(dst, v, gp_x.unwrap(), lane);
+            }
+            SimdLaneKind::I64x2 => {
+                asm.vpinsrq(dst, v, gp_x.unwrap(), lane);
+            }
+            SimdLaneKind::F32x4 => {
+                asm.vmovd_rx(SGP1, fp_x.unwrap());
+                asm.vpinsrd(dst, v, SGP1, lane);
+            }
+            SimdLaneKind::F64x2 => {
+                asm.vmovq_rx(SGP1, fp_x.unwrap());
+                asm.vpinsrq(dst, v, SGP1, lane);
+            }
+        }
+        return;
+    }
     match kind {
         SimdLaneKind::I8x16S | SimdLaneKind::I8x16U => {
             asm.movaps_rr(dst, v);
@@ -207,7 +283,247 @@ pub fn emit_v128_replace_lane(
 }
 
 /// Emits `i8x16.shuffle(a, b, lanes)` into `dst` (safe for any `dst`/`a`/`b` aliasing).
-pub fn emit_v128_shuffle(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm, lanes: &[u8; 16]) {
+/// Recognizes single-instruction 32-bit/64-bit/16-bit/8-bit unpacks, `shufps`, `pshufd`, and
+/// `palignr` slides before falling back to `vpshufb`/`pshufb`.
+pub fn emit_v128_shuffle(
+    asm: &mut Asm,
+    dst: Xmm,
+    a: Xmm,
+    b: Xmm,
+    lanes: &[u8; 16],
+    isa: TargetIsa,
+) {
+    // 0. Identity moves
+    if (0..16u8).all(|i| lanes[i as usize] == i) {
+        asm.movaps_rr(dst, a);
+        return;
+    }
+    if (0..16u8).all(|i| lanes[i as usize] == i + 16) {
+        asm.movaps_rr(dst, b);
+        return;
+    }
+
+    // 1. 32-bit lane-aligned patterns (`vpshufd`, `vunpcklps`, `vunpckhps`, `vshufps` — covers all 4x4 transposes!)
+    let is_u32_aligned = (0..4).all(|k| {
+        let base = lanes[4 * k];
+        (base & 3) == 0
+            && lanes[4 * k + 1] == base + 1
+            && lanes[4 * k + 2] == base + 2
+            && lanes[4 * k + 3] == base + 3
+    });
+    if is_u32_aligned {
+        let d32 = [lanes[0] / 4, lanes[4] / 4, lanes[8] / 4, lanes[12] / 4];
+        if d32.iter().all(|&x| x < 4) {
+            let imm = d32[0] | (d32[1] << 2) | (d32[2] << 4) | (d32[3] << 6);
+            if isa.has_avx2 {
+                asm.vpshufd(dst, a, imm);
+            } else {
+                asm.pshufd(dst, a, imm);
+            }
+            return;
+        }
+        if d32.iter().all(|&x| x >= 4) {
+            let imm =
+                (d32[0] - 4) | ((d32[1] - 4) << 2) | ((d32[2] - 4) << 4) | ((d32[3] - 4) << 6);
+            if isa.has_avx2 {
+                asm.vpshufd(dst, b, imm);
+            } else {
+                asm.pshufd(dst, b, imm);
+            }
+            return;
+        }
+        // 2-source `unpcklps` / `unpckhps` / `shufps`
+        if d32 == [0, 4, 1, 5] {
+            if isa.has_avx2 {
+                asm.vunpcklps_xxx(dst, a, b);
+            } else {
+                let r = prep_bin(asm, dst, a, b);
+                asm.unpcklps(dst, r);
+            }
+            return;
+        }
+        if d32 == [4, 0, 5, 1] {
+            if isa.has_avx2 {
+                asm.vunpcklps_xxx(dst, b, a);
+            } else {
+                let r = prep_bin_swap(asm, dst, a, b);
+                asm.unpcklps(dst, r);
+            }
+            return;
+        }
+        if d32 == [2, 6, 3, 7] {
+            if isa.has_avx2 {
+                asm.vunpckhps_xxx(dst, a, b);
+            } else {
+                let r = prep_bin(asm, dst, a, b);
+                asm.unpckhps(dst, r);
+            }
+            return;
+        }
+        if d32 == [6, 2, 7, 3] {
+            if isa.has_avx2 {
+                asm.vunpckhps_xxx(dst, b, a);
+            } else {
+                let r = prep_bin_swap(asm, dst, a, b);
+                asm.unpckhps(dst, r);
+            }
+            return;
+        }
+        if d32[0] < 4 && d32[1] < 4 && d32[2] >= 4 && d32[3] >= 4 {
+            let imm = d32[0] | (d32[1] << 2) | ((d32[2] - 4) << 4) | ((d32[3] - 4) << 6);
+            if isa.has_avx2 {
+                asm.vshufps_xxxi(dst, a, b, imm);
+            } else {
+                let r = prep_bin(asm, dst, a, b);
+                asm.shufps(dst, r, imm);
+            }
+            return;
+        }
+        if d32[0] >= 4 && d32[1] >= 4 && d32[2] < 4 && d32[3] < 4 {
+            let imm = (d32[0] - 4) | ((d32[1] - 4) << 2) | (d32[2] << 4) | (d32[3] << 6);
+            if isa.has_avx2 {
+                asm.vshufps_xxxi(dst, b, a, imm);
+            } else {
+                let r = prep_bin_swap(asm, dst, a, b);
+                asm.shufps(dst, r, imm);
+            }
+            return;
+        }
+    }
+
+    // 2. Contiguous 16-byte slide (`vpalignr` / `palignr`)
+    let start = lanes[0];
+    if start > 0 && start < 16 && (0..16u8).all(|i| lanes[i as usize] == start + i) {
+        if isa.has_avx2 {
+            asm.vpalignr_xxxi(dst, b, a, start);
+        } else {
+            let r = prep_bin_swap(asm, dst, a, b);
+            asm.palignr(dst, r, start);
+        }
+        return;
+    }
+    if start > 16 && (0..16u8).all(|i| lanes[i as usize] == (start + i) % 32) {
+        let imm = start - 16;
+        if isa.has_avx2 {
+            asm.vpalignr_xxxi(dst, a, b, imm);
+        } else {
+            let r = prep_bin(asm, dst, a, b);
+            asm.palignr(dst, r, imm);
+        }
+        return;
+    }
+    if start > 0 && start < 16 && (0..16u8).all(|i| lanes[i as usize] == (start + i) % 16) {
+        if isa.has_avx2 {
+            asm.vpalignr_xxxi(dst, a, a, start);
+        } else {
+            asm.movaps_rr(dst, a);
+            asm.palignr(dst, dst, start);
+        }
+        return;
+    }
+    if start > 16 && (0..16u8).all(|i| lanes[i as usize] == 16 + ((start - 16 + i) % 16)) {
+        let imm = start - 16;
+        if isa.has_avx2 {
+            asm.vpalignr_xxxi(dst, b, b, imm);
+        } else {
+            asm.movaps_rr(dst, b);
+            asm.palignr(dst, dst, imm);
+        }
+        return;
+    }
+
+    // 3. Exact byte/word interleaves (`punpcklbw`/`hbw`/`lwd`/`hwd`)
+    let is_unpck_b = |lo_off: u8, swap: bool| {
+        (0..8u8).all(|k| {
+            let x = lo_off + k;
+            let (e0, e1) = if swap { (x + 16, x) } else { (x, x + 16) };
+            lanes[(2 * k) as usize] == e0 && lanes[(2 * k + 1) as usize] == e1
+        })
+    };
+    if is_unpck_b(0, false) {
+        if isa.has_avx2 {
+            asm.vpunpcklbw_xxx(dst, a, b);
+        } else {
+            let r = prep_bin(asm, dst, a, b);
+            asm.punpcklbw(dst, r);
+        }
+        return;
+    }
+    if is_unpck_b(0, true) {
+        if isa.has_avx2 {
+            asm.vpunpcklbw_xxx(dst, b, a);
+        } else {
+            let r = prep_bin_swap(asm, dst, a, b);
+            asm.punpcklbw(dst, r);
+        }
+        return;
+    }
+    if is_unpck_b(8, false) {
+        if isa.has_avx2 {
+            asm.vpunpckhbw_xxx(dst, a, b);
+        } else {
+            let r = prep_bin(asm, dst, a, b);
+            asm.punpckhbw(dst, r);
+        }
+        return;
+    }
+    if is_unpck_b(8, true) {
+        if isa.has_avx2 {
+            asm.vpunpckhbw_xxx(dst, b, a);
+        } else {
+            let r = prep_bin_swap(asm, dst, a, b);
+            asm.punpckhbw(dst, r);
+        }
+        return;
+    }
+    let is_unpck_w = |lo_off: u8, swap: bool| {
+        (0..4u8).all(|k| {
+            let x = lo_off + 2 * k;
+            let (e0, e1) = if swap { (x + 16, x) } else { (x, x + 16) };
+            lanes[(4 * k) as usize] == e0
+                && lanes[(4 * k + 1) as usize] == e0 + 1
+                && lanes[(4 * k + 2) as usize] == e1
+                && lanes[(4 * k + 3) as usize] == e1 + 1
+        })
+    };
+    if is_unpck_w(0, false) {
+        if isa.has_avx2 {
+            asm.vpunpcklwd_xxx(dst, a, b);
+        } else {
+            let r = prep_bin(asm, dst, a, b);
+            asm.punpcklwd(dst, r);
+        }
+        return;
+    }
+    if is_unpck_w(0, true) {
+        if isa.has_avx2 {
+            asm.vpunpcklwd_xxx(dst, b, a);
+        } else {
+            let r = prep_bin_swap(asm, dst, a, b);
+            asm.punpcklwd(dst, r);
+        }
+        return;
+    }
+    if is_unpck_w(8, false) {
+        if isa.has_avx2 {
+            asm.vpunpckhwd_xxx(dst, a, b);
+        } else {
+            let r = prep_bin(asm, dst, a, b);
+            asm.punpckhwd(dst, r);
+        }
+        return;
+    }
+    if is_unpck_w(8, true) {
+        if isa.has_avx2 {
+            asm.vpunpckhwd_xxx(dst, b, a);
+        } else {
+            let r = prep_bin_swap(asm, dst, a, b);
+            asm.punpckhwd(dst, r);
+        }
+        return;
+    }
+
+    // 4. General byte shuffle (`vpshufb` / `pshufb`)
     let mut mask_a = [0x80u8; 16];
     let mut mask_b = [0x80u8; 16];
     let mut uses_a = false;
@@ -221,6 +537,25 @@ pub fn emit_v128_shuffle(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm, lanes: &[u8; 1
             mask_b[i] = l - 16;
             uses_b = true;
         }
+    }
+    if isa.has_avx2 {
+        if !uses_b {
+            let off = asm.add_local_rodata(16, &mask_a);
+            asm.vpshufb_xx_rip(dst, a, RelocTarget::LocalRodata(off));
+            return;
+        }
+        if !uses_a {
+            let off = asm.add_local_rodata(16, &mask_b);
+            asm.vpshufb_xx_rip(dst, b, RelocTarget::LocalRodata(off));
+            return;
+        }
+        // Compute `b` into `SFP2` FIRST so even `dst == b` (or `dst == a == b`) is 100% alias-safe with zero copies!
+        let off_b = asm.add_local_rodata(16, &mask_b);
+        let off_a = asm.add_local_rodata(16, &mask_a);
+        asm.vpshufb_xx_rip(SFP2, b, RelocTarget::LocalRodata(off_b));
+        asm.vpshufb_xx_rip(dst, a, RelocTarget::LocalRodata(off_a));
+        asm.vpor_xxx(dst, dst, SFP2);
+        return;
     }
     if !uses_b {
         asm.movaps_rr(dst, a);
@@ -253,7 +588,37 @@ pub fn emit_v128_shuffle(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm, lanes: &[u8; 1
 /// Emits `v128.bitselect(a, b, c)` = `(a & c) | (b & !c)` = `((a ^ b) & c) ^ b`.
 /// `a_reg`, `b_reg`, `c_reg` are loaded with `a_reg` possibly SFP1, `b_reg` possibly SFP2,
 /// and `c` passed via `c_xmm` or saved in `ctx_v128_tmp()`.
-pub fn emit_v128_bitselect(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm, c_in_tmp: bool, c: Xmm) {
+pub fn emit_v128_bitselect(
+    asm: &mut Asm,
+    dst: Xmm,
+    a: Xmm,
+    b: Xmm,
+    c_in_tmp: bool,
+    c: Xmm,
+    isa: TargetIsa,
+) {
+    if isa.has_avx2 {
+        if !c_in_tmp {
+            // `c` is an allocated register (`Xmm0..13`), `a != SFP2`, `dst != SFP2`.
+            // Step 1 writes `SFP2 = !c & b` (safe even if `b == SFP2`), keeping `a` and `c` intact.
+            asm.vpandn_xxx(SFP2, c, b);
+            asm.vpand_xxx(dst, a, c);
+            asm.vpor_xxx(dst, dst, SFP2);
+        } else {
+            // `c` is in `ctx_v128_tmp()`: compute `((a ^ b) & [tmp]) ^ b`.
+            // Keep `b` in `SFP2` if `dst == b` (safe even if `b == SFP2`).
+            let b_saved = if dst == b {
+                asm.vmovaps_rr(SFP2, b);
+                SFP2
+            } else {
+                b
+            };
+            asm.vpxor_xxx(dst, a, b_saved);
+            asm.vpand_xxm(dst, dst, ctx_v128_tmp());
+            asm.vpxor_xxx(dst, dst, b_saved);
+        }
+        return;
+    }
     if !c_in_tmp {
         asm.movdqu_mx(ctx_v128_tmp(), c);
     }
@@ -270,7 +635,44 @@ pub fn emit_v128_bitselect(asm: &mut Asm, dst: Xmm, a: Xmm, b: Xmm, c_in_tmp: bo
 }
 
 /// Emits all `V128 -> I32` ops (`any_true`, `all_true`, `bitmask`).
-pub fn emit_v128_to_i32(asm: &mut Asm, op: u16, dst: Gp, a: Xmm) -> Result<(), String> {
+pub fn emit_v128_to_i32(
+    asm: &mut Asm,
+    op: u16,
+    dst: Gp,
+    a: Xmm,
+    isa: TargetIsa,
+) -> Result<(), String> {
+    if isa.has_avx2 {
+        match op {
+            0xfd53 => {
+                asm.vptest(a, a);
+                asm.setcc(Cond::Ne, dst);
+                asm.movzx_rr8(dst, dst);
+            }
+            0xfd63 | 0xfd83 | 0xfda3 | 0xfdc3 => {
+                asm.vpxor_xxx(SFP2, SFP2, SFP2);
+                match op {
+                    0xfd63 => asm.vpcmpeqb_xxx(SFP2, SFP2, a),
+                    0xfd83 => asm.vpcmpeqw_xxx(SFP2, SFP2, a),
+                    0xfda3 => asm.vpcmpeqd_xxx(SFP2, SFP2, a),
+                    _ => asm.vpcmpeqq_xxx(SFP2, SFP2, a),
+                }
+                asm.vptest(SFP2, SFP2);
+                asm.setcc(Cond::E, dst);
+                asm.movzx_rr8(dst, dst);
+            }
+            0xfd64 => asm.vpmovmskb(dst, a),
+            0xfd84 => {
+                asm.vpxor_xxx(SFP2, SFP2, SFP2);
+                asm.vpacksswb_xxx(SFP2, a, SFP2);
+                asm.vpmovmskb(dst, SFP2);
+            }
+            0xfda4 => asm.vmovmskps(dst, a),
+            0xfdc4 => asm.vmovmskpd(dst, a),
+            _ => return Err(format!("x64: unknown V128ToI32 opcode {op:#x}")),
+        }
+        return Ok(());
+    }
     match op {
         0xfd53 => {
             // v128.any_true
@@ -540,7 +942,227 @@ pub fn emit_v128_un_full(
     dst: Xmm,
     a: Xmm,
     ro: &RodataConsts,
+    isa: TargetIsa,
 ) -> Result<(), String> {
+    if isa.has_avx512 && op == 0xfdfb {
+        // AVX-512VL 1-instruction bit-exact `f32x4.convert_i32x4_u`!
+        asm.vcvtudq2ps_xx(dst, a);
+        return Ok(());
+    }
+    if isa.has_avx512 && op == 0xfd4d {
+        // AVX-512VL 1-instruction native EVEX `v128.not` (`!a`, works directly on `Xmm0..Xmm31`).
+        asm.vpternlogd_xxx(dst, a, a, 0x55);
+        return Ok(());
+    }
+    if isa.has_avx2 {
+        match op {
+            0xfd4d => {
+                asm.vpcmpeqd_xxx(SFP2, SFP2, SFP2);
+                asm.vpxor_xxx(dst, a, SFP2);
+                return Ok(());
+            }
+            0xfd5e => {
+                asm.vcvtpd2ps_xx(dst, a);
+                return Ok(());
+            }
+            0xfd5f => {
+                asm.vcvtps2pd_xx(dst, a);
+                return Ok(());
+            }
+            0xfd60 => {
+                asm.vpabsb_xx(dst, a);
+                return Ok(());
+            }
+            0xfd61 | 0xfd81 | 0xfda1 | 0xfdc1 => {
+                asm.vpxor_xxx(SFP2, SFP2, SFP2);
+                match op {
+                    0xfd61 => asm.vpsubb_xxx(dst, SFP2, a),
+                    0xfd81 => asm.vpsubw_xxx(dst, SFP2, a),
+                    0xfda1 => asm.vpsubd_xxx(dst, SFP2, a),
+                    _ => asm.vpsubq_xxx(dst, SFP2, a),
+                }
+                return Ok(());
+            }
+            0xfd67 => {
+                asm.vroundps_xxi(dst, a, 0x0a);
+                return Ok(());
+            }
+            0xfd68 => {
+                asm.vroundps_xxi(dst, a, 0x09);
+                return Ok(());
+            }
+            0xfd69 => {
+                asm.vroundps_xxi(dst, a, 0x0b);
+                return Ok(());
+            }
+            0xfd6a => {
+                asm.vroundps_xxi(dst, a, 0x08);
+                return Ok(());
+            }
+            0xfd74 => {
+                asm.vroundpd_xxi(dst, a, 0x0a);
+                return Ok(());
+            }
+            0xfd75 => {
+                asm.vroundpd_xxi(dst, a, 0x09);
+                return Ok(());
+            }
+            0xfd7a => {
+                asm.vroundpd_xxi(dst, a, 0x0b);
+                return Ok(());
+            }
+            0xfd94 => {
+                asm.vroundpd_xxi(dst, a, 0x08);
+                return Ok(());
+            }
+            0xfd7c => {
+                load_local_v128(asm, SFP2, &splat16_u8(1));
+                asm.vpmaddubsw_xxx(dst, SFP2, a);
+                return Ok(());
+            }
+            0xfd7d => {
+                load_local_v128(asm, SFP2, &splat16_u8(1));
+                asm.vpmaddubsw_xxx(dst, a, SFP2);
+                return Ok(());
+            }
+            0xfd7e => {
+                load_local_v128(asm, SFP2, &splat8_u16(1));
+                asm.vpmaddwd_xxx(dst, a, SFP2);
+                return Ok(());
+            }
+            0xfd7f => {
+                load_local_v128(asm, SFP2, &splat8_u16(0x8000));
+                asm.vpxor_xxx(dst, a, SFP2);
+                load_local_v128(asm, SFP2, &splat8_u16(1));
+                asm.vpmaddwd_xxx(dst, dst, SFP2);
+                load_local_v128(asm, SFP2, &splat4_u32(0x10000));
+                asm.vpaddd_xxx(dst, dst, SFP2);
+                return Ok(());
+            }
+            0xfd80 => {
+                asm.vpabsw_xx(dst, a);
+                return Ok(());
+            }
+            0xfd87 => {
+                asm.vpmovsxbw_xx(dst, a);
+                return Ok(());
+            }
+            0xfd88 => {
+                asm.vpsrldq_xxi(SFP2, a, 8);
+                asm.vpmovsxbw_xx(dst, SFP2);
+                return Ok(());
+            }
+            0xfd89 => {
+                asm.vpmovzxbw_xx(dst, a);
+                return Ok(());
+            }
+            0xfd8a => {
+                asm.vpsrldq_xxi(SFP2, a, 8);
+                asm.vpmovzxbw_xx(dst, SFP2);
+                return Ok(());
+            }
+            0xfda0 => {
+                asm.vpabsd_xx(dst, a);
+                return Ok(());
+            }
+            0xfda7 => {
+                asm.vpmovsxwd_xx(dst, a);
+                return Ok(());
+            }
+            0xfda8 => {
+                asm.vpsrldq_xxi(SFP2, a, 8);
+                asm.vpmovsxwd_xx(dst, SFP2);
+                return Ok(());
+            }
+            0xfda9 => {
+                asm.vpmovzxwd_xx(dst, a);
+                return Ok(());
+            }
+            0xfdaa => {
+                asm.vpsrldq_xxi(SFP2, a, 8);
+                asm.vpmovzxwd_xx(dst, SFP2);
+                return Ok(());
+            }
+            0xfdc0 => {
+                asm.vpshufd(SFP2, a, 0xf5);
+                asm.vpsrad_xxi(SFP2, SFP2, 31);
+                asm.vpxor_xxx(dst, a, SFP2);
+                asm.vpsubq_xxx(dst, dst, SFP2);
+                return Ok(());
+            }
+            0xfdc7 => {
+                asm.vpmovsxdq_xx(dst, a);
+                return Ok(());
+            }
+            0xfdc8 => {
+                asm.vpsrldq_xxi(SFP2, a, 8);
+                asm.vpmovsxdq_xx(dst, SFP2);
+                return Ok(());
+            }
+            0xfdc9 => {
+                asm.vpmovzxdq_xx(dst, a);
+                return Ok(());
+            }
+            0xfdca => {
+                asm.vpsrldq_xxi(SFP2, a, 8);
+                asm.vpmovzxdq_xx(dst, SFP2);
+                return Ok(());
+            }
+            0xfde0 => {
+                asm.vandps_xx_rip(dst, a, RelocTarget::Rodata(ro.f32_abs));
+                return Ok(());
+            }
+            0xfde1 => {
+                asm.vxorps_xx_rip(dst, a, RelocTarget::Rodata(ro.f32_neg));
+                return Ok(());
+            }
+            0xfde3 => {
+                asm.vsqrtps_xx(dst, a);
+                return Ok(());
+            }
+            0xfdec => {
+                asm.vandpd_xx_rip(dst, a, RelocTarget::Rodata(ro.f64_abs));
+                return Ok(());
+            }
+            0xfded => {
+                asm.vxorpd_xx_rip(dst, a, RelocTarget::Rodata(ro.f64_neg));
+                return Ok(());
+            }
+            0xfdef => {
+                asm.vsqrtpd_xx(dst, a);
+                return Ok(());
+            }
+            0xfdfa => {
+                asm.vcvtdq2ps_xx(dst, a);
+                return Ok(());
+            }
+            0xfdfb => {
+                // AVX2 zero-spill `f32x4.convert_i32x4_u`: lo = a & 0xffff, hi = a >> 16, float(lo) + float(hi) * 65536.0
+                let mask_off = asm.add_local_rodata(16, &splat4_u32(0x0000_ffff));
+                let scale_off = asm.add_local_rodata(16, &splat4_u32(65536.0f32.to_bits()));
+                asm.vpsrld_xxi(SFP2, a, 16);
+                asm.vpand_xx_rip(dst, a, RelocTarget::LocalRodata(mask_off));
+                asm.vcvtdq2ps_xx(dst, dst);
+                asm.vcvtdq2ps_xx(SFP2, SFP2);
+                asm.vmulps_xx_rip(SFP2, SFP2, RelocTarget::LocalRodata(scale_off));
+                asm.vaddps_xxx(dst, dst, SFP2);
+                return Ok(());
+            }
+            0xfdfe => {
+                asm.vcvtdq2pd_xx(dst, a);
+                return Ok(());
+            }
+            0xfdff => {
+                let two52 = splat2_u64(0x4330_0000_0000_0000);
+                asm.vpmovzxdq_xx(dst, a);
+                load_local_v128(asm, SFP2, &two52);
+                asm.vpor_xxx(dst, dst, SFP2);
+                asm.vsubpd_xxx(dst, dst, SFP2);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     match op {
         0xfdf8 => {
             // i32x4.trunc_sat_f32x4_s (only uses `dst`, `SFP2`, and `ctx_v128_tmp`)
@@ -1270,8 +1892,326 @@ fn emit_v128_bin_rest(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Resul
     Ok(())
 }
 
+/// Attempts to emit a 3-address VEX 128-bit binary op with a memory RHS operand (`dst = a op [mem]`).
+/// Returns `true` if `op` has a direct unaligned-safe VEX memory-operand form.
+pub fn try_emit_v128_bin_mem_vex(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, mem: Mem) -> bool {
+    match op {
+        0xfd4e => asm.vpand_xxm(dst, a, mem),
+        0xfd50 => asm.vpor_xxm(dst, a, mem),
+        0xfd51 => asm.vpxor_xxm(dst, a, mem),
+        0xfd6e => asm.vpaddb_xxm(dst, a, mem),
+        0xfd71 => asm.vpsubb_xxm(dst, a, mem),
+        0xfd8e => asm.vpaddw_xxm(dst, a, mem),
+        0xfd91 => asm.vpsubw_xxm(dst, a, mem),
+        0xfd95 => asm.vpmullw_xxm(dst, a, mem),
+        0xfdae => asm.vpaddd_xxm(dst, a, mem),
+        0xfdb1 => asm.vpsubd_xxm(dst, a, mem),
+        0xfdb5 => asm.vpmulld_xxm(dst, a, mem),
+        0xfdce => asm.vpaddq_xxm(dst, a, mem),
+        0xfdd1 => asm.vpsubq_xxm(dst, a, mem),
+        0xfde4 => asm.vaddps_xxm(dst, a, mem),
+        0xfde5 => asm.vsubps_xxm(dst, a, mem),
+        0xfde6 => asm.vmulps_xxm(dst, a, mem),
+        0xfde7 => asm.vdivps_xxm(dst, a, mem),
+        0xfdf0 => asm.vaddpd_xxm(dst, a, mem),
+        0xfdf1 => asm.vsubpd_xxm(dst, a, mem),
+        0xfdf2 => asm.vmulpd_xxm(dst, a, mem),
+        0xfdf3 => asm.vdivpd_xxm(dst, a, mem),
+        _ => return false,
+    }
+    true
+}
+
+/// True if `op` is a bit-exact commutative integer/bitwise V128 binary op (`a op b == b op a`).
+/// (FP ops are excluded so NaN operand-order bit patterns stay 100% identical to the oracle.)
+#[inline]
+pub fn is_bitexact_commutative_v128_bin(op: u16) -> bool {
+    matches!(
+        op,
+        0xfd4e | 0xfd50 | 0xfd51 | 0xfd6e | 0xfd8e | 0xfd95 | 0xfdae | 0xfdb5 | 0xfdce
+    )
+}
+
+/// 3-address VEX 128-bit lowering for all binary SIMD ops (zero `movaps` copies, alias-safe for
+/// any `dst`/`a`/`b` with `dst != SFP2` and `a != SFP2`).
+fn emit_v128_bin_vex(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Result<bool, String> {
+    // Unsigned compare: `SFP2 = min/max(a, b)` (safe even when `b == SFP2` or `dst == a`),
+    // then `dst = (SFP2 == a)`, then optional invert.
+    let emit_ucmp = |asm: &mut Asm, use_max: bool, invert: bool, width: u8| {
+        match (use_max, width) {
+            (false, 1) => asm.vpminub_xxx(SFP2, a, b),
+            (true, 1) => asm.vpmaxub_xxx(SFP2, a, b),
+            (false, 2) => asm.vpminuw_xxx(SFP2, a, b),
+            (true, 2) => asm.vpmaxuw_xxx(SFP2, a, b),
+            (false, 4) => asm.vpminud_xxx(SFP2, a, b),
+            (true, 4) => asm.vpmaxud_xxx(SFP2, a, b),
+            _ => unreachable!(),
+        }
+        match width {
+            1 => asm.vpcmpeqb_xxx(dst, SFP2, a),
+            2 => asm.vpcmpeqw_xxx(dst, SFP2, a),
+            4 => asm.vpcmpeqd_xxx(dst, SFP2, a),
+            _ => unreachable!(),
+        }
+        if invert {
+            asm.vpcmpeqd_xxx(SFP2, SFP2, SFP2);
+            asm.vpxor_xxx(dst, dst, SFP2);
+        }
+    };
+    let invert_dst = |asm: &mut Asm| {
+        asm.vpcmpeqd_xxx(SFP2, SFP2, SFP2);
+        asm.vpxor_xxx(dst, dst, SFP2);
+    };
+
+    match op {
+        0xfd0e => {
+            // i8x16.swizzle: 2 VEX instructions, zero memory scratch!
+            let off = asm.add_local_rodata(16, &splat16_u8(0x70));
+            asm.vpaddusb_xx_rip(SFP2, b, RelocTarget::LocalRodata(off));
+            asm.vpshufb_xxx(dst, a, SFP2);
+        }
+        // i8x16 cmp
+        0xfd23 => asm.vpcmpeqb_xxx(dst, a, b),
+        0xfd24 => {
+            asm.vpcmpeqb_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfd25 => asm.vpcmpgtb_xxx(dst, b, a),
+        0xfd26 => emit_ucmp(asm, true, true, 1),
+        0xfd27 => asm.vpcmpgtb_xxx(dst, a, b),
+        0xfd28 => emit_ucmp(asm, false, true, 1),
+        0xfd29 => {
+            asm.vpcmpgtb_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfd2a => emit_ucmp(asm, false, false, 1),
+        0xfd2b => {
+            asm.vpcmpgtb_xxx(dst, b, a);
+            invert_dst(asm);
+        }
+        0xfd2c => emit_ucmp(asm, true, false, 1),
+        // i16x8 cmp
+        0xfd2d => asm.vpcmpeqw_xxx(dst, a, b),
+        0xfd2e => {
+            asm.vpcmpeqw_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfd2f => asm.vpcmpgtw_xxx(dst, b, a),
+        0xfd30 => emit_ucmp(asm, true, true, 2),
+        0xfd31 => asm.vpcmpgtw_xxx(dst, a, b),
+        0xfd32 => emit_ucmp(asm, false, true, 2),
+        0xfd33 => {
+            asm.vpcmpgtw_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfd34 => emit_ucmp(asm, false, false, 2),
+        0xfd35 => {
+            asm.vpcmpgtw_xxx(dst, b, a);
+            invert_dst(asm);
+        }
+        0xfd36 => emit_ucmp(asm, true, false, 2),
+        // i32x4 cmp
+        0xfd37 => asm.vpcmpeqd_xxx(dst, a, b),
+        0xfd38 => {
+            asm.vpcmpeqd_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfd39 => asm.vpcmpgtd_xxx(dst, b, a),
+        0xfd3a => emit_ucmp(asm, true, true, 4),
+        0xfd3b => asm.vpcmpgtd_xxx(dst, a, b),
+        0xfd3c => emit_ucmp(asm, false, true, 4),
+        0xfd3d => {
+            asm.vpcmpgtd_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfd3e => emit_ucmp(asm, false, false, 4),
+        0xfd3f => {
+            asm.vpcmpgtd_xxx(dst, b, a);
+            invert_dst(asm);
+        }
+        0xfd40 => emit_ucmp(asm, true, false, 4),
+        // f32x4 cmp
+        0xfd41 => asm.vcmpps_xxxi(dst, a, b, 0),
+        0xfd42 => asm.vcmpps_xxxi(dst, a, b, 4),
+        0xfd43 => asm.vcmpps_xxxi(dst, a, b, 1),
+        0xfd44 => asm.vcmpps_xxxi(dst, b, a, 1),
+        0xfd45 => asm.vcmpps_xxxi(dst, a, b, 2),
+        0xfd46 => asm.vcmpps_xxxi(dst, b, a, 2),
+        // f64x2 cmp
+        0xfd47 => asm.vcmppd_xxxi(dst, a, b, 0),
+        0xfd48 => asm.vcmppd_xxxi(dst, a, b, 4),
+        0xfd49 => asm.vcmppd_xxxi(dst, a, b, 1),
+        0xfd4a => asm.vcmppd_xxxi(dst, b, a, 1),
+        0xfd4b => asm.vcmppd_xxxi(dst, a, b, 2),
+        0xfd4c => asm.vcmppd_xxxi(dst, b, a, 2),
+        // bitwise
+        0xfd4e => asm.vpand_xxx(dst, a, b),
+        0xfd4f => asm.vpandn_xxx(dst, b, a), // !b & a
+        0xfd50 => asm.vpor_xxx(dst, a, b),
+        0xfd51 => asm.vpxor_xxx(dst, a, b),
+        // narrow
+        0xfd65 => asm.vpacksswb_xxx(dst, a, b),
+        0xfd66 => asm.vpackuswb_xxx(dst, a, b),
+        0xfd85 => asm.vpackssdw_xxx(dst, a, b),
+        0xfd86 => asm.vpackusdw_xxx(dst, a, b),
+        // i8x16 arith
+        0xfd6e => asm.vpaddb_xxx(dst, a, b),
+        0xfd6f => asm.vpaddsb_xxx(dst, a, b),
+        0xfd70 => asm.vpaddusb_xxx(dst, a, b),
+        0xfd71 => asm.vpsubb_xxx(dst, a, b),
+        0xfd72 => asm.vpsubsb_xxx(dst, a, b),
+        0xfd73 => asm.vpsubusb_xxx(dst, a, b),
+        0xfd76 => asm.vpminsb_xxx(dst, a, b),
+        0xfd77 => asm.vpminub_xxx(dst, a, b),
+        0xfd78 => asm.vpmaxsb_xxx(dst, a, b),
+        0xfd79 => asm.vpmaxub_xxx(dst, a, b),
+        0xfd7b => asm.vpavgb_xxx(dst, a, b),
+        // i16x8 arith & extmul
+        0xfd82 => {
+            asm.vpmulhrsw_xxx(dst, a, b);
+            load_local_v128(asm, SFP2, &splat8_u16(0x8000));
+            asm.vpcmpeqw_xxx(SFP2, SFP2, dst);
+            asm.vpxor_xxx(dst, dst, SFP2);
+        }
+        0xfd8e => asm.vpaddw_xxx(dst, a, b),
+        0xfd8f => asm.vpaddsw_xxx(dst, a, b),
+        0xfd90 => asm.vpaddusw_xxx(dst, a, b),
+        0xfd91 => asm.vpsubw_xxx(dst, a, b),
+        0xfd92 => asm.vpsubsw_xxx(dst, a, b),
+        0xfd93 => asm.vpsubusw_xxx(dst, a, b),
+        0xfd95 => asm.vpmullw_xxx(dst, a, b),
+        0xfd96 => asm.vpminsw_xxx(dst, a, b),
+        0xfd97 => asm.vpminuw_xxx(dst, a, b),
+        0xfd98 => asm.vpmaxsw_xxx(dst, a, b),
+        0xfd99 => asm.vpmaxuw_xxx(dst, a, b),
+        0xfd9b => asm.vpavgw_xxx(dst, a, b),
+        0xfd9c => {
+            asm.vpmovsxbw_xx(SFP2, b);
+            asm.vpmovsxbw_xx(dst, a);
+            asm.vpmullw_xxx(dst, dst, SFP2);
+        }
+        0xfd9d => {
+            asm.vpsrldq_xxi(SFP2, b, 8);
+            asm.vpmovsxbw_xx(SFP2, SFP2);
+            asm.vpsrldq_xxi(dst, a, 8);
+            asm.vpmovsxbw_xx(dst, dst);
+            asm.vpmullw_xxx(dst, dst, SFP2);
+        }
+        0xfd9e => {
+            asm.vpmovzxbw_xx(SFP2, b);
+            asm.vpmovzxbw_xx(dst, a);
+            asm.vpmullw_xxx(dst, dst, SFP2);
+        }
+        0xfd9f => {
+            asm.vpsrldq_xxi(SFP2, b, 8);
+            asm.vpmovzxbw_xx(SFP2, SFP2);
+            asm.vpsrldq_xxi(dst, a, 8);
+            asm.vpmovzxbw_xx(dst, dst);
+            asm.vpmullw_xxx(dst, dst, SFP2);
+        }
+        // i32x4 arith & dot & extmul
+        0xfdae => asm.vpaddd_xxx(dst, a, b),
+        0xfdb1 => asm.vpsubd_xxx(dst, a, b),
+        0xfdb5 => asm.vpmulld_xxx(dst, a, b),
+        0xfdb6 => asm.vpminsd_xxx(dst, a, b),
+        0xfdb7 => asm.vpminud_xxx(dst, a, b),
+        0xfdb8 => asm.vpmaxsd_xxx(dst, a, b),
+        0xfdb9 => asm.vpmaxud_xxx(dst, a, b),
+        0xfdba => asm.vpmaddwd_xxx(dst, a, b),
+        0xfdbc => {
+            asm.vpmovsxwd_xx(SFP2, b);
+            asm.vpmovsxwd_xx(dst, a);
+            asm.vpmulld_xxx(dst, dst, SFP2);
+        }
+        0xfdbd => {
+            asm.vpsrldq_xxi(SFP2, b, 8);
+            asm.vpmovsxwd_xx(SFP2, SFP2);
+            asm.vpsrldq_xxi(dst, a, 8);
+            asm.vpmovsxwd_xx(dst, dst);
+            asm.vpmulld_xxx(dst, dst, SFP2);
+        }
+        0xfdbe => {
+            asm.vpmovzxwd_xx(SFP2, b);
+            asm.vpmovzxwd_xx(dst, a);
+            asm.vpmulld_xxx(dst, dst, SFP2);
+        }
+        0xfdbf => {
+            asm.vpsrldq_xxi(SFP2, b, 8);
+            asm.vpmovzxwd_xx(SFP2, SFP2);
+            asm.vpsrldq_xxi(dst, a, 8);
+            asm.vpmovzxwd_xx(dst, dst);
+            asm.vpmulld_xxx(dst, dst, SFP2);
+        }
+        // i64x2 arith, cmp, extmul
+        0xfdce => asm.vpaddq_xxx(dst, a, b),
+        0xfdd1 => asm.vpsubq_xxx(dst, a, b),
+        0xfdd6 => asm.vpcmpeqq_xxx(dst, a, b),
+        0xfdd7 => {
+            asm.vpcmpeqq_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfdd8 => asm.vpcmpgtq_xxx(dst, b, a),
+        0xfdd9 => asm.vpcmpgtq_xxx(dst, a, b),
+        0xfdda => {
+            asm.vpcmpgtq_xxx(dst, a, b);
+            invert_dst(asm);
+        }
+        0xfddb => {
+            asm.vpcmpgtq_xxx(dst, b, a);
+            invert_dst(asm);
+        }
+        0xfddc => {
+            asm.vpshufd(SFP2, b, 0x50);
+            asm.vpshufd(dst, a, 0x50);
+            asm.vpmuldq_xxx(dst, dst, SFP2);
+        }
+        0xfddd => {
+            asm.vpshufd(SFP2, b, 0xfa);
+            asm.vpshufd(dst, a, 0xfa);
+            asm.vpmuldq_xxx(dst, dst, SFP2);
+        }
+        0xfdde => {
+            asm.vpshufd(SFP2, b, 0x50);
+            asm.vpshufd(dst, a, 0x50);
+            asm.vpmuludq_xxx(dst, dst, SFP2);
+        }
+        0xfddf => {
+            asm.vpshufd(SFP2, b, 0xfa);
+            asm.vpshufd(dst, a, 0xfa);
+            asm.vpmuludq_xxx(dst, dst, SFP2);
+        }
+        // f32x4 arith
+        0xfde4 => asm.vaddps_xxx(dst, a, b),
+        0xfde5 => asm.vsubps_xxx(dst, a, b),
+        0xfde6 => asm.vmulps_xxx(dst, a, b),
+        0xfde7 => asm.vdivps_xxx(dst, a, b),
+        0xfdea => asm.vminps_xxx(dst, b, a), // f32x4.pmin(a, b) == vminps(b, a)
+        0xfdeb => asm.vmaxps_xxx(dst, b, a), // f32x4.pmax(a, b) == vmaxps(b, a)
+        // f64x2 arith
+        0xfdf0 => asm.vaddpd_xxx(dst, a, b),
+        0xfdf1 => asm.vsubpd_xxx(dst, a, b),
+        0xfdf2 => asm.vmulpd_xxx(dst, a, b),
+        0xfdf3 => asm.vdivpd_xxx(dst, a, b),
+        0xfdf6 => asm.vminpd_xxx(dst, b, a),
+        0xfdf7 => asm.vmaxpd_xxx(dst, b, a),
+        V128_OP_PSADBW => asm.vpsadbw_xxx(dst, a, b),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Complete binary entry point handling `i8x16.lt_u`, `i64x2.mul`, and `f32x4`/`f64x2` `min`/`max` cleanly.
-pub fn emit_v128_bin_full(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> Result<(), String> {
+pub fn emit_v128_bin_full(
+    asm: &mut Asm,
+    op: u16,
+    dst: Xmm,
+    a: Xmm,
+    b: Xmm,
+    isa: TargetIsa,
+) -> Result<(), String> {
+    if isa.has_avx2 && emit_v128_bin_vex(asm, op, dst, a, b)? {
+        return Ok(());
+    }
     match op {
         0xfd26 => {
             // i8x16.lt_u: ~(max_u(a, b) == a)
@@ -1435,7 +2375,88 @@ pub fn emit_v128_bin_full(asm: &mut Asm, op: u16, dst: Xmm, a: Xmm, b: Xmm) -> R
 }
 
 /// Emits all `(V128, I32) -> V128` SIMD shift ops with ZERO GP clobbers.
-pub fn emit_v128_shift(asm: &mut Asm, op: u16, dst: Xmm, v: Xmm, shift: Gp) -> Result<(), String> {
+pub fn emit_v128_shift(
+    asm: &mut Asm,
+    op: u16,
+    dst: Xmm,
+    v: Xmm,
+    shift: Gp,
+    isa: TargetIsa,
+) -> Result<(), String> {
+    if isa.has_avx2 {
+        match op {
+            0xfd6b | 0xfd6d => {
+                let mut tbl = [0u8; 128];
+                for k in 0..8usize {
+                    let m = if op == 0xfd6b {
+                        0xffu8.wrapping_shl(k as u32)
+                    } else {
+                        0xffu8 >> (k as u32)
+                    };
+                    tbl[k * 16..(k + 1) * 16].fill(m);
+                }
+                let tbl_off = asm.add_local_rodata(16, &tbl);
+                asm.mov_rr(false, SGP2, shift);
+                asm.and_ri(false, SGP2, 7);
+                asm.vmovd_xr(SFP2, SGP2);
+                if op == 0xfd6b {
+                    asm.vpsllw_xxx(dst, v, SFP2);
+                } else {
+                    asm.vpsrlw_xxx(dst, v, SFP2);
+                }
+                asm.shl_imm(true, SGP2, 4);
+                asm.lea_rip(SGP1, RelocTarget::LocalRodata(tbl_off));
+                asm.vpand_xxm(dst, dst, Mem::indexed(SGP1, SGP2, 1, 0));
+                return Ok(());
+            }
+            0xfd8b..=0xfd8d => {
+                asm.mov_rr(false, SGP2, shift);
+                asm.and_ri(false, SGP2, 15);
+                asm.vmovd_xr(SFP2, SGP2);
+                match op {
+                    0xfd8b => asm.vpsllw_xxx(dst, v, SFP2),
+                    0xfd8c => asm.vpsraw_xxx(dst, v, SFP2),
+                    _ => asm.vpsrlw_xxx(dst, v, SFP2),
+                }
+                return Ok(());
+            }
+            0xfdab..=0xfdad => {
+                asm.mov_rr(false, SGP2, shift);
+                asm.and_ri(false, SGP2, 31);
+                asm.vmovd_xr(SFP2, SGP2);
+                match op {
+                    0xfdab => asm.vpslld_xxx(dst, v, SFP2),
+                    0xfdac => asm.vpsrad_xxx(dst, v, SFP2),
+                    _ => asm.vpsrld_xxx(dst, v, SFP2),
+                }
+                return Ok(());
+            }
+            0xfdcb | 0xfdcd => {
+                asm.mov_rr(false, SGP2, shift);
+                asm.and_ri(false, SGP2, 63);
+                asm.vmovd_xr(SFP2, SGP2);
+                if op == 0xfdcb {
+                    asm.vpsllq_xxx(dst, v, SFP2);
+                } else {
+                    asm.vpsrlq_xxx(dst, v, SFP2);
+                }
+                return Ok(());
+            }
+            0xfdcc => {
+                asm.vpshufd(SFP2, v, 0xf5);
+                asm.vpsrad_xxi(SFP2, SFP2, 31);
+                asm.vmovdqu_mx(ctx_v128_tmp(), SFP2);
+                asm.vpxor_xxx(dst, v, SFP2);
+                asm.mov_rr(false, SGP2, shift);
+                asm.and_ri(false, SGP2, 63);
+                asm.vmovd_xr(SFP2, SGP2);
+                asm.vpsrlq_xxx(dst, dst, SFP2);
+                asm.vpxor_xxm(dst, dst, ctx_v128_tmp());
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     asm.movaps_rr(dst, v);
     match op {
         0xfd6b | 0xfd6d => {
