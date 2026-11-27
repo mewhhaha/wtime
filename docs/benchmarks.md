@@ -38,6 +38,25 @@ Across all 6 kernels, pure-Rust `--backend x64` beats Wasmtime `49.0.3` on **all
 
 ---
 
+## 2b. `v0.1.9` Scalar & SIMD Kernels vs. Node V8 & Bun JSC
+
+Interleaved 3-trial median runs (`seed = 42`, `rustc 1.99.0` `wasm32-unknown-unknown -C opt-level=3 -C target-feature=+simd128`, Node `v26.5.0`, Bun `1.4.5`). Lower is better.
+
+![v0.1.9 scalar and SIMD kernels vs Node V8 and Bun JSC](assets/v019-vs-v8-jsc.svg)
+
+| Kernel | `wtime-aot x64` default | `wtime-aot x64 --guard-pages` | Node V8 `v26.5.0` | Bun JSC `1.4.5` | Parity hash |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `lcg_recurrence` | 0.3509 ms | **0.3468 ms** *(1.03× vs V8)* | 0.3559 ms | 0.3727 ms | `0x0000d4b0` |
+| `prime_sieve` | 0.1053 ms | 0.1054 ms *(0.95× vs V8)* | **0.1005 ms** | 0.1115 ms | `0x701e0495` |
+| `matmul_64` | 0.0222 ms | **0.0197 ms** *(1.37× vs V8)* | 0.0269 ms | 0.0256 ms | `0x0063c504` |
+| `mandelbrot_f32` | 3.1809 ms | 3.1118 ms *(0.98× vs V8)* | **3.0485 ms** | 3.2213 ms | `0x0019bb88` |
+| `particle_spark_simd` | 0.6034 ms | **0.5295 ms** *(1.30× vs V8)* | 0.6895 ms | 0.6070 ms | `0x00cb86f2` |
+| `merge_sort` | 3.5536 ms | **3.2694 ms** *(1.47× vs V8)* | 4.8158 ms | 5.2871 ms | `0xa7bd73a0` |
+| **6-kernel total** | **7.8163 ms** | **7.3826 ms** *(1.22× vs V8)* | 9.0371 ms | 9.6252 ms | — |
+| **6-kernel geomean** | **0.4213 ms** | **0.3964 ms** *(1.17× vs V8)* | 0.4621 ms | 0.4716 ms | — |
+
+---
+
 ## 3. Compilation, Incremental Rebuilds, & Warm Load
 
 Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds on a real **5.91 MiB, 4,523-function** SIMD-enabled WebAssembly application (`--jobs 0`, 16 threads) plus the 6 self-contained kernels. (`--backend c` declines this app cleanly because it uses 128-bit Wasm SIMD.)
