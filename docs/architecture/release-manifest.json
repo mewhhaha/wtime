@@ -48,55 +48,55 @@
   "licenses": {
     "project_license": "MIT OR Apache-2.0",
     "report_path": "docs/verification/dependency-budget.txt",
-    "report_sha256": "83c69960430478c8271fd4a128c4fe2fd52bfc019626f3a201a5c973a709569a"
+    "report_sha256": "21bd84184a013d51ecc02d0c887f6d18fac48327005a46629964fb08102471e1"
   },
   "evidence": {
     "core3": {
       "path": "docs/verification/core3.json",
-      "sha256": "7fcbefd00175bd06bcee488b7bdb3d86b45708c18d35b5c4abe42ecd16d26c35"
+      "sha256": "63e5be832295c300dabce29f23f122fd4073b6d2f3e16f7dfea0575bafc7005d"
     },
     "phase3": {
       "path": "docs/verification/phase3.json",
-      "sha256": "311f21f20f59bba9d014c9577077eb13b41985722d911dcfff4c0d07fcca1466"
+      "sha256": "fb4add5fee30fc7310f1eacdda0f325c63d0827445dfd6a5e2eff1944860b908"
     },
     "feature_profiles": {
       "path": "docs/verification/feature-profiles.json",
-      "sha256": "c723391c53b44a8076de0dd825adb91b1e62281fe10805f40c901d36a5d2833b"
+      "sha256": "72b6bd56635649c482d2910d71af5e858b8b7eb81dc4eed70d0da7cf24d74a13"
     },
     "interactions": {
       "path": "docs/verification/interactions.json",
-      "sha256": "7d4b387262709ec5a46a1dc9b16c00074e7188823cf9c9d3859f3719a260f57c",
+      "sha256": "991bc0c4edc2f9b9cc4e8135f46f0b848b8716d50edd680e305121011472b4e7",
       "corpus_report": "docs/verification/interaction-corpus.json",
-      "corpus_sha256": "1a6f284a96d8495b9d2af4a0ba1a5ab43281412e49a89fb0aadc2c45b8c26cff"
+      "corpus_sha256": "c9ea03409a92534fb51792e2988bb369942dce3134ecb155c6e335a40bf223f9"
     },
     "fuzz": {
       "path": "docs/verification/fuzz.json",
-      "sha256": "66b06cbfe2a95467e5ba56431a23447a29d526e52a204c22c0584b5d02d13da2"
+      "sha256": "116e58b87e544d91163e61b174b36fe9353b8c252dca239c9666795108c01889"
     },
     "differential": {
       "path": "docs/verification/differential.json",
-      "sha256": "d78fcc54ed200428555921cab514fa966d8862f37165dae4aa4d106430a61c4a"
+      "sha256": "e53e25b7ea7d995fde8d5df851335a8d3f46ce96aa9a4f6e7144accfead3721c"
     },
     "hardening": {
       "path": "docs/verification/native-x86_64.json",
-      "sha256": "fa384d30099c0418bb797ca2442382806a8c38945c063fcdd3ede555b1401453"
+      "sha256": "be369b22e96684b3df81f7e68bd0f516ca96b45dd810717a992b62a84ed689dc"
     },
     "build_final": {
       "path": "docs/verification/build-final.json",
-      "sha256": "187a61cc86664199d7d63aaab53a727d2e463ea99a18101145a60a8cd1423d68"
+      "sha256": "329238a48e06982a07a52fd7ee915eb88b86df79001bf3c5c7c1a4e684859a46"
     },
     "api_docs": {
       "path": "docs/verification/api-docs.json",
-      "sha256": "b99fb502c6afbb343f0f10745aeab4070b2feaf027786d058d857a7be394f7ec"
+      "sha256": "d1c04a4849b10f2d872486f791ff471bf41c230abf611c897af5f7b1c5038712"
     },
     "native_x86_64": {
       "path": "docs/verification/native-x86_64.json",
-      "sha256": "fa384d30099c0418bb797ca2442382806a8c38945c063fcdd3ede555b1401453"
+      "sha256": "be369b22e96684b3df81f7e68bd0f516ca96b45dd810717a992b62a84ed689dc"
     },
     "allocation_failure": {
       "path": "docs/verification/allocation-failure.json",
-      "sha256": "f895284a460776486cf15ccc43d9ecf58846c6aa58fb5696ccca1ed25b18c2b4"
+      "sha256": "b55845c338655cd2d2dd6cf7ddeaf5eb256388c09a19ebbf17024db590e271a0"
     }
   },
-  "source_sha256": "c495d0e449fa0281d7e0f103794f690cce6a6ce1f4ad1e622c476a473171bd91"
+  "source_sha256": "2d7ff86d01f7f842e7e7a2759debb9cf036aff83e5068b98622363cb7329d874"
 }
