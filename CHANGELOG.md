@@ -2,6 +2,49 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.9] - 2026-11-27
+
+Scalar codegen and loop-optimization release for `wtime-aot` (`--backend x64`,
+with shared Stage 2 IR passes benefiting `aarch64`): inductive join/loop-header
+`u32` bounds propagation, branchless 2-pointer merge-loop versioning &
+paired-`Store` diamond if-conversion, x86-64 `ZF` flag reuse & pre-`cmp`
+backedge move hoisting for macro-fusion, phi-edge peer coalescing, single-use
+loop-constant rematerialization, and zero-gap spill-slot register forwarding.
+Core crates remain `#![forbid(unsafe_code)]` with zero external production
+dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Inductive join/loop-header BCE & branchless merge-loop if-conversion**:
+  - Added `refine_join_param_bounds`, `unwrap_min_u_src` (requiring proven
+    `<=u imm` fallback arms on `I32Imm` selects), and dominator-chain
+    `extract_term_i32_cmp` inside DOM-GVN/BCE to prove non-circular `u32` upper
+    bounds across multi-predecessor joins and loop headers.
+  - Extended `if_convert_trivial_diamonds` to merge identical-address GP
+    `Op::Store` diamonds into adjacent `CmpSelect`s + a single `Op::Store`
+    sharing one `cmp` via `live_flags`.
+  - Added `static_u32_upper_bound` and `if_convert_two_ptr_merge_loops` to
+    version guarded 2-pointer merge loops (proving `k <= hi - 2` under a
+    preheader `i_init <u mid && j_init <u hi` guard) into a branchless
+    `cmp` + `cmov` + single `Op::Store` + macro-fused `jb` backedge fast loop
+    while preserving the untouched slow loop as the exact fallback for
+    adversarial/wrapping inputs.
+- **x86-64 `ZF` flag reuse, pre-`cmp` macro-fusion, & zero-gap spill forwarding**:
+  - Added `LiveFlags::IntZero` on flag-setting `add`/`sub`/`and`/`or`/`xor`
+    instructions (never `imul` or `lea`), reused exclusively for `BranchIf` /
+    `Eq 0` / `Ne 0` checks.
+  - Added `will_reuse_int_flags` and `can_hoist_moves_before_cmp` to hoist
+    non-aliasing backedge moves ahead of `cmp`/`test` for x86 `cmp/add/test +
+    jcc` macro-fusion.
+  - Added intra-block zero-gap spill-slot register forwarding (`just_spilled`,
+    guarded by exact code-offset equality and `is64 || is_upper32_zero(v)`).
+- **Register coalescing, constant rematerialization, & incremental cache**:
+  - Added `add_phi_peer` phi-edge coalescing priority and single-use
+    non-hoisted `ConstI32` rematerialization in `regalloc.rs`.
+  - Bumped incremental cache `FORMAT_VERSION` (`x64`: `18 -> 19`, `aarch64`:
+    `13 -> 14`) and added IR/oracle parity and soundness regression tests
+    (`x64_scalar_gap_bce_merge_ifconv_and_flags_parity`,
+    `x64_scalar_gap_audit_regressions`).
+
 ## [0.1.8] - 2026-11-27
 
 SIMD, vectorization, loop optimization, and virtual-memory bounds-checking
