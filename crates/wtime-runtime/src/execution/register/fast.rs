@@ -479,7 +479,14 @@ enum RegOp {
         src: u16,
         cidx: u32,
     },
-    /// Fused `dst = acc + (a * b)` with exact two-rounding IEEE-754 Wasm semantics.
+    /// Fused `dst = acc + (a * b)` with exact two-rounding IEEE-754 Wasm semantics (`f32`).
+    F32MulAdd {
+        dst: u16,
+        acc: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Fused `dst = acc + (a * b)` with exact two-rounding IEEE-754 Wasm semantics (`f64`).
     F64MulAdd {
         dst: u16,
         acc: u16,
@@ -555,10 +562,40 @@ enum RegOp {
         offset: u32,
         src_off: u8,
     },
+    /// Fused `acc = acc.wrapping_add(u32(mem0[addr + offset]))`.
+    LoadI32Add {
+        acc: u16,
+        addr: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `acc = f32(acc) + f32(mem0[addr + offset])`.
+    LoadF32Add {
+        acc: u16,
+        addr: u16,
+        offset: u32,
+        src_off: u8,
+    },
     /// Fused `acc = f64(acc) + f64(mem0[addr + offset])`.
     LoadF64Add {
         acc: u16,
         addr: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `acc = acc.wrapping_add(u32(mem0[(base + (idx << 2)) + offset]))` (memory32).
+    LoadI32Shl2AddAcc {
+        acc: u16,
+        base: u16,
+        idx: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused `acc = f64(acc) + f64(mem0[(base + (idx << 3)) + offset])` (memory32).
+    LoadF64Shl3AddAcc {
+        acc: u16,
+        base: u16,
+        idx: u16,
         offset: u32,
         src_off: u8,
     },
@@ -655,6 +692,20 @@ enum RegOp {
     StoreI32_16 {
         addr: u16,
         val: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    /// Fused 4-byte immediate store (`mem0[addr + offset] = val`, covers zero-stores & constants).
+    StoreI32Imm {
+        addr: u16,
+        val: u32,
+        offset: u16,
+        src_off: u8,
+    },
+    /// Fused 1-byte immediate store (`mem0[addr + offset] = val`).
+    StoreI32_8Imm {
+        addr: u16,
+        val: u8,
         offset: u32,
         src_off: u8,
     },
@@ -780,6 +831,27 @@ enum RegOp {
         step: i16,
         target: u32,
     },
+    /// `reg[r] += step; if (reg[r] as u32) != (reg[limit] as u32) { ip = target }`.
+    I32IncNeBrIf {
+        reg: u16,
+        limit: u16,
+        step: i16,
+        target: u32,
+    },
+    /// `reg[r] += step; if (reg[r] as u32) != 0 { ip = target }`.
+    I32IncBrIfNonZero {
+        reg: u16,
+        step: i32,
+        target: u32,
+    },
+    /// `reg[r] += step; if cmp(reg[r], imm) { ip = target }` (signed `imm` for `lt_s/gt_s/le_s/ge_s`, unsigned otherwise).
+    I32IncCmpImmBrIf {
+        cmp: u8,
+        step: i8,
+        reg: u16,
+        imm: u16,
+        target: u32,
+    },
     /// `reg[reg] = (reg[reg] as u32).wrapping_add(imm as u32) as u64; ip = target`.
     I32AddImmJump {
         reg: u16,
@@ -877,6 +949,178 @@ enum RegOp {
         a: u16,
         b: u16,
         mask_idx: u16,
+    },
+    /// Unboxed `i32x4.splat` / `f32x4.splat` directly on `[u64; 2]` slots.
+    V128Splat32 {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `i64x2.splat` / `f64x2.splat` directly on `[u64; 2]` slots.
+    V128Splat64 {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `v128.not`.
+    V128Not {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `v128.and`.
+    V128And {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `v128.andnot`.
+    V128AndNot {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `v128.or`.
+    V128Or {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `v128.xor`.
+    V128Xor {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `v128.bitselect` (and relaxed `laneselect`).
+    V128Bitselect {
+        dst: u16,
+        a: u16,
+        b: u16,
+        c: u16,
+    },
+    /// Unboxed `i32x4.add`.
+    I32x4Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i32x4.sub`.
+    I32x4Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i32x4.mul`.
+    I32x4Mul {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i64x2.add`.
+    I64x2Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i64x2.sub`.
+    I64x2Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.abs`.
+    F32x4Abs {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f32x4.neg`.
+    F32x4Neg {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f32x4.add`.
+    F32x4Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.sub`.
+    F32x4Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.mul`.
+    F32x4Mul {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.div`.
+    F32x4Div {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.min` (and `f32x4.relaxed_min`) with canonical Wasm NaN & `-0.0` semantics.
+    F32x4Min {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.max` (and `f32x4.relaxed_max`) with canonical Wasm NaN & `+0.0` semantics.
+    F32x4Max {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.pmin`.
+    F32x4PMin {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.pmax`.
+    F32x4PMax {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f32x4.{eq,ne,lt,gt,le,ge}` (`cmp` in `0..=5`).
+    F32x4Cmp {
+        cmp: u8,
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Fused unboxed `dst = acc + (a * b)` on 4×`f32` with exact two-rounding IEEE-754 semantics.
+    F32x4MulAdd {
+        dst: u16,
+        acc: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.add`.
+    F64x2Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.sub`.
+    F64x2Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.mul`.
+    F64x2Mul {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.div`.
+    F64x2Div {
+        dst: u16,
+        a: u16,
+        b: u16,
     },
     SimdUnary {
         op: u16,
@@ -1464,6 +1708,34 @@ fn eval_i64_cmp(cmp: u8, a: u64, b: u64) -> bool {
     }
 }
 
+fn swap_i32_cmp(cmp: u8) -> u8 {
+    match cmp {
+        0 => 0, // eq
+        1 => 1, // ne
+        2 => 4, // lt_s <-> gt_s
+        4 => 2,
+        3 => 5, // lt_u <-> gt_u
+        5 => 3,
+        6 => 8, // le_s <-> ge_s
+        8 => 6,
+        7 => 9, // le_u <-> ge_u
+        9 => 7,
+        _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn eval_f32_cmp(cmp: u8, a: f32, b: f32) -> bool {
+    match cmp {
+        0 => a == b,
+        1 => a != b,
+        2 => a < b,
+        3 => a > b,
+        4 => a <= b,
+        _ => a >= b,
+    }
+}
+
 #[inline(always)]
 fn eval_f64_cmp(cmp: u8, a: f64, b: f64) -> bool {
     match cmp {
@@ -1474,6 +1746,30 @@ fn eval_f64_cmp(cmp: u8, a: f64, b: f64) -> bool {
         4 => a <= b,
         _ => a >= b,
     }
+}
+
+#[inline(always)]
+fn wasm_f32_min(fa: f32, fb: f32) -> u32 {
+    let r = if fa.is_nan() || fb.is_nan() {
+        f32::NAN
+    } else if fa == fb {
+        f32::from_bits(fa.to_bits() | fb.to_bits())
+    } else {
+        fa.min(fb)
+    };
+    r.to_bits()
+}
+
+#[inline(always)]
+fn wasm_f32_max(fa: f32, fb: f32) -> u32 {
+    let r = if fa.is_nan() || fb.is_nan() {
+        f32::NAN
+    } else if fa == fb {
+        f32::from_bits(fa.to_bits() & fb.to_bits())
+    } else {
+        fa.max(fb)
+    };
+    r.to_bits()
 }
 
 #[inline(always)]
@@ -1498,6 +1794,23 @@ fn wasm_f64_max(fa: f64, fb: f64) -> u64 {
         fa.max(fb)
     };
     r.to_bits()
+}
+
+#[inline(always)]
+fn last_inc_step(ops: &[RegOp], reg: u16) -> Option<i32> {
+    match ops.last().copied()? {
+        RegOp::I32AddImm { dst, src, imm } if dst == reg && src == reg => Some(imm),
+        RegOp::I32SubImm { dst, src, imm } if dst == reg && src == reg => imm.checked_neg(),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn encode_cmp_imm16(cmp: u8, imm: u32) -> Option<u16> {
+    match cmp {
+        2 | 4 | 6 | 8 => i16::try_from(imm as i32).ok().map(|v| v as u16),
+        _ => u16::try_from(imm).ok(),
+    }
 }
 
 #[inline]
@@ -2463,14 +2776,21 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         ops.push(RegOp::Jump { target: 0 });
                         branch_patches.push((jmp_ip, target_pc));
                     } else if ops.len() > cur_block_start_ip
-                        && let Some(RegOp::I32AddImm { dst, src, imm }) = ops.last().copied()
-                        && dst == src
+                        && let Some((reg, imm)) = match ops.last().copied() {
+                            Some(RegOp::I32AddImm { dst, src, imm }) if dst == src => {
+                                Some((dst, imm))
+                            }
+                            Some(RegOp::I32SubImm { dst, src, imm }) if dst == src => {
+                                imm.checked_neg().map(|step| (dst, step))
+                            }
+                            _ => None,
+                        }
                     {
                         // Fuse `r = r + imm; br target` (common top-tested loop backedge).
                         ops.pop();
                         let jmp_ip = ops.len();
                         ops.push(RegOp::I32AddImmJump {
-                            reg: dst,
+                            reg,
                             imm,
                             target: 0,
                         });
@@ -2570,6 +2890,18 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         let jmp_ip = ops.len();
                         ops.push(RegOp::Jump { target: 0 });
                         branch_patches.push((jmp_ip, target_pc));
+                    } else if ops.len() > cur_block_start_ip
+                        && let Some(step) = last_inc_step(&ops, cond_reg)
+                    {
+                        // Fuse countdown / step loops: `r = r + step; br_if target`.
+                        ops.pop();
+                        let br_ip = ops.len();
+                        ops.push(RegOp::I32IncBrIfNonZero {
+                            reg: cond_reg,
+                            step,
+                            target: 0,
+                        });
+                        branch_patches.push((br_ip, target_pc));
                     } else {
                         let br_ip = ops.len();
                         ops.push(RegOp::BrIf {
@@ -3490,64 +3822,96 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         } else {
                             let r_addr =
                                 mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
-                            let r_val = mat(
-                                val_v.src,
-                                base_tmp + 1,
-                                &mut max_slots,
-                                &mut ops,
-                                &mut consts,
-                            );
-                            if memory == 0
+                            let fused_store_imm = if memory == 0
                                 && mem0_unshared
-                                && let Some(off32) = off32_opt
+                                && let VVal::Imm32(imm_val) = val_v.src
                             {
-                                match insn.opcode {
-                                    0x36 | 0x38 => ops.push(RegOp::StoreI32 {
+                                if matches!(insn.opcode, 0x36 | 0x38)
+                                    && let Ok(off16) = u16::try_from(offset)
+                                {
+                                    ops.push(RegOp::StoreI32Imm {
                                         addr: r_addr,
-                                        val: r_val,
+                                        val: imm_val,
+                                        offset: off16,
+                                        src_off,
+                                    });
+                                    true
+                                } else if insn.opcode == 0x3a
+                                    && let Some(off32) = off32_opt
+                                {
+                                    ops.push(RegOp::StoreI32_8Imm {
+                                        addr: r_addr,
+                                        val: imm_val as u8,
                                         offset: off32,
                                         src_off,
-                                    }),
-                                    0x37 | 0x39 => ops.push(RegOp::StoreI64 {
-                                        addr: r_addr,
-                                        val: r_val,
-                                        offset: off32,
-                                        src_off,
-                                    }),
-                                    0x3a => ops.push(RegOp::StoreI32_8 {
-                                        addr: r_addr,
-                                        val: r_val,
-                                        offset: off32,
-                                        src_off,
-                                    }),
-                                    0x3b => ops.push(RegOp::StoreI32_16 {
-                                        addr: r_addr,
-                                        val: r_val,
-                                        offset: off32,
-                                        src_off,
-                                    }),
-                                    _ => {
-                                        let arg_idx = mem_args.len() as u32;
-                                        mem_args.push(MemGenArg { memory, offset });
-                                        ops.push(RegOp::MemGen {
-                                            op: insn.opcode,
-                                            addr: r_addr,
-                                            val: r_val,
-                                            arg_idx,
-                                            src_off,
-                                        });
-                                    }
+                                    });
+                                    true
+                                } else {
+                                    false
                                 }
                             } else {
-                                let arg_idx = mem_args.len() as u32;
-                                mem_args.push(MemGenArg { memory, offset });
-                                ops.push(RegOp::MemGen {
-                                    op: insn.opcode,
-                                    addr: r_addr,
-                                    val: r_val,
-                                    arg_idx,
-                                    src_off,
-                                });
+                                false
+                            };
+                            if !fused_store_imm {
+                                let r_val = mat(
+                                    val_v.src,
+                                    base_tmp + 1,
+                                    &mut max_slots,
+                                    &mut ops,
+                                    &mut consts,
+                                );
+                                if memory == 0
+                                    && mem0_unshared
+                                    && let Some(off32) = off32_opt
+                                {
+                                    match insn.opcode {
+                                        0x36 | 0x38 => ops.push(RegOp::StoreI32 {
+                                            addr: r_addr,
+                                            val: r_val,
+                                            offset: off32,
+                                            src_off,
+                                        }),
+                                        0x37 | 0x39 => ops.push(RegOp::StoreI64 {
+                                            addr: r_addr,
+                                            val: r_val,
+                                            offset: off32,
+                                            src_off,
+                                        }),
+                                        0x3a => ops.push(RegOp::StoreI32_8 {
+                                            addr: r_addr,
+                                            val: r_val,
+                                            offset: off32,
+                                            src_off,
+                                        }),
+                                        0x3b => ops.push(RegOp::StoreI32_16 {
+                                            addr: r_addr,
+                                            val: r_val,
+                                            offset: off32,
+                                            src_off,
+                                        }),
+                                        _ => {
+                                            let arg_idx = mem_args.len() as u32;
+                                            mem_args.push(MemGenArg { memory, offset });
+                                            ops.push(RegOp::MemGen {
+                                                op: insn.opcode,
+                                                addr: r_addr,
+                                                val: r_val,
+                                                arg_idx,
+                                                src_off,
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    let arg_idx = mem_args.len() as u32;
+                                    mem_args.push(MemGenArg { memory, offset });
+                                    ops.push(RegOp::MemGen {
+                                        op: insn.opcode,
+                                        addr: r_addr,
+                                        val: r_val,
+                                        arg_idx,
+                                        src_off,
+                                    });
+                                }
                             }
                         }
                     }
@@ -4386,22 +4750,67 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                         target: 0,
                                     });
                                     ip
-                                } else if let VVal::Imm32(imm) = b_v.src {
+                                } else if let Some((var_src, eff_cmp, imm)) =
+                                    if let VVal::Imm32(imm) = b_v.src {
+                                        Some((a_v.src, cmp, imm))
+                                    } else if let VVal::Imm32(imm) = a_v.src {
+                                        Some((b_v.src, swap_i32_cmp(cmp), imm))
+                                    } else {
+                                        None
+                                    }
+                                {
                                     let ra = mat(
-                                        a_v.src,
+                                        var_src,
                                         base_tmp,
                                         &mut max_slots,
                                         &mut ops,
                                         &mut consts,
                                     );
-                                    let ip = ops.len();
-                                    ops.push(RegOp::I32CmpImmBrIf {
-                                        cmp,
-                                        a: ra,
-                                        imm: imm as i32,
-                                        target: 0,
-                                    });
-                                    ip
+                                    if ops.len() > cur_block_start_ip
+                                        && let Some(step) = last_inc_step(&ops, ra)
+                                    {
+                                        if eff_cmp == 1 && imm == 0 {
+                                            ops.pop();
+                                            let ip = ops.len();
+                                            ops.push(RegOp::I32IncBrIfNonZero {
+                                                reg: ra,
+                                                step,
+                                                target: 0,
+                                            });
+                                            ip
+                                        } else if let Ok(step8) = i8::try_from(step)
+                                            && let Some(imm16) = encode_cmp_imm16(eff_cmp, imm)
+                                        {
+                                            ops.pop();
+                                            let ip = ops.len();
+                                            ops.push(RegOp::I32IncCmpImmBrIf {
+                                                cmp: eff_cmp,
+                                                step: step8,
+                                                reg: ra,
+                                                imm: imm16,
+                                                target: 0,
+                                            });
+                                            ip
+                                        } else {
+                                            let ip = ops.len();
+                                            ops.push(RegOp::I32CmpImmBrIf {
+                                                cmp: eff_cmp,
+                                                a: ra,
+                                                imm: imm as i32,
+                                                target: 0,
+                                            });
+                                            ip
+                                        }
+                                    } else {
+                                        let ip = ops.len();
+                                        ops.push(RegOp::I32CmpImmBrIf {
+                                            cmp: eff_cmp,
+                                            a: ra,
+                                            imm: imm as i32,
+                                            target: 0,
+                                        });
+                                        ip
+                                    }
                                 } else {
                                     let ra = mat(
                                         a_v.src,
@@ -4417,31 +4826,33 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                         &mut ops,
                                         &mut consts,
                                     );
-                                    if (cmp == 3 || cmp == 2)
+                                    if matches!(cmp, 1..=3)
                                         && rb != ra
                                         && ops.len() > cur_block_start_ip
-                                        && let Some(RegOp::I32AddImm { dst, src, imm }) =
-                                            ops.last().copied()
-                                        && dst == ra
-                                        && src == ra
-                                        && let Ok(step) = i16::try_from(imm)
+                                        && let Some(step_i32) = last_inc_step(&ops, ra)
+                                        && let Ok(step) = i16::try_from(step_i32)
                                     {
                                         ops.pop();
                                         let ip = ops.len();
-                                        if cmp == 3 {
-                                            ops.push(RegOp::I32IncLtUBrIf {
+                                        match cmp {
+                                            3 => ops.push(RegOp::I32IncLtUBrIf {
                                                 reg: ra,
                                                 limit: rb,
                                                 step,
                                                 target: 0,
-                                            });
-                                        } else {
-                                            ops.push(RegOp::I32IncLtSBrIf {
+                                            }),
+                                            2 => ops.push(RegOp::I32IncLtSBrIf {
                                                 reg: ra,
                                                 limit: rb,
                                                 step,
                                                 target: 0,
-                                            });
+                                            }),
+                                            _ => ops.push(RegOp::I32IncNeBrIf {
+                                                reg: ra,
+                                                limit: rb,
+                                                step,
+                                                target: 0,
+                                            }),
                                         }
                                         ip
                                     } else {
@@ -4885,47 +5296,143 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     });
                                     true
                                 }
+                                Some(RegOp::LoadI32 {
+                                    dst: ldst,
+                                    addr,
+                                    offset,
+                                    src_off: l_src_off,
+                                }) if ldst >= local_reg_slots
+                                    && ((rb == ldst && ra == dst) || (ra == ldst && rb == dst))
+                                    && addr != dst =>
+                                {
+                                    ops.pop();
+                                    ops.push(RegOp::LoadI32Add {
+                                        acc: dst,
+                                        addr,
+                                        offset,
+                                        src_off: l_src_off,
+                                    });
+                                    true
+                                }
+                                Some(RegOp::LoadI32Shl2Add {
+                                    dst: ldst,
+                                    base,
+                                    idx,
+                                    offset,
+                                    src_off: l_src_off,
+                                }) if ldst >= local_reg_slots
+                                    && ((rb == ldst && ra == dst) || (ra == ldst && rb == dst))
+                                    && base != dst
+                                    && idx != dst =>
+                                {
+                                    ops.pop();
+                                    ops.push(RegOp::LoadI32Shl2AddAcc {
+                                        acc: dst,
+                                        base,
+                                        idx,
+                                        offset,
+                                        src_off: l_src_off,
+                                    });
+                                    true
+                                }
                                 _ => false,
                             }
-                        } else if in_cur_block
-                            && insn.opcode == 0xa0
-                            && let Some(RegOp::F64Mul {
-                                dst: mtmp,
-                                a: ma,
-                                b: mb,
-                            }) = ops.last().copied()
-                            && mtmp >= local_reg_slots
-                            && rb == mtmp
-                            && ra != mtmp
-                        {
-                            ops.pop();
-                            ops.push(RegOp::F64MulAdd {
-                                dst,
-                                acc: ra,
-                                a: ma,
-                                b: mb,
-                            });
-                            true
-                        } else if in_cur_block
-                            && insn.opcode == 0xa0
-                            && let Some(RegOp::LoadI64 {
-                                dst: ldst,
-                                addr,
-                                offset,
-                                src_off: l_src_off,
-                            }) = ops.last().copied()
-                            && ldst >= local_reg_slots
-                            && ((rb == ldst && ra == dst) || (ra == ldst && rb == dst))
-                            && addr != dst
-                        {
-                            ops.pop();
-                            ops.push(RegOp::LoadF64Add {
-                                acc: dst,
-                                addr,
-                                offset,
-                                src_off: l_src_off,
-                            });
-                            true
+                        } else if in_cur_block && insn.opcode == 0x92 {
+                            match ops.last().copied() {
+                                Some(RegOp::F32Mul {
+                                    dst: mtmp,
+                                    a: ma,
+                                    b: mb,
+                                }) if mtmp >= local_reg_slots && rb == mtmp && ra != mtmp => {
+                                    ops.pop();
+                                    ops.push(RegOp::F32MulAdd {
+                                        dst,
+                                        acc: ra,
+                                        a: ma,
+                                        b: mb,
+                                    });
+                                    true
+                                }
+                                Some(RegOp::LoadI32 {
+                                    dst: ldst,
+                                    addr,
+                                    offset,
+                                    src_off: l_src_off,
+                                }) if ldst >= local_reg_slots
+                                    && rb == ldst
+                                    && ra == dst
+                                    && addr != dst =>
+                                {
+                                    ops.pop();
+                                    ops.push(RegOp::LoadF32Add {
+                                        acc: dst,
+                                        addr,
+                                        offset,
+                                        src_off: l_src_off,
+                                    });
+                                    true
+                                }
+                                _ => false,
+                            }
+                        } else if in_cur_block && insn.opcode == 0xa0 {
+                            match ops.last().copied() {
+                                Some(RegOp::F64Mul {
+                                    dst: mtmp,
+                                    a: ma,
+                                    b: mb,
+                                }) if mtmp >= local_reg_slots && rb == mtmp && ra != mtmp => {
+                                    ops.pop();
+                                    ops.push(RegOp::F64MulAdd {
+                                        dst,
+                                        acc: ra,
+                                        a: ma,
+                                        b: mb,
+                                    });
+                                    true
+                                }
+                                Some(RegOp::LoadI64 {
+                                    dst: ldst,
+                                    addr,
+                                    offset,
+                                    src_off: l_src_off,
+                                }) if ldst >= local_reg_slots
+                                    && rb == ldst
+                                    && ra == dst
+                                    && addr != dst =>
+                                {
+                                    ops.pop();
+                                    ops.push(RegOp::LoadF64Add {
+                                        acc: dst,
+                                        addr,
+                                        offset,
+                                        src_off: l_src_off,
+                                    });
+                                    true
+                                }
+                                Some(RegOp::LoadI64Shl3Add {
+                                    dst: ldst,
+                                    base,
+                                    idx,
+                                    offset,
+                                    src_off: l_src_off,
+                                }) if ldst >= local_reg_slots
+                                    && rb == ldst
+                                    && ra == dst
+                                    && base != dst
+                                    && idx != dst =>
+                                {
+                                    ops.pop();
+                                    ops.push(RegOp::LoadF64Shl3AddAcc {
+                                        acc: dst,
+                                        base,
+                                        idx,
+                                        offset,
+                                        src_off: l_src_off,
+                                    });
+                                    true
+                                }
+                                _ => false,
+                            }
                         } else {
                             false
                         };
@@ -5215,6 +5722,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         return None;
                     };
                     let mask: [u8; 16] = b.as_ref().try_into().ok()?;
+                    if mask.iter().any(|&m| m >= 32) {
+                        return None;
+                    }
                     let mask_idx = if simd_masks.len() <= 32
                         && let Some(pos) = simd_masks.iter().position(|&m| m == mask)
                     {
@@ -5273,12 +5783,20 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     );
                     let (dst, consumed, is_tee) =
                         try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, out_ty);
-                    ops.push(RegOp::SimdUnary {
-                        op: insn.opcode,
-                        dst,
-                        src: ra,
-                        lane,
-                    });
+                    let rop = match insn.opcode {
+                        0xfd11 | 0xfd13 => RegOp::V128Splat32 { dst, src: ra },
+                        0xfd12 | 0xfd14 => RegOp::V128Splat64 { dst, src: ra },
+                        0xfd4d => RegOp::V128Not { dst, src: ra },
+                        0xfde0 => RegOp::F32x4Abs { dst, src: ra },
+                        0xfde1 => RegOp::F32x4Neg { dst, src: ra },
+                        _ => RegOp::SimdUnary {
+                            op: insn.opcode,
+                            dst,
+                            src: ra,
+                            lane,
+                        },
+                    };
+                    ops.push(rop);
                     finish_dst(
                         dst,
                         consumed,
@@ -5318,13 +5836,63 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         &mut ops,
                         FastType::V128,
                     );
-                    ops.push(RegOp::SimdBinary {
-                        op: insn.opcode,
-                        dst,
-                        a: ra,
-                        b: rb,
-                        lane,
-                    });
+                    if insn.opcode == 0xfde4
+                        && ops.len() > cur_block_start_ip
+                        && let Some(RegOp::F32x4Mul {
+                            dst: mtmp,
+                            a: ma,
+                            b: mb,
+                        }) = ops.last().copied()
+                        && mtmp >= local_reg_slots
+                        && rb == mtmp
+                        && ra != mtmp
+                    {
+                        ops.pop();
+                        ops.push(RegOp::F32x4MulAdd {
+                            dst,
+                            acc: ra,
+                            a: ma,
+                            b: mb,
+                        });
+                    } else {
+                        let rop = match insn.opcode {
+                            0xfd41..=0xfd46 => RegOp::F32x4Cmp {
+                                cmp: (insn.opcode - 0xfd41) as u8,
+                                dst,
+                                a: ra,
+                                b: rb,
+                            },
+                            0xfd4e => RegOp::V128And { dst, a: ra, b: rb },
+                            0xfd4f => RegOp::V128AndNot { dst, a: ra, b: rb },
+                            0xfd50 => RegOp::V128Or { dst, a: ra, b: rb },
+                            0xfd51 => RegOp::V128Xor { dst, a: ra, b: rb },
+                            0xfdae => RegOp::I32x4Add { dst, a: ra, b: rb },
+                            0xfdb1 => RegOp::I32x4Sub { dst, a: ra, b: rb },
+                            0xfdb5 => RegOp::I32x4Mul { dst, a: ra, b: rb },
+                            0xfdce => RegOp::I64x2Add { dst, a: ra, b: rb },
+                            0xfdd1 => RegOp::I64x2Sub { dst, a: ra, b: rb },
+                            0xfde4 => RegOp::F32x4Add { dst, a: ra, b: rb },
+                            0xfde5 => RegOp::F32x4Sub { dst, a: ra, b: rb },
+                            0xfde6 => RegOp::F32x4Mul { dst, a: ra, b: rb },
+                            0xfde7 => RegOp::F32x4Div { dst, a: ra, b: rb },
+                            0xfde8 | 0xfa0d => RegOp::F32x4Min { dst, a: ra, b: rb },
+                            0xfde9 | 0xfa0e => RegOp::F32x4Max { dst, a: ra, b: rb },
+                            0xfdea => RegOp::F32x4PMin { dst, a: ra, b: rb },
+                            0xfdeb => RegOp::F32x4PMax { dst, a: ra, b: rb },
+                            0xfdf0 => RegOp::F64x2Add { dst, a: ra, b: rb },
+                            0xfdf1 => RegOp::F64x2Sub { dst, a: ra, b: rb },
+                            0xfdf2 => RegOp::F64x2Mul { dst, a: ra, b: rb },
+                            0xfdf3 => RegOp::F64x2Div { dst, a: ra, b: rb },
+                            _ => RegOp::SimdBinary {
+                                op: insn.opcode,
+                                dst,
+                                a: ra,
+                                b: rb,
+                                lane,
+                            },
+                        };
+                        ops.push(rop);
+                    }
                     finish_dst(
                         dst,
                         consumed,
@@ -5352,13 +5920,22 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         &mut ops,
                         FastType::V128,
                     );
-                    ops.push(RegOp::SimdTernary {
-                        op: insn.opcode,
-                        dst,
-                        a: ra,
-                        b: rb,
-                        c: rc,
-                    });
+                    let rop = match insn.opcode {
+                        0xfd52 | 0xfa09..=0xfa0c => RegOp::V128Bitselect {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            c: rc,
+                        },
+                        _ => RegOp::SimdTernary {
+                            op: insn.opcode,
+                            dst,
+                            a: ra,
+                            b: rb,
+                            c: rc,
+                        },
+                    };
+                    ops.push(rop);
                     finish_dst(
                         dst,
                         consumed,
@@ -5406,6 +5983,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             | RegOp::I64CmpBrIf { target, .. }
             | RegOp::I32IncLtUBrIf { target, .. }
             | RegOp::I32IncLtSBrIf { target, .. }
+            | RegOp::I32IncNeBrIf { target, .. }
+            | RegOp::I32IncBrIfNonZero { target, .. }
+            | RegOp::I32IncCmpImmBrIf { target, .. }
             | RegOp::I32AddImmJump { target, .. } => *target = target_ip,
             _ => return None,
         }
@@ -5495,6 +6075,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     | RegOp::F64MulConst { .. }
                     | RegOp::F64MinConst { .. }
                     | RegOp::F64MaxConst { .. }
+                    | RegOp::F32MulAdd { .. }
                     | RegOp::F64MulAdd { .. }
                     | RegOp::Select { .. }
                     | RegOp::Return { .. }
@@ -5546,17 +6127,82 @@ fn value_to_bits(v: Value) -> Option<u64> {
 }
 
 #[inline(always)]
+fn read_v128_words(regs: &[u64], slot: u16) -> [u64; 2] {
+    let s = slot as usize;
+    let pair = &regs[s..s + 2];
+    [pair[0], pair[1]]
+}
+
+#[inline(always)]
+fn write_v128_words(regs: &mut [u64], slot: u16, words: [u64; 2]) {
+    let s = slot as usize;
+    let pair = &mut regs[s..s + 2];
+    pair[0] = words[0];
+    pair[1] = words[1];
+}
+
+#[inline(always)]
+fn read_u32x4(regs: &[u64], slot: u16) -> [u32; 4] {
+    let [lo, hi] = read_v128_words(regs, slot);
+    [lo as u32, (lo >> 32) as u32, hi as u32, (hi >> 32) as u32]
+}
+
+#[inline(always)]
+fn write_u32x4(regs: &mut [u64], slot: u16, v: [u32; 4]) {
+    write_v128_words(
+        regs,
+        slot,
+        [
+            u64::from(v[0]) | (u64::from(v[1]) << 32),
+            u64::from(v[2]) | (u64::from(v[3]) << 32),
+        ],
+    );
+}
+
+#[inline(always)]
+fn read_f32x4(regs: &[u64], slot: u16) -> [f32; 4] {
+    let u = read_u32x4(regs, slot);
+    [
+        f32::from_bits(u[0]),
+        f32::from_bits(u[1]),
+        f32::from_bits(u[2]),
+        f32::from_bits(u[3]),
+    ]
+}
+
+#[inline(always)]
+fn write_f32x4(regs: &mut [u64], slot: u16, v: [f32; 4]) {
+    write_u32x4(
+        regs,
+        slot,
+        [
+            v[0].to_bits(),
+            v[1].to_bits(),
+            v[2].to_bits(),
+            v[3].to_bits(),
+        ],
+    );
+}
+
+#[inline(always)]
 fn read_v128(regs: &[u64], slot: u16) -> [u8; 16] {
+    let [lo, hi] = read_v128_words(regs, slot);
     let mut out = [0u8; 16];
-    out[0..8].copy_from_slice(&regs[slot as usize].to_le_bytes());
-    out[8..16].copy_from_slice(&regs[slot as usize + 1].to_le_bytes());
+    out[0..8].copy_from_slice(&lo.to_le_bytes());
+    out[8..16].copy_from_slice(&hi.to_le_bytes());
     out
 }
 
 #[inline(always)]
 fn write_v128(regs: &mut [u64], slot: u16, bytes: [u8; 16]) {
-    regs[slot as usize] = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    regs[slot as usize + 1] = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    write_v128_words(
+        regs,
+        slot,
+        [
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        ],
+    );
 }
 
 #[inline(always)]
@@ -5815,6 +6461,25 @@ fn resolve_mem0(store: &Store, inst_id: usize) -> Option<usize> {
 }
 
 #[inline(always)]
+fn try_promote_mem0_dense(store: &mut Store, mem0: Option<usize>) {
+    if let Some(i) = mem0
+        && store.mems[i].ty.index_type == IndexType::I32
+    {
+        store.mems[i].bytes.try_promote_dense();
+    }
+}
+
+#[inline(always)]
+fn try_promote_mem0_dense_if_written(store: &mut Store, mem0: Option<usize>) {
+    if let Some(i) = mem0
+        && store.mems[i].ty.index_type == IndexType::I32
+        && store.mems[i].bytes.has_written_storage()
+    {
+        store.mems[i].bytes.try_promote_dense();
+    }
+}
+
+#[inline(always)]
 fn fast_read_bytes<const N: usize, const DENSE: bool>(
     at: usize,
     p0_base: usize,
@@ -5837,6 +6502,48 @@ fn fast_read_bytes<const N: usize, const DENSE: bool>(
 }
 
 #[inline(always)]
+fn fast_read_m32<const N: usize, const DENSE: bool>(
+    addr: u32,
+    offset: u32,
+    p0_base: usize,
+    p0: &[u8],
+    p1_base: usize,
+    p1: &[u8],
+) -> Option<[u8; N]> {
+    #[cfg(target_pointer_width = "64")]
+    if DENSE {
+        let at = (addr as usize) + (offset as usize);
+        return p0.get(at..at + N).map(|s| s.try_into().unwrap());
+    }
+    let at = (addr as usize).checked_add(offset as usize)?;
+    fast_read_bytes::<N, DENSE>(at, p0_base, p0, p1_base, p1)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fast_read_mem0<const N: usize, const DENSE: bool>(
+    raw: u64,
+    offset: u32,
+    mem0_64: bool,
+    p0_base: usize,
+    p0: &[u8],
+    p1_base: usize,
+    p1: &[u8],
+) -> Option<[u8; N]> {
+    if DENSE {
+        // Invariant: `dispatch_inner::<FUEL, true>` is only entered for unshared memory32 (`!mem0_64`).
+        return fast_read_m32::<N, true>(raw as u32, offset, p0_base, p0, p1_base, p1);
+    }
+    let at = if !mem0_64 {
+        (raw as u32 as usize).checked_add(offset as usize)?
+    } else {
+        raw.checked_add(offset as u64)
+            .and_then(|e| usize::try_from(e).ok())?
+    };
+    fast_read_bytes::<N, false>(at, p0_base, p0, p1_base, p1)
+}
+
+#[inline(always)]
 fn fast_read_u8<const DENSE: bool>(
     at: usize,
     p0_base: usize,
@@ -5854,6 +6561,47 @@ fn fast_read_u8<const DENSE: bool>(
         return Some(b);
     }
     None
+}
+
+#[inline(always)]
+fn fast_read_u8_m32<const DENSE: bool>(
+    addr: u32,
+    offset: u32,
+    p0_base: usize,
+    p0: &[u8],
+    p1_base: usize,
+    p1: &[u8],
+) -> Option<u8> {
+    #[cfg(target_pointer_width = "64")]
+    if DENSE {
+        let at = (addr as usize) + (offset as usize);
+        return p0.get(at).copied();
+    }
+    let at = (addr as usize).checked_add(offset as usize)?;
+    fast_read_u8::<DENSE>(at, p0_base, p0, p1_base, p1)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fast_read_u8_mem0<const DENSE: bool>(
+    raw: u64,
+    offset: u32,
+    mem0_64: bool,
+    p0_base: usize,
+    p0: &[u8],
+    p1_base: usize,
+    p1: &[u8],
+) -> Option<u8> {
+    if DENSE {
+        return fast_read_u8_m32::<true>(raw as u32, offset, p0_base, p0, p1_base, p1);
+    }
+    let at = if !mem0_64 {
+        (raw as u32 as usize).checked_add(offset as usize)?
+    } else {
+        raw.checked_add(offset as u64)
+            .and_then(|e| usize::try_from(e).ok())?
+    };
+    fast_read_u8::<false>(at, p0_base, p0, p1_base, p1)
 }
 
 #[inline(always)]
@@ -5886,6 +6634,58 @@ fn fast_write_bytes<const N: usize, const DENSE: bool>(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fast_write_m32<const N: usize, const DENSE: bool>(
+    addr: u32,
+    offset: u32,
+    data: [u8; N],
+    p0_base: usize,
+    p0: &mut [u8],
+    p1_base: usize,
+    p1: &mut [u8],
+) -> bool {
+    #[cfg(target_pointer_width = "64")]
+    if DENSE {
+        let at = (addr as usize) + (offset as usize);
+        if let Some(sub) = p0.get_mut(at..at + N) {
+            sub.copy_from_slice(&data);
+            return true;
+        }
+        return false;
+    }
+    let Some(at) = (addr as usize).checked_add(offset as usize) else {
+        return false;
+    };
+    fast_write_bytes::<N, DENSE>(at, data, p0_base, p0, p1_base, p1)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fast_write_mem0<const N: usize, const DENSE: bool>(
+    raw: u64,
+    offset: u32,
+    data: [u8; N],
+    mem0_64: bool,
+    p0_base: usize,
+    p0: &mut [u8],
+    p1_base: usize,
+    p1: &mut [u8],
+) -> bool {
+    if DENSE {
+        return fast_write_m32::<N, true>(raw as u32, offset, data, p0_base, p0, p1_base, p1);
+    }
+    let Some(at) = (if !mem0_64 {
+        (raw as u32 as usize).checked_add(offset as usize)
+    } else {
+        raw.checked_add(offset as u64)
+            .and_then(|e| usize::try_from(e).ok())
+    }) else {
+        return false;
+    };
+    fast_write_bytes::<N, false>(at, data, p0_base, p0, p1_base, p1)
+}
+
+#[inline(always)]
 fn fast_write_u8<const DENSE: bool>(
     at: usize,
     val: u8,
@@ -5910,6 +6710,58 @@ fn fast_write_u8<const DENSE: bool>(
         return true;
     }
     false
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fast_write_u8_m32<const DENSE: bool>(
+    addr: u32,
+    offset: u32,
+    val: u8,
+    p0_base: usize,
+    p0: &mut [u8],
+    p1_base: usize,
+    p1: &mut [u8],
+) -> bool {
+    #[cfg(target_pointer_width = "64")]
+    if DENSE {
+        let at = (addr as usize) + (offset as usize);
+        if let Some(slot) = p0.get_mut(at) {
+            *slot = val;
+            return true;
+        }
+        return false;
+    }
+    let Some(at) = (addr as usize).checked_add(offset as usize) else {
+        return false;
+    };
+    fast_write_u8::<DENSE>(at, val, p0_base, p0, p1_base, p1)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fast_write_u8_mem0<const DENSE: bool>(
+    raw: u64,
+    offset: u32,
+    val: u8,
+    mem0_64: bool,
+    p0_base: usize,
+    p0: &mut [u8],
+    p1_base: usize,
+    p1: &mut [u8],
+) -> bool {
+    if DENSE {
+        return fast_write_u8_m32::<true>(raw as u32, offset, val, p0_base, p0, p1_base, p1);
+    }
+    let Some(at) = (if !mem0_64 {
+        (raw as u32 as usize).checked_add(offset as usize)
+    } else {
+        raw.checked_add(offset as u64)
+            .and_then(|e| usize::try_from(e).ok())
+    }) else {
+        return false;
+    };
+    fast_write_u8::<false>(at, val, p0_base, p0, p1_base, p1)
 }
 
 #[inline(never)]
@@ -6560,6 +7412,12 @@ pub(crate) fn try_invoke_leaf(
                     f64::from_bits(consts[cidx as usize]),
                 );
             }
+            RegOp::F32MulAdd { dst, acc, a, b } => {
+                let prod = f32::from_bits(regs[a as usize] as u32)
+                    * f32::from_bits(regs[b as usize] as u32);
+                regs[dst as usize] =
+                    (f32::from_bits(regs[acc as usize] as u32) + prod).to_bits() as u64;
+            }
             RegOp::F64MulAdd { dst, acc, a, b } => {
                 let prod = f64::from_bits(regs[a as usize]) * f64::from_bits(regs[b as usize]);
                 regs[dst as usize] = (f64::from_bits(regs[acc as usize]) + prod).to_bits();
@@ -6826,6 +7684,7 @@ pub(crate) fn run(
 enum SlowLoadKind {
     Assign,
     AddU32,
+    AddF32,
     AddF64,
 }
 
@@ -7105,43 +7964,15 @@ fn resolve_indirect_callee(
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn exec_cold_simd<const DENSE: bool>(
+fn exec_cold_simd(
     op: RegOp,
     cur_func: &FastFunction,
     regs: &mut [u64],
     inst_globals: &[crate::Global],
     globals: &mut crate::arena::Arena<crate::Glob>,
-    p0_base: usize,
-    p0_slice: &mut [u8],
-    p1_base: usize,
-    p1_slice: &mut [u8],
-    mem0_64: bool,
     simd_scratch: &mut Vec<Value>,
 ) -> Result<Option<InnerExit>> {
     match op {
-        RegOp::MovV128 { dst, src } => {
-            let lo = regs[src as usize];
-            let hi = regs[src as usize + 1];
-            regs[dst as usize] = lo;
-            regs[dst as usize + 1] = hi;
-        }
-        RegOp::ConstV128 { dst, idx } => {
-            let [lo, hi] = cur_func.v128_consts[idx as usize];
-            regs[dst as usize] = lo;
-            regs[dst as usize + 1] = hi;
-        }
-        RegOp::SelectV128 { dst, a, b, cond } => {
-            let s = if regs[cond as usize] as u32 != 0 {
-                a
-            } else {
-                b
-            };
-            let lo = regs[s as usize];
-            let hi = regs[s as usize + 1];
-            regs[dst as usize] = lo;
-            regs[dst as usize + 1] = hi;
-        }
         RegOp::GlobalGetV128 { dst, global } => {
             let gh = inst_globals[global as usize];
             let Value::V128(v) = globals[gh.0.index].value else {
@@ -7156,68 +7987,6 @@ fn exec_cold_simd<const DENSE: bool>(
                 return Err(trap("global type"));
             }
             slot.value = Value::V128(V128(read_v128(regs, src)));
-        }
-        RegOp::LoadV128 {
-            dst,
-            addr,
-            offset,
-            src_off,
-        } => {
-            let raw = regs[addr as usize];
-            let at = if !mem0_64 {
-                Some((raw as u32 as usize) + (offset as usize))
-            } else {
-                raw.checked_add(offset as u64)
-                    .and_then(|e| usize::try_from(e).ok())
-            };
-            if let Some(at) = at
-                && let Some(arr) =
-                    fast_read_bytes::<16, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-            {
-                write_v128(regs, dst, arr);
-            } else {
-                return Ok(Some(InnerExit::SlowSimdMem {
-                    op: 0xfd00,
-                    mem: 0,
-                    offset: offset as u64,
-                    raw,
-                    dst,
-                    in_vec: [0u8; 16],
-                    lane: 0,
-                    src_off,
-                }));
-            }
-        }
-        RegOp::StoreV128 {
-            addr,
-            val,
-            offset,
-            src_off,
-        } => {
-            let raw = regs[addr as usize];
-            let data = read_v128(regs, val);
-            let at = if !mem0_64 {
-                Some((raw as u32 as usize) + (offset as usize))
-            } else {
-                raw.checked_add(offset as u64)
-                    .and_then(|e| usize::try_from(e).ok())
-            };
-            if let Some(at) = at
-                && fast_write_bytes::<16, DENSE>(at, data, p0_base, p0_slice, p1_base, p1_slice)
-            {
-                // committed
-            } else {
-                return Ok(Some(InnerExit::SlowSimdMem {
-                    op: 0xfd0b,
-                    mem: 0,
-                    offset: offset as u64,
-                    raw,
-                    dst: val,
-                    in_vec: data,
-                    lane: 0,
-                    src_off,
-                }));
-            }
         }
         RegOp::SimdMemGen {
             op: mop,
@@ -7245,55 +8014,20 @@ fn exec_cold_simd<const DENSE: bool>(
                 src_off,
             }));
         }
-        RegOp::SimdShuffle {
-            dst,
-            a,
-            b,
-            mask_idx,
-        } => {
-            let va = read_v128(regs, a);
-            let vb = read_v128(regs, b);
-            let ix = cur_func.simd_masks[mask_idx as usize];
-            let mut out = [0u8; 16];
-            for i in 0..16 {
-                let m = ix[i] as usize;
-                out[i] = if m < 16 { va[m] } else { vb[m - 16] };
-            }
-            write_v128(regs, dst, out);
-        }
         RegOp::SimdUnary {
             op: sop,
             dst,
             src,
             lane,
         } => match sop {
-            0xfd4d => {
-                let lo = !regs[src as usize];
-                let hi = !regs[src as usize + 1];
-                regs[dst as usize] = lo;
-                regs[dst as usize + 1] = hi;
-            }
             0xfd0f => {
                 let w = u64::from_ne_bytes([regs[src as usize] as u8; 8]);
-                regs[dst as usize] = w;
-                regs[dst as usize + 1] = w;
+                write_v128_words(regs, dst, [w, w]);
             }
             0xfd10 => {
-                let b = (regs[src as usize] as u16).to_le_bytes();
-                let w = u64::from_le_bytes([b[0], b[1], b[0], b[1], b[0], b[1], b[0], b[1]]);
-                regs[dst as usize] = w;
-                regs[dst as usize + 1] = w;
-            }
-            0xfd11 | 0xfd13 => {
-                let x = regs[src as usize] as u32 as u64;
-                let w = x | (x << 32);
-                regs[dst as usize] = w;
-                regs[dst as usize + 1] = w;
-            }
-            0xfd12 | 0xfd14 => {
-                let w = regs[src as usize];
-                regs[dst as usize] = w;
-                regs[dst as usize + 1] = w;
+                let v = regs[src as usize] as u16 as u64;
+                let w = v | (v << 16) | (v << 32) | (v << 48);
+                write_v128_words(regs, dst, [w, w]);
             }
             0xfd1b | 0xfd1f => {
                 let word = regs[src as usize + (lane as usize >> 1)];
@@ -7310,105 +8044,14 @@ fn exec_cold_simd<const DENSE: bool>(
             a,
             b,
             lane,
-        } => match sop {
-            0xfd4e => {
-                let lo = regs[a as usize] & regs[b as usize];
-                let hi = regs[a as usize + 1] & regs[b as usize + 1];
-                regs[dst as usize] = lo;
-                regs[dst as usize + 1] = hi;
-            }
-            0xfd4f => {
-                let lo = regs[a as usize] & !regs[b as usize];
-                let hi = regs[a as usize + 1] & !regs[b as usize + 1];
-                regs[dst as usize] = lo;
-                regs[dst as usize + 1] = hi;
-            }
-            0xfd50 => {
-                let lo = regs[a as usize] | regs[b as usize];
-                let hi = regs[a as usize + 1] | regs[b as usize + 1];
-                regs[dst as usize] = lo;
-                regs[dst as usize + 1] = hi;
-            }
-            0xfd51 => {
-                let lo = regs[a as usize] ^ regs[b as usize];
-                let hi = regs[a as usize + 1] ^ regs[b as usize + 1];
-                regs[dst as usize] = lo;
-                regs[dst as usize + 1] = hi;
-            }
-            0xfdae | 0xfdb1 | 0xfdb5 => {
-                let alo = regs[a as usize];
-                let ahi = regs[a as usize + 1];
-                let blo = regs[b as usize];
-                let bhi = regs[b as usize + 1];
-                let lane_op = |x: u32, y: u32| -> u32 {
-                    match sop {
-                        0xfdae => x.wrapping_add(y),
-                        0xfdb1 => x.wrapping_sub(y),
-                        _ => x.wrapping_mul(y),
-                    }
-                };
-                let r0 = lane_op(alo as u32, blo as u32) as u64;
-                let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
-                let r2 = lane_op(ahi as u32, bhi as u32) as u64;
-                let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
-                regs[dst as usize] = r0 | (r1 << 32);
-                regs[dst as usize + 1] = r2 | (r3 << 32);
-            }
-            0xfde4..=0xfde6 => {
-                let alo = regs[a as usize];
-                let ahi = regs[a as usize + 1];
-                let blo = regs[b as usize];
-                let bhi = regs[b as usize + 1];
-                let lane_op = |x: u32, y: u32| -> u32 {
-                    let fx = f32::from_bits(x);
-                    let fy = f32::from_bits(y);
-                    match sop {
-                        0xfde4 => (fx + fy).to_bits(),
-                        0xfde5 => (fx - fy).to_bits(),
-                        _ => (fx * fy).to_bits(),
-                    }
-                };
-                let r0 = lane_op(alo as u32, blo as u32) as u64;
-                let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
-                let r2 = lane_op(ahi as u32, bhi as u32) as u64;
-                let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
-                regs[dst as usize] = r0 | (r1 << 32);
-                regs[dst as usize + 1] = r2 | (r3 << 32);
-            }
-            0xfdf0..=0xfdf2 => {
-                let ax0 = f64::from_bits(regs[a as usize]);
-                let ax1 = f64::from_bits(regs[a as usize + 1]);
-                let bx0 = f64::from_bits(regs[b as usize]);
-                let bx1 = f64::from_bits(regs[b as usize + 1]);
-                let (r0, r1) = match sop {
-                    0xfdf0 => (ax0 + bx0, ax1 + bx1),
-                    0xfdf1 => (ax0 - bx0, ax1 - bx1),
-                    _ => (ax0 * bx0, ax1 * bx1),
-                };
-                regs[dst as usize] = r0.to_bits();
-                regs[dst as usize + 1] = r1.to_bits();
-            }
-            _ => simd_binary_slow(sop, lane, regs, dst, a, b, simd_scratch)?,
-        },
+        } => simd_binary_slow(sop, lane, regs, dst, a, b, simd_scratch)?,
         RegOp::SimdTernary {
             op: sop,
             dst,
             a,
             b,
             c,
-        } => match sop {
-            0xfd52 | 0xfa09..=0xfa0c => {
-                let alo = regs[a as usize];
-                let ahi = regs[a as usize + 1];
-                let blo = regs[b as usize];
-                let bhi = regs[b as usize + 1];
-                let clo = regs[c as usize];
-                let chi = regs[c as usize + 1];
-                regs[dst as usize] = (alo & clo) | (blo & !clo);
-                regs[dst as usize + 1] = (ahi & chi) | (bhi & !chi);
-            }
-            _ => simd_ternary_slow(sop, regs, dst, a, b, c, simd_scratch)?,
-        },
+        } => simd_ternary_slow(sop, regs, dst, a, b, c, simd_scratch)?,
         _ => unreachable!(),
     }
     Ok(None)
@@ -7496,7 +8139,8 @@ fn exec_cold_mem_bulk<const DENSE: bool>(
                 } else {
                     let d0 = d.wrapping_sub(p0_base);
                     let s0 = s.wrapping_sub(p0_base);
-                    if d0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
+                    if !p0_slice.is_empty()
+                        && d0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
                         && s0.checked_add(n).is_some_and(|e| e <= p0_slice.len())
                     {
                         p0_slice.copy_within(s0..s0 + n, d0);
@@ -7504,7 +8148,8 @@ fn exec_cold_mem_bulk<const DENSE: bool>(
                     } else {
                         let d1 = d.wrapping_sub(p1_base);
                         let s1 = s.wrapping_sub(p1_base);
-                        if d1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
+                        if !p1_slice.is_empty()
+                            && d1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
                             && s1.checked_add(n).is_some_and(|e| e <= p1_slice.len())
                         {
                             p1_slice.copy_within(s1..s1 + n, d1);
@@ -7555,12 +8200,17 @@ fn exec_cold_mem_bulk<const DENSE: bool>(
                     }
                 } else {
                     let d0 = d.wrapping_sub(p0_base);
-                    if let Some(sub) = d0.checked_add(n).and_then(|e| p0_slice.get_mut(d0..e)) {
+                    if !p0_slice.is_empty()
+                        && let Some(sub) = d0.checked_add(n).and_then(|e| p0_slice.get_mut(d0..e))
+                    {
                         sub.fill(v_raw as u8);
                         true
                     } else {
                         let d1 = d.wrapping_sub(p1_base);
-                        if let Some(sub) = d1.checked_add(n).and_then(|e| p1_slice.get_mut(d1..e)) {
+                        if !p1_slice.is_empty()
+                            && let Some(sub) =
+                                d1.checked_add(n).and_then(|e| p1_slice.get_mut(d1..e))
+                        {
                             sub.fill(v_raw as u8);
                             true
                         } else {
@@ -7723,7 +8373,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
             .unwrap();
         let mut ops: &[RegOp] = &cur_func.ops;
         let mut consts: &[u64] = &cur_func.consts;
-        let mut mem0_64 = cur_func.mem0_is_64;
+        let mem0_64 = cur_func.mem0_is_64;
         let mut regs: &mut [u64] = &mut reg_bank[cur_reg_base..];
         let mut refs: &mut [RefValue] = &mut ref_bank[cur_ref_base..];
         let mut remaining_fuel = if FUEL { fuel.unwrap_or(0) } else { 0 };
@@ -7846,7 +8496,6 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             cur_logical_base = next_logical_base;
                             ops = &cur_func.ops;
                             consts = &cur_func.consts;
-                            mem0_64 = cur_func.mem0_is_64;
                             regs = &mut reg_bank[cur_reg_base..];
                             refs = &mut ref_bank[cur_ref_base..];
                             ip = 0;
@@ -7975,7 +8624,6 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             cur_func = callee_fast;
                             ops = &cur_func.ops;
                             consts = &cur_func.consts;
-                            mem0_64 = cur_func.mem0_is_64;
                             regs = &mut reg_bank[cur_reg_base..];
                             refs = &mut ref_bank[cur_ref_base..];
                             ip = 0;
@@ -8296,6 +8944,12 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         f64::from_bits(consts[cidx as usize]),
                     );
                 }
+                RegOp::F32MulAdd { dst, acc, a, b } => {
+                    let prod = f32::from_bits(regs[a as usize] as u32)
+                        * f32::from_bits(regs[b as usize] as u32);
+                    regs[dst as usize] =
+                        (f32::from_bits(regs[acc as usize] as u32) + prod).to_bits() as u64;
+                }
                 RegOp::F64MulAdd { dst, acc, a, b } => {
                     let prod = f64::from_bits(regs[a as usize]) * f64::from_bits(regs[b as usize]);
                     regs[dst as usize] = (f64::from_bits(regs[acc as usize]) + prod).to_bits();
@@ -8323,7 +8977,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     slot.value = v;
                 }
 
-                // ---- Fast memory-0 loads & stores (cached 2-page &mut [u8] slices!) ----
+                // ---- Fast memory-0 loads & stores (hoisted dense slice / cached 2-page slices!) ----
                 RegOp::LoadI32 {
                     dst,
                     addr,
@@ -8331,16 +8985,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     src_off,
                 } => {
                     let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(arr) =
-                            fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if let Some(arr) = fast_read_mem0::<4, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u32::from_le_bytes(arr) as u64;
                     } else {
                         if FUEL {
@@ -8364,16 +9011,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     src_off,
                 } => {
                     let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(arr) =
-                            fast_read_bytes::<8, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if let Some(arr) = fast_read_mem0::<8, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u64::from_le_bytes(arr);
                     } else {
                         if FUEL {
@@ -8397,16 +9037,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     src_off,
                 } => {
                     let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(b) =
-                            fast_read_u8::<DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if let Some(b) = fast_read_u8_mem0::<DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = b as u64;
                     } else {
                         if FUEL {
@@ -8430,16 +9063,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     src_off,
                 } => {
                     let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(arr) =
-                            fast_read_bytes::<2, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if let Some(arr) = fast_read_mem0::<2, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u16::from_le_bytes(arr) as u64;
                     } else {
                         if FUEL {
@@ -8463,16 +9089,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     src_off,
                 } => {
                     let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(b) =
-                            fast_read_u8::<DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if let Some(b) = fast_read_u8_mem0::<DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[acc as usize] =
                             (regs[acc as usize] as u32).wrapping_add(b as u32) as u64;
                     } else {
@@ -8490,6 +9109,61 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         };
                     }
                 }
+                RegOp::LoadI32Add {
+                    acc,
+                    addr,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    if let Some(arr) = fast_read_mem0::<4, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        let v = u32::from_le_bytes(arr);
+                        regs[acc as usize] = (regs[acc as usize] as u32).wrapping_add(v) as u64;
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x28,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst: acc,
+                            kind: SlowLoadKind::AddU32,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::LoadF32Add {
+                    acc,
+                    addr,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    if let Some(arr) = fast_read_mem0::<4, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        let v = f32::from_bits(u32::from_le_bytes(arr));
+                        let cur = f32::from_bits(regs[acc as usize] as u32);
+                        regs[acc as usize] = (cur + v).to_bits() as u64;
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x2a,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst: acc,
+                            kind: SlowLoadKind::AddF32,
+                            src_off,
+                        };
+                    }
+                }
                 RegOp::LoadF64Add {
                     acc,
                     addr,
@@ -8497,16 +9171,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     src_off,
                 } => {
                     let raw = regs[addr as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && let Some(arr) =
-                            fast_read_bytes::<8, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if let Some(arr) = fast_read_mem0::<8, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         let v = f64::from_bits(u64::from_le_bytes(arr));
                         let cur = f64::from_bits(regs[acc as usize]);
                         regs[acc as usize] = (cur + v).to_bits();
@@ -8525,6 +9192,65 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         };
                     }
                 }
+                RegOp::LoadI32Shl2AddAcc {
+                    acc,
+                    base,
+                    idx,
+                    offset,
+                    src_off,
+                } => {
+                    let raw32 = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2));
+                    if let Some(arr) = fast_read_m32::<4, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        let v = u32::from_le_bytes(arr);
+                        regs[acc as usize] = (regs[acc as usize] as u32).wrapping_add(v) as u64;
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x28,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw: raw32 as u64,
+                            dst: acc,
+                            kind: SlowLoadKind::AddU32,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::LoadF64Shl3AddAcc {
+                    acc,
+                    base,
+                    idx,
+                    offset,
+                    src_off,
+                } => {
+                    let raw32 = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3));
+                    if let Some(arr) = fast_read_m32::<8, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        let v = f64::from_bits(u64::from_le_bytes(arr));
+                        let cur = f64::from_bits(regs[acc as usize]);
+                        regs[acc as usize] = (cur + v).to_bits();
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowLoad {
+                            op: 0x2b,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw: raw32 as u64,
+                            dst: acc,
+                            kind: SlowLoadKind::AddF64,
+                            src_off,
+                        };
+                    }
+                }
                 RegOp::LoadI32AddAddr {
                     dst,
                     a,
@@ -8532,12 +9258,10 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw =
-                        (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32) as u64;
-                    let at = (raw as usize) + (offset as usize);
-                    if let Some(arr) =
-                        fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    let raw32 = (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32);
+                    if let Some(arr) = fast_read_m32::<4, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u32::from_le_bytes(arr) as u64;
                     } else {
                         if FUEL {
@@ -8547,7 +9271,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x28,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8561,12 +9285,10 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw =
-                        (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32) as u64;
-                    let at = (raw as usize) + (offset as usize);
-                    if let Some(arr) =
-                        fast_read_bytes::<8, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    let raw32 = (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32);
+                    if let Some(arr) = fast_read_m32::<8, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u64::from_le_bytes(arr);
                     } else {
                         if FUEL {
@@ -8576,7 +9298,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x29,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8589,11 +9311,10 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw = (regs[idx as usize] as u32).wrapping_shl(2) as u64;
-                    let at = (raw as usize) + (offset as usize);
-                    if let Some(arr) =
-                        fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    let raw32 = (regs[idx as usize] as u32).wrapping_shl(2);
+                    if let Some(arr) = fast_read_m32::<4, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u32::from_le_bytes(arr) as u64;
                     } else {
                         if FUEL {
@@ -8603,7 +9324,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x28,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8617,13 +9338,11 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw = (regs[base as usize] as u32)
-                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2))
-                        as u64;
-                    let at = (raw as usize) + (offset as usize);
-                    if let Some(arr) =
-                        fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    let raw32 = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2));
+                    if let Some(arr) = fast_read_m32::<4, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u32::from_le_bytes(arr) as u64;
                     } else {
                         if FUEL {
@@ -8633,7 +9352,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x28,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8647,13 +9366,11 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw = (regs[base as usize] as u32)
-                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3))
-                        as u64;
-                    let at = (raw as usize) + (offset as usize);
-                    if let Some(arr) =
-                        fast_read_bytes::<8, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    let raw32 = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3));
+                    if let Some(arr) = fast_read_m32::<8, DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = u64::from_le_bytes(arr);
                     } else {
                         if FUEL {
@@ -8663,7 +9380,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x29,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8677,12 +9394,10 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw =
-                        (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32) as u64;
-                    let at = (raw as usize) + (offset as usize);
-                    if let Some(byte) =
-                        fast_read_u8::<DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    let raw32 = (regs[a as usize] as u32).wrapping_add(regs[b as usize] as u32);
+                    if let Some(byte) = fast_read_u8_m32::<DENSE>(
+                        raw32, offset, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         regs[dst as usize] = byte as u64;
                     } else {
                         if FUEL {
@@ -8692,7 +9407,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x2d,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8705,10 +9420,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     imm,
                     src_off,
                 } => {
-                    let raw = (regs[addr as usize] as u32).wrapping_add(imm) as u64;
-                    let at = raw as usize;
+                    let raw32 = (regs[addr as usize] as u32).wrapping_add(imm);
                     if let Some(arr) =
-                        fast_read_bytes::<4, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                        fast_read_m32::<4, DENSE>(raw32, 0, p0_base, p0_slice, p1_base, p1_slice)
                     {
                         regs[dst as usize] = u32::from_le_bytes(arr) as u64;
                     } else {
@@ -8719,7 +9433,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x28,
                             mem: 0,
                             offset: 0,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8732,10 +9446,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     imm,
                     src_off,
                 } => {
-                    let raw = (regs[addr as usize] as u32).wrapping_add(imm) as u64;
-                    let at = raw as usize;
+                    let raw32 = (regs[addr as usize] as u32).wrapping_add(imm);
                     if let Some(byte) =
-                        fast_read_u8::<DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                        fast_read_u8_m32::<DENSE>(raw32, 0, p0_base, p0_slice, p1_base, p1_slice)
                     {
                         regs[dst as usize] = byte as u64;
                     } else {
@@ -8746,7 +9459,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x2d,
                             mem: 0,
                             offset: 0,
-                            raw,
+                            raw: raw32 as u64,
                             dst,
                             kind: SlowLoadKind::Assign,
                             src_off,
@@ -8759,10 +9472,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     imm,
                     src_off,
                 } => {
-                    let raw = (regs[addr as usize] as u32).wrapping_add(imm) as u64;
-                    let at = raw as usize;
+                    let raw32 = (regs[addr as usize] as u32).wrapping_add(imm);
                     if let Some(byte) =
-                        fast_read_u8::<DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                        fast_read_u8_m32::<DENSE>(raw32, 0, p0_base, p0_slice, p1_base, p1_slice)
                     {
                         regs[acc as usize] =
                             (regs[acc as usize] as u32).wrapping_add(byte as u32) as u64;
@@ -8774,7 +9486,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x2d,
                             mem: 0,
                             offset: 0,
-                            raw,
+                            raw: raw32 as u64,
                             dst: acc,
                             kind: SlowLoadKind::AddU32,
                             src_off,
@@ -8789,22 +9501,16 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                 } => {
                     let raw = regs[addr as usize];
                     let v = regs[val as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && fast_write_bytes::<4, DENSE>(
-                            at,
-                            (v as u32).to_le_bytes(),
-                            p0_base,
-                            p0_slice,
-                            p1_base,
-                            p1_slice,
-                        )
-                    {
+                    if fast_write_mem0::<4, DENSE>(
+                        raw,
+                        offset,
+                        (v as u32).to_le_bytes(),
+                        mem0_64,
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
                         // committed
                     } else {
                         if FUEL {
@@ -8828,22 +9534,16 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                 } => {
                     let raw = regs[addr as usize];
                     let v = regs[val as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && fast_write_bytes::<8, DENSE>(
-                            at,
-                            v.to_le_bytes(),
-                            p0_base,
-                            p0_slice,
-                            p1_base,
-                            p1_slice,
-                        )
-                    {
+                    if fast_write_mem0::<8, DENSE>(
+                        raw,
+                        offset,
+                        v.to_le_bytes(),
+                        mem0_64,
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
                         // committed
                     } else {
                         if FUEL {
@@ -8867,15 +9567,9 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                 } => {
                     let raw = regs[addr as usize];
                     let v = regs[val as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && fast_write_u8::<DENSE>(at, v as u8, p0_base, p0_slice, p1_base, p1_slice)
-                    {
+                    if fast_write_u8_mem0::<DENSE>(
+                        raw, offset, v as u8, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
                         // committed
                     } else {
                         if FUEL {
@@ -8899,22 +9593,16 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                 } => {
                     let raw = regs[addr as usize];
                     let v = regs[val as usize];
-                    let at = if !mem0_64 {
-                        Some((raw as u32 as usize) + (offset as usize))
-                    } else {
-                        raw.checked_add(offset as u64)
-                            .and_then(|e| usize::try_from(e).ok())
-                    };
-                    if let Some(at) = at
-                        && fast_write_bytes::<2, DENSE>(
-                            at,
-                            (v as u16).to_le_bytes(),
-                            p0_base,
-                            p0_slice,
-                            p1_base,
-                            p1_slice,
-                        )
-                    {
+                    if fast_write_mem0::<2, DENSE>(
+                        raw,
+                        offset,
+                        (v as u16).to_le_bytes(),
+                        mem0_64,
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
                         // committed
                     } else {
                         if FUEL {
@@ -8930,16 +9618,74 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         };
                     }
                 }
+                RegOp::StoreI32Imm {
+                    addr,
+                    val,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    if fast_write_mem0::<4, DENSE>(
+                        raw,
+                        u32::from(offset),
+                        val.to_le_bytes(),
+                        mem0_64,
+                        p0_base,
+                        p0_slice,
+                        p1_base,
+                        p1_slice,
+                    ) {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowStore {
+                            op: 0x36,
+                            mem: 0,
+                            offset: u64::from(offset),
+                            raw,
+                            val: u64::from(val),
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::StoreI32_8Imm {
+                    addr,
+                    val,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    if fast_write_u8_mem0::<DENSE>(
+                        raw, offset, val, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowStore {
+                            op: 0x3a,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            val: u64::from(val),
+                            src_off,
+                        };
+                    }
+                }
                 RegOp::StoreI32AddImm {
                     addr,
                     val,
                     imm,
                     src_off,
                 } => {
-                    let raw = (regs[addr as usize] as u32).wrapping_add(imm) as u64;
+                    let raw32 = (regs[addr as usize] as u32).wrapping_add(imm);
                     let v = regs[val as usize];
-                    if fast_write_bytes::<4, DENSE>(
-                        raw as usize,
+                    if fast_write_m32::<4, DENSE>(
+                        raw32,
+                        0,
                         (v as u32).to_le_bytes(),
                         p0_base,
                         p0_slice,
@@ -8955,7 +9701,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x36,
                             mem: 0,
                             offset: 0,
-                            raw,
+                            raw: raw32 as u64,
                             val: v,
                             src_off,
                         };
@@ -8967,15 +9713,10 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     imm,
                     src_off,
                 } => {
-                    let raw = (regs[addr as usize] as u32).wrapping_add(imm) as u64;
+                    let raw32 = (regs[addr as usize] as u32).wrapping_add(imm);
                     let v = regs[val as usize];
-                    if fast_write_u8::<DENSE>(
-                        raw as usize,
-                        v as u8,
-                        p0_base,
-                        p0_slice,
-                        p1_base,
-                        p1_slice,
+                    if fast_write_u8_m32::<DENSE>(
+                        raw32, 0, v as u8, p0_base, p0_slice, p1_base, p1_slice,
                     ) {
                         // committed
                     } else {
@@ -8986,7 +9727,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x3a,
                             mem: 0,
                             offset: 0,
-                            raw,
+                            raw: raw32 as u64,
                             val: v,
                             src_off,
                         };
@@ -8998,11 +9739,11 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw = (regs[idx as usize] as u32).wrapping_shl(2) as u64;
+                    let raw32 = (regs[idx as usize] as u32).wrapping_shl(2);
                     let v = regs[val as usize];
-                    let at = (raw as usize) + (offset as usize);
-                    if fast_write_bytes::<4, DENSE>(
-                        at,
+                    if fast_write_m32::<4, DENSE>(
+                        raw32,
+                        offset,
                         (v as u32).to_le_bytes(),
                         p0_base,
                         p0_slice,
@@ -9018,7 +9759,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x36,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             val: v,
                             src_off,
                         };
@@ -9031,13 +9772,12 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw = (regs[base as usize] as u32)
-                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2))
-                        as u64;
+                    let raw32 = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(2));
                     let v = regs[val as usize];
-                    let at = (raw as usize) + (offset as usize);
-                    if fast_write_bytes::<4, DENSE>(
-                        at,
+                    if fast_write_m32::<4, DENSE>(
+                        raw32,
+                        offset,
                         (v as u32).to_le_bytes(),
                         p0_base,
                         p0_slice,
@@ -9053,7 +9793,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x36,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             val: v,
                             src_off,
                         };
@@ -9066,13 +9806,12 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     offset,
                     src_off,
                 } => {
-                    let raw = (regs[base as usize] as u32)
-                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3))
-                        as u64;
+                    let raw32 = (regs[base as usize] as u32)
+                        .wrapping_add((regs[idx as usize] as u32).wrapping_shl(3));
                     let v = regs[val as usize];
-                    let at = (raw as usize) + (offset as usize);
-                    if fast_write_bytes::<8, DENSE>(
-                        at,
+                    if fast_write_m32::<8, DENSE>(
+                        raw32,
+                        offset,
                         v.to_le_bytes(),
                         p0_base,
                         p0_slice,
@@ -9088,7 +9827,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                             op: 0x37,
                             mem: 0,
                             offset: offset as u64,
-                            raw,
+                            raw: raw32 as u64,
                             val: v,
                             src_off,
                         };
@@ -9161,6 +9900,42 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     let next = (regs[reg as usize] as i32).wrapping_add(i32::from(step));
                     regs[reg as usize] = next as u32 as u64;
                     if next < regs[limit as usize] as i32 {
+                        ip = target as usize;
+                    }
+                }
+                RegOp::I32IncNeBrIf {
+                    reg,
+                    limit,
+                    step,
+                    target,
+                } => {
+                    let next = (regs[reg as usize] as u32).wrapping_add(step as i32 as u32);
+                    regs[reg as usize] = next as u64;
+                    if next != regs[limit as usize] as u32 {
+                        ip = target as usize;
+                    }
+                }
+                RegOp::I32IncBrIfNonZero { reg, step, target } => {
+                    let next = (regs[reg as usize] as u32).wrapping_add(step as u32);
+                    regs[reg as usize] = next as u64;
+                    if next != 0 {
+                        ip = target as usize;
+                    }
+                }
+                RegOp::I32IncCmpImmBrIf {
+                    cmp,
+                    step,
+                    reg,
+                    imm,
+                    target,
+                } => {
+                    let next = (regs[reg as usize] as u32).wrapping_add(i32::from(step) as u32);
+                    regs[reg as usize] = next as u64;
+                    let rhs = match cmp {
+                        2 | 4 | 6 | 8 => i32::from(imm as i16) as u32,
+                        _ => u32::from(imm),
+                    };
+                    if eval_i32_cmp(cmp, next, rhs) {
                         ip = target as usize;
                     }
                 }
@@ -9304,31 +10079,422 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                 RegOp::WideArith { .. } => {
                     exec_cold_scalar_alu(op, regs)?;
                 }
-                RegOp::MovV128 { .. }
-                | RegOp::ConstV128 { .. }
-                | RegOp::SelectV128 { .. }
-                | RegOp::GlobalGetV128 { .. }
+                // ---- Hot unboxed v128 SIMD directly on `[u64; 2]` pairs in `regs` ----
+                RegOp::MovV128 { dst, src } => {
+                    let words = read_v128_words(regs, src);
+                    write_v128_words(regs, dst, words);
+                }
+                RegOp::ConstV128 { dst, idx } => {
+                    write_v128_words(regs, dst, cur_func.v128_consts[idx as usize]);
+                }
+                RegOp::SelectV128 { dst, a, b, cond } => {
+                    let s = if regs[cond as usize] as u32 != 0 {
+                        a
+                    } else {
+                        b
+                    };
+                    let words = read_v128_words(regs, s);
+                    write_v128_words(regs, dst, words);
+                }
+                RegOp::LoadV128 {
+                    dst,
+                    addr,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    if let Some(arr) = fast_read_mem0::<16, DENSE>(
+                        raw, offset, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        write_v128(regs, dst, arr);
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowSimdMem {
+                            op: 0xfd00,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst,
+                            in_vec: [0u8; 16],
+                            lane: 0,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::StoreV128 {
+                    addr,
+                    val,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    let data = read_v128(regs, val);
+                    if fast_write_mem0::<16, DENSE>(
+                        raw, offset, data, mem0_64, p0_base, p0_slice, p1_base, p1_slice,
+                    ) {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowSimdMem {
+                            op: 0xfd0b,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst: val,
+                            in_vec: data,
+                            lane: 0,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::SimdShuffle {
+                    dst,
+                    a,
+                    b,
+                    mask_idx,
+                } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    let mut src = [0u8; 32];
+                    src[0..8].copy_from_slice(&alo.to_le_bytes());
+                    src[8..16].copy_from_slice(&ahi.to_le_bytes());
+                    src[16..24].copy_from_slice(&blo.to_le_bytes());
+                    src[24..32].copy_from_slice(&bhi.to_le_bytes());
+                    let ix = &cur_func.simd_masks[mask_idx as usize];
+                    let mut out = [0u8; 16];
+                    for i in 0..16 {
+                        out[i] = src[(ix[i] & 31) as usize];
+                    }
+                    write_v128(regs, dst, out);
+                }
+                RegOp::V128Splat32 { dst, src } => {
+                    let x = regs[src as usize] as u32 as u64;
+                    let w = x | (x << 32);
+                    write_v128_words(regs, dst, [w, w]);
+                }
+                RegOp::V128Splat64 { dst, src } => {
+                    let w = regs[src as usize];
+                    write_v128_words(regs, dst, [w, w]);
+                }
+                RegOp::V128Not { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    write_v128_words(regs, dst, [!lo, !hi]);
+                }
+                RegOp::V128And { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo & blo, ahi & bhi]);
+                }
+                RegOp::V128AndNot { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo & !blo, ahi & !bhi]);
+                }
+                RegOp::V128Or { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo | blo, ahi | bhi]);
+                }
+                RegOp::V128Xor { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo ^ blo, ahi ^ bhi]);
+                }
+                RegOp::V128Bitselect { dst, a, b, c } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    let [clo, chi] = read_v128_words(regs, c);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [(alo & clo) | (blo & !clo), (ahi & chi) | (bhi & !chi)],
+                    );
+                }
+                RegOp::I32x4Add { dst, a, b } => {
+                    let va = read_u32x4(regs, a);
+                    let vb = read_u32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            va[0].wrapping_add(vb[0]),
+                            va[1].wrapping_add(vb[1]),
+                            va[2].wrapping_add(vb[2]),
+                            va[3].wrapping_add(vb[3]),
+                        ],
+                    );
+                }
+                RegOp::I32x4Sub { dst, a, b } => {
+                    let va = read_u32x4(regs, a);
+                    let vb = read_u32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            va[0].wrapping_sub(vb[0]),
+                            va[1].wrapping_sub(vb[1]),
+                            va[2].wrapping_sub(vb[2]),
+                            va[3].wrapping_sub(vb[3]),
+                        ],
+                    );
+                }
+                RegOp::I32x4Mul { dst, a, b } => {
+                    let va = read_u32x4(regs, a);
+                    let vb = read_u32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            va[0].wrapping_mul(vb[0]),
+                            va[1].wrapping_mul(vb[1]),
+                            va[2].wrapping_mul(vb[2]),
+                            va[3].wrapping_mul(vb[3]),
+                        ],
+                    );
+                }
+                RegOp::I64x2Add { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo.wrapping_add(blo), ahi.wrapping_add(bhi)]);
+                }
+                RegOp::I64x2Sub { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo.wrapping_sub(blo), ahi.wrapping_sub(bhi)]);
+                }
+                RegOp::F32x4Abs { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [lo & 0x7fff_ffff_7fff_ffff, hi & 0x7fff_ffff_7fff_ffff],
+                    );
+                }
+                RegOp::F32x4Neg { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [lo ^ 0x8000_0000_8000_0000, hi ^ 0x8000_0000_8000_0000],
+                    );
+                }
+                RegOp::F32x4Add { dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [va[0] + vb[0], va[1] + vb[1], va[2] + vb[2], va[3] + vb[3]],
+                    );
+                }
+                RegOp::F32x4Sub { dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [va[0] - vb[0], va[1] - vb[1], va[2] - vb[2], va[3] - vb[3]],
+                    );
+                }
+                RegOp::F32x4Mul { dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [va[0] * vb[0], va[1] * vb[1], va[2] * vb[2], va[3] * vb[3]],
+                    );
+                }
+                RegOp::F32x4Div { dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [va[0] / vb[0], va[1] / vb[1], va[2] / vb[2], va[3] / vb[3]],
+                    );
+                }
+                RegOp::F32x4Min { dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            wasm_f32_min(va[0], vb[0]),
+                            wasm_f32_min(va[1], vb[1]),
+                            wasm_f32_min(va[2], vb[2]),
+                            wasm_f32_min(va[3], vb[3]),
+                        ],
+                    );
+                }
+                RegOp::F32x4Max { dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            wasm_f32_max(va[0], vb[0]),
+                            wasm_f32_max(va[1], vb[1]),
+                            wasm_f32_max(va[2], vb[2]),
+                            wasm_f32_max(va[3], vb[3]),
+                        ],
+                    );
+                }
+                RegOp::F32x4PMin { dst, a, b } => {
+                    let ua = read_u32x4(regs, a);
+                    let ub = read_u32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            if f32::from_bits(ub[0]) < f32::from_bits(ua[0]) {
+                                ub[0]
+                            } else {
+                                ua[0]
+                            },
+                            if f32::from_bits(ub[1]) < f32::from_bits(ua[1]) {
+                                ub[1]
+                            } else {
+                                ua[1]
+                            },
+                            if f32::from_bits(ub[2]) < f32::from_bits(ua[2]) {
+                                ub[2]
+                            } else {
+                                ua[2]
+                            },
+                            if f32::from_bits(ub[3]) < f32::from_bits(ua[3]) {
+                                ub[3]
+                            } else {
+                                ua[3]
+                            },
+                        ],
+                    );
+                }
+                RegOp::F32x4PMax { dst, a, b } => {
+                    let ua = read_u32x4(regs, a);
+                    let ub = read_u32x4(regs, b);
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            if f32::from_bits(ua[0]) < f32::from_bits(ub[0]) {
+                                ub[0]
+                            } else {
+                                ua[0]
+                            },
+                            if f32::from_bits(ua[1]) < f32::from_bits(ub[1]) {
+                                ub[1]
+                            } else {
+                                ua[1]
+                            },
+                            if f32::from_bits(ua[2]) < f32::from_bits(ub[2]) {
+                                ub[2]
+                            } else {
+                                ua[2]
+                            },
+                            if f32::from_bits(ua[3]) < f32::from_bits(ub[3]) {
+                                ub[3]
+                            } else {
+                                ua[3]
+                            },
+                        ],
+                    );
+                }
+                RegOp::F32x4Cmp { cmp, dst, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    let lane = |x: f32, y: f32| -> u32 {
+                        if eval_f32_cmp(cmp, x, y) { u32::MAX } else { 0 }
+                    };
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            lane(va[0], vb[0]),
+                            lane(va[1], vb[1]),
+                            lane(va[2], vb[2]),
+                            lane(va[3], vb[3]),
+                        ],
+                    );
+                }
+                RegOp::F32x4MulAdd { dst, acc, a, b } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    let vc = read_f32x4(regs, acc);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [
+                            vc[0] + (va[0] * vb[0]),
+                            vc[1] + (va[1] * vb[1]),
+                            vc[2] + (va[2] * vb[2]),
+                            vc[3] + (va[3] * vb[3]),
+                        ],
+                    );
+                }
+                RegOp::F64x2Add { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            (f64::from_bits(alo) + f64::from_bits(blo)).to_bits(),
+                            (f64::from_bits(ahi) + f64::from_bits(bhi)).to_bits(),
+                        ],
+                    );
+                }
+                RegOp::F64x2Sub { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            (f64::from_bits(alo) - f64::from_bits(blo)).to_bits(),
+                            (f64::from_bits(ahi) - f64::from_bits(bhi)).to_bits(),
+                        ],
+                    );
+                }
+                RegOp::F64x2Mul { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            (f64::from_bits(alo) * f64::from_bits(blo)).to_bits(),
+                            (f64::from_bits(ahi) * f64::from_bits(bhi)).to_bits(),
+                        ],
+                    );
+                }
+                RegOp::F64x2Div { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            (f64::from_bits(alo) / f64::from_bits(blo)).to_bits(),
+                            (f64::from_bits(ahi) / f64::from_bits(bhi)).to_bits(),
+                        ],
+                    );
+                }
+                RegOp::GlobalGetV128 { .. }
                 | RegOp::GlobalSetV128 { .. }
-                | RegOp::LoadV128 { .. }
-                | RegOp::StoreV128 { .. }
                 | RegOp::SimdMemGen { .. }
-                | RegOp::SimdShuffle { .. }
                 | RegOp::SimdUnary { .. }
                 | RegOp::SimdBinary { .. }
                 | RegOp::SimdTernary { .. } => {
-                    if let Some(simd_exit) = exec_cold_simd::<DENSE>(
-                        op,
-                        cur_func,
-                        regs,
-                        inst_globals,
-                        globals,
-                        p0_base,
-                        p0_slice,
-                        p1_base,
-                        p1_slice,
-                        mem0_64,
-                        simd_scratch,
-                    )? {
+                    if let Some(simd_exit) =
+                        exec_cold_simd(op, cur_func, regs, inst_globals, globals, simd_scratch)?
+                    {
                         if FUEL {
                             *fuel = Some(remaining_fuel);
                         }
@@ -9489,7 +10655,6 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 .unwrap();
                             ops = &cur_func.ops;
                             consts = &cur_func.consts;
-                            mem0_64 = cur_func.mem0_is_64;
                             regs = &mut reg_bank[cur_reg_base..];
                             refs = &mut ref_bank[cur_ref_base..];
                             continue;
@@ -9565,11 +10730,7 @@ fn run_loop<const FUEL: bool>(
     let mut cur_reg_base: usize = 0;
     let mut cur_ref_base: usize = 0;
     let mut cur_mem0: Option<usize> = resolve_mem0(store, cur_inst);
-    if let Some(i) = cur_mem0
-        && store.mems[i].bytes.has_written_storage()
-    {
-        store.mems[i].bytes.try_promote_dense();
-    }
+    try_promote_mem0_dense_if_written(store, cur_mem0);
     let mut cache_p0_idx: usize = 0;
     let mut cache_p1_idx: usize = 1;
     let frames_len = frames.len();
@@ -9619,7 +10780,9 @@ fn run_loop<const FUEL: bool>(
             block_fuel: cur_block_fuel,
             active_local_slots: store.active_local_slots,
         };
-        let is_dense = cur_mem0.is_some_and(|i| store.mems[i].bytes.is_dense());
+        let is_dense = cur_mem0.is_some_and(|i| {
+            store.mems[i].ty.index_type == IndexType::I32 && store.mems[i].bytes.is_dense()
+        });
         let exit = if is_dense {
             dispatch_inner::<FUEL, true>(
                 store,
@@ -9672,11 +10835,7 @@ fn run_loop<const FUEL: bool>(
             InnerExit::SwitchInst => {
                 cache_p0_idx = 0;
                 cache_p1_idx = 1;
-                if let Some(i) = cur_mem0
-                    && store.mems[i].bytes.has_written_storage()
-                {
-                    store.mems[i].bytes.try_promote_dense();
-                }
+                try_promote_mem0_dense_if_written(store, cur_mem0);
             }
             InnerExit::SlowLoad {
                 op: lop,
@@ -9694,14 +10853,16 @@ fn run_loop<const FUEL: bool>(
                         SlowLoadKind::AddU32 => {
                             *slot = (*slot as u32).wrapping_add(v as u32) as u64;
                         }
+                        SlowLoadKind::AddF32 => {
+                            *slot = (f32::from_bits(*slot as u32) + f32::from_bits(v as u32))
+                                .to_bits() as u64;
+                        }
                         SlowLoadKind::AddF64 => {
                             *slot = (f64::from_bits(*slot) + f64::from_bits(v)).to_bits();
                         }
                     }
                     if mem == 0 {
-                        if let Some(i) = cur_mem0 {
-                            store.mems[i].bytes.try_promote_dense();
-                        }
+                        try_promote_mem0_dense(store, cur_mem0);
                         if let Ok(p) = usize::try_from(eff >> PAGE_BITS)
                             && p != cache_p0_idx
                         {
@@ -9725,9 +10886,7 @@ fn run_loop<const FUEL: bool>(
             } => match mem_store_slow(store, cur_inst, mem, sop, offset, raw, val) {
                 Ok(eff) => {
                     if mem == 0 {
-                        if let Some(i) = cur_mem0 {
-                            store.mems[i].bytes.try_promote_dense();
-                        }
+                        try_promote_mem0_dense(store, cur_mem0);
                         if let Ok(p) = usize::try_from(eff >> PAGE_BITS)
                             && p != cache_p0_idx
                         {
@@ -9756,9 +10915,7 @@ fn run_loop<const FUEL: bool>(
                         write_v128(&mut reg_bank[cur_reg_base..], dst, v);
                     }
                     if mem == 0 {
-                        if let Some(i) = cur_mem0 {
-                            store.mems[i].bytes.try_promote_dense();
-                        }
+                        try_promote_mem0_dense(store, cur_mem0);
                         if let Ok(p) = usize::try_from(eff >> PAGE_BITS)
                             && p != cache_p0_idx
                         {
@@ -9776,7 +10933,11 @@ fn run_loop<const FUEL: bool>(
                 let h = store.instances[cur_inst].mems[mem as usize];
                 let m = &store.mems[h.0.index];
                 let pages = (m.bytes.len() >> m.ty.page_size_log2) as u64;
-                reg_bank[cur_reg_base + dst as usize] = pages;
+                reg_bank[cur_reg_base + dst as usize] = if m.ty.index_type == IndexType::I64 {
+                    pages
+                } else {
+                    pages as u32 as u64
+                };
             }
             InnerExit::MemGrow { dst, delta, mem } => {
                 let res = mem_grow_slow(store, cur_inst, mem, delta)?;
@@ -9794,10 +10955,8 @@ fn run_loop<const FUEL: bool>(
                     refund_on_trap!(src_off);
                     return Err(e);
                 }
-                if (dst_mem == 0 || src_mem == 0)
-                    && let Some(i) = cur_mem0
-                {
-                    store.mems[i].bytes.try_promote_dense();
+                if dst_mem == 0 || src_mem == 0 {
+                    try_promote_mem0_dense(store, cur_mem0);
                 }
             }
             InnerExit::MemFill {
@@ -9811,10 +10970,8 @@ fn run_loop<const FUEL: bool>(
                     refund_on_trap!(src_off);
                     return Err(e);
                 }
-                if mem == 0
-                    && let Some(i) = cur_mem0
-                {
-                    store.mems[i].bytes.try_promote_dense();
+                if mem == 0 {
+                    try_promote_mem0_dense(store, cur_mem0);
                 }
             }
             InnerExit::MemInit {
@@ -9840,10 +10997,8 @@ fn run_loop<const FUEL: bool>(
                     refund_on_trap!(src_off);
                     return Err(e);
                 }
-                if mem == 0
-                    && let Some(i) = cur_mem0
-                {
-                    store.mems[i].bytes.try_promote_dense();
+                if mem == 0 {
+                    try_promote_mem0_dense(store, cur_mem0);
                 }
             }
             InnerExit::DataDrop { seg } => {
@@ -9919,7 +11074,12 @@ fn run_loop<const FUEL: bool>(
             }
             InnerExit::TableSize { dst, table } => {
                 let t = &store.tabs[store.instances[cur_inst].tabs[table as usize].0.index];
-                reg_bank[cur_reg_base + dst as usize] = t.values.len() as u64;
+                let len = t.values.len() as u64;
+                reg_bank[cur_reg_base + dst as usize] = if t.ty.index_type == IndexType::I64 {
+                    len
+                } else {
+                    len as u32 as u64
+                };
             }
             InnerExit::Bail { meta } => {
                 do_bail!(meta);
@@ -10030,11 +11190,7 @@ fn run_loop<const FUEL: bool>(
                 cur_ref_base = new_ref_base;
                 cur_logical_base = next_logical_base;
                 cur_mem0 = callee_mem0;
-                if let Some(i) = cur_mem0
-                    && store.mems[i].bytes.has_written_storage()
-                {
-                    store.mems[i].bytes.try_promote_dense();
-                }
+                try_promote_mem0_dense_if_written(store, cur_mem0);
                 cache_p0_idx = 0;
                 cache_p1_idx = 1;
                 ip = 0;
@@ -10113,11 +11269,7 @@ fn run_loop<const FUEL: bool>(
                 cur_body = callee_body;
                 cur_handle = callee_handle;
                 cur_mem0 = resolve_mem0(store, callee_inst);
-                if let Some(i) = cur_mem0
-                    && store.mems[i].bytes.has_written_storage()
-                {
-                    store.mems[i].bytes.try_promote_dense();
-                }
+                try_promote_mem0_dense_if_written(store, cur_mem0);
                 cache_p0_idx = 0;
                 cache_p1_idx = 1;
                 ip = 0;
@@ -13427,5 +14579,1135 @@ mod tests {
             st.invoke(fg, &[Value::I64(10)]).unwrap(),
             RunOutcome::Returned(vec![Value::I64(53)])
         );
+    }
+
+    fn emit_v128_const(code: &mut Vec<u8>, bytes: [u8; 16]) {
+        code.extend_from_slice(&[0xfd, 0x0c]);
+        code.extend_from_slice(&bytes);
+    }
+
+    fn v128_from_f32s(lanes: [u32; 4]) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        for (i, bits) in lanes.iter().enumerate() {
+            out[i * 4..(i + 1) * 4].copy_from_slice(&bits.to_le_bytes());
+        }
+        out
+    }
+
+    fn v128_from_f64s(lanes: [u64; 2]) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[0..8].copy_from_slice(&lanes[0].to_le_bytes());
+        out[8..16].copy_from_slice(&lanes[1].to_le_bytes());
+        out
+    }
+
+    fn simd_op(code: &mut Vec<u8>, sub: u32) {
+        code.push(0xfd);
+        leb_u32(code, sub);
+    }
+
+    #[test]
+    fn fast_register_unboxed_v128_fast_ops_nan_oob_fuel_and_mixed_ref_parity() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // Types:
+        //  0: (i32) -> i32                  (host callback "gc")
+        //  1: (v128, v128, i32) -> v128     ("simd_ops": exercises all new unboxed v128 RegOps + NaN)
+        //  2: (i32, v128) -> v128           ("simd_mem": v128.store + v128.load, OOB traps + fuel)
+        //  3: (externref, i32, v128) -> (v128, externref, i32) ("mixed_ref": scalar + v128 + GC ref)
+        //  4: (v128, v128, v128) -> v128    ("simd_fma": f32x4.mul + f32x4.add -> F32x4MulAdd)
+        let mut type_sec = vec![5];
+        type_sec.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // 0
+        type_sec.extend_from_slice(&[0x60, 3, 0x7b, 0x7b, 0x7f, 1, 0x7b]); // 1
+        type_sec.extend_from_slice(&[0x60, 2, 0x7f, 0x7b, 1, 0x7b]); // 2
+        type_sec.extend_from_slice(&[0x60, 3, 0x6f, 0x7f, 0x7b, 3, 0x7b, 0x6f, 0x7f]); // 3
+        type_sec.extend_from_slice(&[0x60, 3, 0x7b, 0x7b, 0x7b, 1, 0x7b]); // 4
+
+        let imp_sec = vec![1, 3, b'e', b'n', b'v', 2, b'g', b'c', 0x00, 0];
+        let func_sec = vec![4, 1, 2, 3, 4];
+        let mem_sec = vec![1, 0x00, 1]; // 1 page (64 KiB)
+        // Active data segment so mem0 starts with written storage and promotes dense!
+        let mut data_sec = vec![1, 0x00, 0x41, 0x00, 0x0b, 4, 1, 2, 3, 4];
+        let _ = &mut data_sec;
+
+        let mut exp_sec = vec![4];
+        for (idx, name) in ["simd_ops", "simd_mem", "mixed_ref", "simd_fma"]
+            .iter()
+            .enumerate()
+        {
+            exp_sec.push(name.len() as u8);
+            exp_sec.extend_from_slice(name.as_bytes());
+            exp_sec.push(0x00);
+            exp_sec.push((idx + 1) as u8); // func 0 is import
+        }
+
+        // Body 0 ("simd_ops"): (a: v128, b: v128, mode: i32) -> v128
+        // Dispatch by `mode` across every unboxed v128 fast op so each op's exact bit pattern
+        // (including NaN canonicalization / sNaN payload preservation) is tested individually!
+        let mut s_code = Vec::new();
+        let mut emit_case = |mode: i32, f: &dyn Fn(&mut Vec<u8>)| {
+            s_code.extend_from_slice(&[0x20, 0x02, 0x41]);
+            leb_u32(&mut s_code, mode as u32);
+            s_code.extend_from_slice(&[0x46, 0x04, 0x40]); // if local2 == mode
+            f(&mut s_code);
+            s_code.extend_from_slice(&[0x0f, 0x0b]); // return; end
+        };
+        // 0..=3: f32x4.{add, sub, mul, div}
+        for (m, sub) in [(0, 228u32), (1, 229), (2, 230), (3, 231)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 4..=5: f32x4.{abs, neg}
+        for (m, sub) in [(4, 224u32), (5, 225)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00]);
+                simd_op(c, sub);
+            });
+        }
+        // 6..=9: f32x4.{min, max, pmin, pmax}
+        for (m, sub) in [(6, 232u32), (7, 233), (8, 234), (9, 235)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 10..=15: f32x4.{eq, ne, lt, gt, le, ge}
+        for (m, sub) in [
+            (10, 65u32),
+            (11, 66),
+            (12, 67),
+            (13, 68),
+            (14, 69),
+            (15, 70),
+        ] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 16..=19: f64x2.{add, sub, mul, div}
+        for (m, sub) in [(16, 240u32), (17, 241), (18, 242), (19, 243)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 20..=22: i32x4.{add, sub, mul}
+        for (m, sub) in [(20, 174u32), (21, 177), (22, 181)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 23..=24: i64x2.{add, sub}
+        for (m, sub) in [(23, 206u32), (24, 209)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 25..=29: v128.{not, and, andnot, or, xor}
+        emit_case(25, &|c| {
+            c.extend_from_slice(&[0x20, 0x00]);
+            simd_op(c, 77);
+        });
+        for (m, sub) in [(26, 78u32), (27, 79), (28, 80), (29, 81)] {
+            emit_case(m, &|c| {
+                c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+                simd_op(c, sub);
+            });
+        }
+        // 30: v128.bitselect(a, b, mask_const)
+        emit_case(30, &|c| {
+            c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01]);
+            emit_v128_const(
+                c,
+                [
+                    0xff, 0x00, 0xaa, 0x55, 0x0f, 0xf0, 0xcc, 0x33, 0xff, 0xff, 0x00, 0x00, 0x5a,
+                    0xa5, 0x81, 0x7e,
+                ],
+            );
+            simd_op(c, 82);
+        });
+        // 31: i8x16.shuffle(a, b) crossing both vectors
+        emit_case(31, &|c| {
+            c.extend_from_slice(&[0x20, 0x00, 0x20, 0x01, 0xfd, 0x0d]);
+            c.extend_from_slice(&[31, 0, 16, 15, 20, 3, 28, 7, 17, 14, 25, 2, 19, 11, 30, 8]);
+        });
+        // 32: i32x4.splat(i32.const 0x12345678)
+        emit_case(32, &|c| {
+            c.extend_from_slice(&[0x41, 0xf8, 0xac, 0xd1, 0x91, 0x01]);
+            simd_op(c, 17);
+        });
+        // 33: f32x4.splat(f32.const sNaN 0x7f800007) -> must preserve exact sNaN bits!
+        emit_case(33, &|c| {
+            c.push(0x43);
+            c.extend_from_slice(&0x7f80_0007_u32.to_le_bytes());
+            simd_op(c, 19);
+        });
+        // 34: i64x2.splat(i64.const -0x123456789)
+        emit_case(34, &|c| {
+            c.extend_from_slice(&[0x42, 0xf7, 0xd4, 0xd6, 0x9b, 0x6d]);
+            simd_op(c, 18);
+        });
+        // 35: f64x2.splat(f64.const sNaN 0x7ff0000000000009) -> must preserve exact sNaN bits!
+        emit_case(35, &|c| {
+            c.push(0x44);
+            c.extend_from_slice(&0x7ff0_0000_0000_0009_u64.to_le_bytes());
+            simd_op(c, 20);
+        });
+        // default fallback: v128.const
+        emit_v128_const(&mut s_code, [0x42; 16]);
+        let b0 = body(&[], &s_code);
+
+        // Body 1 ("simd_mem"): (addr: i32, v: v128) -> v128
+        // Stores `v` at `addr` (offset 0), loads `v128` at `addr` (offset 0), adds `i32x4.splat(1)`.
+        let mut m_code = Vec::new();
+        m_code.extend_from_slice(&[0x20, 0x00, 0x20, 0x01, 0xfd, 0x0b, 0x00, 0x00]); // v128.store
+        m_code.extend_from_slice(&[0x20, 0x00, 0xfd, 0x00, 0x00, 0x00]); // v128.load
+        m_code.extend_from_slice(&[0x41, 0x01]);
+        simd_op(&mut m_code, 17); // i32x4.splat(1)
+        simd_op(&mut m_code, 174); // i32x4.add
+        let b1 = body(&[], &m_code);
+
+        // Body 2 ("mixed_ref"): (r: externref, n: i32, v: v128) -> (v128, externref, i32)
+        // Locals: local 3 = v128, local 4 = externref
+        let mut r_code = Vec::new();
+        // local 3 = v + (v * splat_f32(2.0)) -> exercises F32x4MulAdd alongside ref local!
+        r_code.extend_from_slice(&[0x20, 0x02, 0x20, 0x02, 0x43]);
+        r_code.extend_from_slice(&2.0_f32.to_bits().to_le_bytes());
+        simd_op(&mut r_code, 19); // f32x4.splat
+        simd_op(&mut r_code, 230); // f32x4.mul
+        simd_op(&mut r_code, 228); // f32x4.add
+        r_code.extend_from_slice(&[0x21, 0x03]); // local.set 3
+        // local 4 = r; store local 3 to mem[64] (SLEB128 +64 = 0xc0, 0x00)
+        r_code.extend_from_slice(&[0x20, 0x00, 0x21, 0x04]);
+        r_code.extend_from_slice(&[0x41, 0xc0, 0x00, 0x20, 0x03, 0xfd, 0x0b, 0x00, 0x00]);
+        // push r & local 3 onto operand stack across host GC call!
+        r_code.extend_from_slice(&[0x41, 0xc0, 0x00, 0xfd, 0x00, 0x00, 0x00]); // v128 on stack
+        r_code.extend_from_slice(&[0x20, 0x04]); // externref on stack
+        r_code.extend_from_slice(&[0x20, 0x01, 0x10, 0x00]); // call host gc(n) -> n + 3
+        let b2 = body(&[(1, 0x7b), (1, 0x6f)], &r_code);
+
+        // Body 3 ("simd_fma"): (acc: v128, a: v128, b: v128) -> v128
+        // acc + (a * b) -> compiles to F32x4MulAdd!
+        let mut fma_code = vec![0x20, 0x00, 0x20, 0x01, 0x20, 0x02];
+        simd_op(&mut fma_code, 230); // f32x4.mul
+        simd_op(&mut fma_code, 228); // f32x4.add
+        let b3 = body(&[], &fma_code);
+
+        let mut code_sec = vec![4];
+        for b in [&b0, &b1, &b2, &b3] {
+            code_sec.extend_from_slice(b);
+        }
+
+        let wasm = wasm_mod(&[
+            sec(1, &type_sec),
+            sec(2, &imp_sec),
+            sec(3, &func_sec),
+            sec(5, &mem_sec),
+            sec(7, &exp_sec),
+            sec(10, &code_sec),
+            sec(11, &data_sec),
+        ]);
+
+        // 1) Verify compilation emits dedicated unboxed v128 RegOps (not SimdUnary/Binary/Ternary)!
+        let mut cfg = Config::default();
+        cfg.features.simd = true;
+        cfg.features.reference_types = true;
+        cfg.features.gc = true;
+        let reg_eng =
+            Engine::with_execution_policy(cfg.clone(), ExecutionPolicy::Register).unwrap();
+        let reg_mod = reg_eng.compile(&wasm).unwrap();
+        let f0 = get_or_compile_ref(&reg_mod, 0).expect("simd_ops admitted");
+        assert!(
+            f0.ops.iter().all(|op| !matches!(
+                op,
+                RegOp::SimdUnary { .. } | RegOp::SimdBinary { .. } | RegOp::SimdTernary { .. }
+            )),
+            "all hot v128 ops in simd_ops must lower to dedicated unboxed RegOps"
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::V128Splat32 { .. }))
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::V128Splat64 { .. }))
+        );
+        assert!(f0.ops.iter().any(|op| matches!(op, RegOp::F32x4Min { .. })));
+        assert!(f0.ops.iter().any(|op| matches!(op, RegOp::F32x4Cmp { .. })));
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::V128Bitselect { .. }))
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::SimdShuffle { .. }))
+        );
+        let f1 = get_or_compile_ref(&reg_mod, 1).expect("simd_mem admitted");
+        assert!(f1.ops.iter().any(|op| matches!(op, RegOp::LoadV128 { .. })));
+        assert!(
+            f1.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::StoreV128 { .. }))
+        );
+        let f3 = get_or_compile_ref(&reg_mod, 3).expect("simd_fma admitted");
+        assert!(
+            f3.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32x4MulAdd { .. }))
+        );
+
+        // 2) Bit-exact parity across ALL 36 modes with tricky NaN, -0.0, +0.0, inf, overflow payloads!
+        let f32_a = v128_from_f32s([
+            0x7f80_0001,          // +sNaN
+            0xffc0_1234,          // -qNaN payload
+            (-0.0_f32).to_bits(), // -0.0
+            f32::INFINITY.to_bits(),
+        ]);
+        let f32_b = v128_from_f32s([
+            0x7fc0_5678,       // +qNaN payload
+            1.5_f32.to_bits(), // finite
+            0.0_f32.to_bits(), // +0.0
+            f32::NEG_INFINITY.to_bits(),
+        ]);
+        let f32_c = v128_from_f32s([
+            (-3.25_f32).to_bits(),
+            2.5_f32.to_bits(),
+            0x0000_0001, // subnormal
+            1.0_f32.to_bits(),
+        ]);
+        let f64_a = v128_from_f64s([0x7ff0_0000_0000_0001, (-0.0_f64).to_bits()]);
+        let f64_b = v128_from_f64s([3.5_f64.to_bits(), f64::INFINITY.to_bits()]);
+        let int_a = v128_from_f32s([0x7fff_ffff, 0x0000_0000, 0x0001_0001, 0xffff_ffff]);
+        let int_b = v128_from_f32s([0x0000_0001, 0x0000_0001, 0x0001_0001, 0x8000_0000]);
+
+        for (va, vb) in [
+            (f32_a, f32_b),
+            (f32_b, f32_c),
+            (f64_a, f64_b),
+            (int_a, int_b),
+        ] {
+            for mode in 0..=36 {
+                let mut pair = Vec::with_capacity(2);
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let eng = Engine::with_execution_policy(cfg.clone(), policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let h = st
+                        .create_host_func_with_caller(
+                            wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                            |_c, a| Ok(vec![a[0]]),
+                        )
+                        .unwrap();
+                    let mut lnk = Linker::new(&eng);
+                    lnk.define("env", "gc", External::Func(h)).unwrap();
+                    let ins = lnk.instantiate(&mut st, &m).unwrap();
+                    let External::Func(f) = ins.export(&st, "simd_ops").unwrap() else {
+                        panic!()
+                    };
+                    pair.push(
+                        st.invoke(
+                            f,
+                            &[
+                                Value::V128(V128(va)),
+                                Value::V128(V128(vb)),
+                                Value::I32(mode),
+                            ],
+                        )
+                        .unwrap(),
+                    );
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "simd_ops bit-exact parity mismatch for mode={mode}"
+                );
+            }
+        }
+
+        // 3) F32x4MulAdd two-rounding IEEE-754 + dual-NaN payload parity!
+        let f32_one_plus = f32::from_bits(1.0_f32.to_bits() + 1).to_bits();
+        let f32_one_minus = f32::from_bits(1.0_f32.to_bits() - 1).to_bits();
+        let fma_acc = v128_from_f32s([
+            (-1.0_f32).to_bits(),
+            0x7fc0_0001,
+            (-0.0_f32).to_bits(),
+            10.0_f32.to_bits(),
+        ]);
+        let fma_a = v128_from_f32s([
+            f32_one_plus,
+            0x7fc0_0002,
+            (-0.0_f32).to_bits(),
+            3.5_f32.to_bits(),
+        ]);
+        let fma_b = v128_from_f32s([
+            f32_one_minus,
+            1.0_f32.to_bits(),
+            1.0_f32.to_bits(),
+            2.0_f32.to_bits(),
+        ]);
+        {
+            let mut pair = Vec::with_capacity(2);
+            for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                let eng = Engine::with_execution_policy(cfg.clone(), policy).unwrap();
+                let m = eng.compile(&wasm).unwrap();
+                let mut st = Store::new(&eng);
+                let h = st
+                    .create_host_func_with_caller(
+                        wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                        |_c, a| Ok(vec![a[0]]),
+                    )
+                    .unwrap();
+                let mut lnk = Linker::new(&eng);
+                lnk.define("env", "gc", External::Func(h)).unwrap();
+                let ins = lnk.instantiate(&mut st, &m).unwrap();
+                let External::Func(f) = ins.export(&st, "simd_fma").unwrap() else {
+                    panic!()
+                };
+                pair.push(
+                    st.invoke(
+                        f,
+                        &[
+                            Value::V128(V128(fma_acc)),
+                            Value::V128(V128(fma_a)),
+                            Value::V128(V128(fma_b)),
+                        ],
+                    )
+                    .unwrap(),
+                );
+            }
+            assert_eq!(pair[0], pair[1], "F32x4MulAdd bit-exact parity mismatch");
+        }
+
+        // 4) v128.load/v128.store valid + OOB traps + mid-block fuel exhaustion parity!
+        for addr in [0i32, 65520i32, 65521i32, 65536i32, -1i32] {
+            for fuel in 0u64..=12 {
+                let mut pair = Vec::with_capacity(2);
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut fcfg = cfg.clone();
+                    fcfg.limits.fuel = Some(fuel);
+                    let eng = Engine::with_execution_policy(fcfg, policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let h = st
+                        .create_host_func_with_caller(
+                            wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                            |_c, a| Ok(vec![a[0]]),
+                        )
+                        .unwrap();
+                    let mut lnk = Linker::new(&eng);
+                    lnk.define("env", "gc", External::Func(h)).unwrap();
+                    let ins = lnk.instantiate(&mut st, &m).unwrap();
+                    let External::Func(f) = ins.export(&st, "simd_mem").unwrap() else {
+                        panic!()
+                    };
+                    let res = st
+                        .invoke(f, &[Value::I32(addr), Value::V128(V128(int_a))])
+                        .map_err(|e| (e.kind, e.trap_code, e.message));
+                    pair.push((res, st.current_fuel));
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "simd_mem parity mismatch for addr={addr}, fuel={fuel}"
+                );
+            }
+        }
+
+        // 5) Mixed scalar + v128 + GC externref frame: GC root survival + parity!
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut st = Store::new(&reg_eng);
+        let dropped_cb = Arc::clone(&dropped);
+        let h_gc = st
+            .create_host_func_with_caller(
+                wtime_types::FuncType::new(vec![ValType::I32], vec![ValType::I32]),
+                move |caller, a| {
+                    let Value::I32(x) = a[0] else {
+                        return Err(trap("bad arg"));
+                    };
+                    caller.store.collect()?;
+                    assert!(
+                        !dropped_cb.load(Ordering::SeqCst),
+                        "externref in mixed scalar+v128+ref frame must survive GC"
+                    );
+                    Ok(vec![Value::I32(x + 3)])
+                },
+            )
+            .unwrap();
+        let mut lnk = Linker::new(&reg_eng);
+        lnk.define("env", "gc", External::Func(h_gc)).unwrap();
+        let ins = lnk.instantiate(&mut st, &reg_mod).unwrap();
+        let External::Func(f_mix) = ins.export(&st, "mixed_ref").unwrap() else {
+            panic!()
+        };
+        let owned = st
+            .create_owned_extern_ref(42, DropFlag(Arc::clone(&dropped)))
+            .unwrap();
+        st.release_published(&[owned]);
+        let in_v = v128_from_f32s([
+            1.0_f32.to_bits(),
+            2.0_f32.to_bits(),
+            3.0_f32.to_bits(),
+            4.0_f32.to_bits(),
+        ]);
+        let exp_v = v128_from_f32s([
+            3.0_f32.to_bits(),
+            6.0_f32.to_bits(),
+            9.0_f32.to_bits(),
+            12.0_f32.to_bits(),
+        ]);
+        let out = st
+            .invoke(f_mix, &[owned, Value::I32(10), Value::V128(V128(in_v))])
+            .unwrap();
+        assert_eq!(
+            out,
+            RunOutcome::Returned(vec![Value::V128(V128(exp_v)), owned, Value::I32(13)])
+        );
+        st.release_published(&[owned]);
+        st.collect().unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn fast_register_fused_loop_load_store_superinstructions_parity() {
+        // Types:
+        //  0: (i32, i32) -> i32      ("loop_ne": I32IncNeBrIf + StoreI32Imm + StoreI32_8Imm + LoadI32Add + LoadI32Shl2AddAcc)
+        //  1: (i32) -> i32           ("loop_countdown": I32IncBrIfNonZero + I32IncCmpImmBrIf)
+        //  2: (i32, i32, f32) -> f32 ("f32_load_add": LoadF32Add + F32MulAdd, including OOB & NaN)
+        //  3: (i32, i32, f64) -> f64 ("f64_shl3_add": LoadF64Shl3AddAcc, including OOB & NaN)
+        //  4: (f32, f32, f32) -> f32 ("f32_fma_leaf": F32MulAdd pure_leaf)
+        let mut type_sec = vec![5];
+        type_sec.extend_from_slice(&[0x60, 2, 0x7f, 0x7f, 1, 0x7f]); // 0
+        type_sec.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // 1
+        type_sec.extend_from_slice(&[0x60, 3, 0x7f, 0x7f, 0x7d, 1, 0x7d]); // 2
+        type_sec.extend_from_slice(&[0x60, 3, 0x7f, 0x7f, 0x7c, 1, 0x7c]); // 3
+        type_sec.extend_from_slice(&[0x60, 3, 0x7d, 0x7d, 0x7d, 1, 0x7d]); // 4
+
+        let func_sec = vec![5, 0, 1, 2, 3, 4];
+        let mem_sec = vec![1, 0x00, 1]; // 1 page (64 KiB)
+        let data_sec = vec![1, 0x00, 0x41, 0x00, 0x0b, 4, 0x10, 0x20, 0x30, 0x40];
+
+        let mut exp_sec = vec![5];
+        for (idx, name) in [
+            "loop_ne",
+            "loop_countdown",
+            "f32_load_add",
+            "f64_shl3_add",
+            "f32_fma_leaf",
+        ]
+        .iter()
+        .enumerate()
+        {
+            exp_sec.push(name.len() as u8);
+            exp_sec.extend_from_slice(name.as_bytes());
+            exp_sec.push(0x00);
+            exp_sec.push(idx as u8);
+        }
+
+        // Body 0 ("loop_ne"): (base: i32, count: i32) -> i32
+        // Locals: local 2 = i, local 3 = sum, local 4 = ptr
+        let b0 = body(
+            &[(3, 0x7f)],
+            &[
+                // StoreI32Imm (const 0) at base+0 and StoreI32Imm (const 77) at base+4
+                0x20, 0x00, 0x41, 0x00, 0x36, 0x02, 0x00, // mem[base+0] = 0
+                0x20, 0x00, 0x41, 0xcd, 0x00, 0x36, 0x02, 0x04, // mem[base+4] = 77
+                // StoreI32_8Imm at base+8 = 0x5a
+                0x20, 0x00, 0x41, 0xda, 0x00, 0x3a, 0x00, 0x08, // mem8[base+8] = 0x5a
+                // Loop 1: for (i = 0; i != count; i += 1) { sum += mem32[base + (i << 2)]; }
+                // Exercises LoadI32Shl2AddAcc + I32IncNeBrIf!
+                0x41, 0x00, 0x21, 0x02, // i = 0
+                0x03, 0x40, // loop
+                0x20, 0x03, 0x20, 0x00, 0x20, 0x02, 0x41, 0x02, 0x74, 0x6a, 0x28, 0x02, 0x00, 0x6a,
+                0x21, 0x03, // sum += mem32[base + (i << 2)]
+                0x20, 0x02, 0x41, 0x01, 0x6a, 0x22, 0x02, 0x20, 0x01, 0x47, 0x0d,
+                0x00, // i += 1; br_if (i != count)
+                0x0b, // end loop
+                // Direct LoadI32Add: sum += mem32[base + 4]
+                0x20, 0x00, 0x21, 0x04, // ptr = base
+                0x20, 0x03, 0x20, 0x04, 0x28, 0x02, 0x04, 0x6a, 0x21,
+                0x03, // sum += mem32[ptr + 4]
+                0x20, 0x03,
+            ],
+        );
+
+        // Body 1 ("loop_countdown"): (n: i32) -> i32
+        // Locals: local 1 = acc, local 2 = i
+        // Loop 1: countdown `n -= 1; br_if $loop` -> I32IncBrIfNonZero!
+        // Loop 2: constant-bound `i += 2; i <u 12; br_if $loop` -> I32IncCmpImmBrIf!
+        // Loop 3: signed constant-bound `i -= 1; i >=s -3; br_if $loop` -> I32IncCmpImmBrIf (signed)!
+        let b1 = body(
+            &[(2, 0x7f)],
+            &[
+                0x03, 0x40, // loop 1
+                0x20, 0x01, 0x20, 0x00, 0x6a, 0x21, 0x01, // acc += n
+                0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, // n -= 1; br_if n
+                0x0b, // end loop 1
+                0x41, 0x00, 0x21, 0x02, // i = 0
+                0x03, 0x40, // loop 2
+                0x20, 0x01, 0x20, 0x02, 0x6a, 0x21, 0x01, // acc += i
+                0x20, 0x02, 0x41, 0x02, 0x6a, 0x22, 0x02, 0x41, 0x0c, 0x49, 0x0d,
+                0x00, // i += 2; br_if (i <u 12)
+                0x0b, // end loop 2
+                0x41, 0x02, 0x21, 0x02, // i = 2
+                0x03, 0x40, // loop 3
+                0x20, 0x01, 0x20, 0x02, 0x6a, 0x21, 0x01, // acc += i
+                0x20, 0x02, 0x41, 0x01, 0x6b, 0x22, 0x02, 0x41, 0x7d, 0x4e, 0x0d,
+                0x00, // i -= 1; br_if (i >=s -3)
+                0x0b, // end loop 3
+                0x20, 0x01,
+            ],
+        );
+
+        // Body 2 ("f32_load_add"): (addr: i32, store_bits: i32, acc: f32) -> f32
+        // Writes store_bits at addr (unless addr is OOB), then `acc = acc + f32.load(addr)` (LoadF32Add)!
+        let b2 = body(
+            &[],
+            &[
+                0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 0x00, // i32.store(addr, store_bits)
+                0x20, 0x02, 0x20, 0x00, 0x2a, 0x02, 0x00, 0x92, 0x21,
+                0x02, // acc += f32.load(addr)
+                0x20, 0x02,
+            ],
+        );
+
+        // Body 3 ("f64_shl3_add"): (base: i32, idx: i32, acc: f64) -> f64
+        // Writes 2.5_f64 at base + (idx << 3) (when in bounds), then `acc += f64.load(base + (idx << 3))`!
+        let mut f64_code = vec![0x20, 0x00, 0x20, 0x01, 0x41, 0x03, 0x74, 0x6a, 0x44];
+        f64_code.extend_from_slice(&2.5_f64.to_bits().to_le_bytes());
+        f64_code.extend_from_slice(&[
+            0x39, 0x03, 0x00, // f64.store
+            0x20, 0x02, 0x20, 0x00, 0x20, 0x01, 0x41, 0x03, 0x74, 0x6a, 0x2b, 0x03, 0x00, 0xa0,
+            0x21, 0x02, // acc += f64.load(base + (idx << 3))
+            0x20, 0x02,
+        ]);
+        let b3 = body(&[], &f64_code);
+
+        // Body 4 ("f32_fma_leaf"): (acc: f32, a: f32, b: f32) -> f32 (F32MulAdd + pure_leaf)
+        let b4 = body(&[], &[0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x94, 0x92]);
+
+        let mut code_sec = vec![5];
+        for b in [&b0, &b1, &b2, &b3, &b4] {
+            code_sec.extend_from_slice(b);
+        }
+
+        let wasm = wasm_mod(&[
+            sec(1, &type_sec),
+            sec(3, &func_sec),
+            sec(5, &mem_sec),
+            sec(7, &exp_sec),
+            sec(10, &code_sec),
+            sec(11, &data_sec),
+        ]);
+
+        // 1) Verify every new fused superinstruction is actually emitted!
+        let reg_eng =
+            Engine::with_execution_policy(Config::default(), ExecutionPolicy::Register).unwrap();
+        let reg_mod = reg_eng.compile(&wasm).unwrap();
+        let f0 = get_or_compile_ref(&reg_mod, 0).expect("loop_ne admitted");
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::StoreI32Imm { .. }))
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::StoreI32_8Imm { .. }))
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::LoadI32Shl2AddAcc { .. }))
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I32IncNeBrIf { .. }))
+        );
+        assert!(
+            f0.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::LoadI32Add { .. }))
+        );
+        let f1 = get_or_compile_ref(&reg_mod, 1).expect("loop_countdown admitted");
+        assert!(
+            f1.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I32IncBrIfNonZero { .. }))
+        );
+        assert!(
+            f1.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I32IncCmpImmBrIf { .. }))
+        );
+        let f2 = get_or_compile_ref(&reg_mod, 2).expect("f32_load_add admitted");
+        assert!(
+            f2.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::LoadF32Add { .. }))
+        );
+        let f3 = get_or_compile_ref(&reg_mod, 3).expect("f64_shl3_add admitted");
+        assert!(
+            f3.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::LoadF64Shl3AddAcc { .. }))
+        );
+        let f4 = get_or_compile_ref(&reg_mod, 4).expect("f32_fma_leaf admitted");
+        assert!(f4.pure_leaf);
+        assert!(
+            f4.ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32MulAdd { .. }))
+        );
+
+        // 2) Exhaustive fuel-prefix parity across normal + OOB trap + dual-NaN cases!
+        for (base, count) in [(16i32, 4i32), (65532i32, 2i32), (65536i32, 1i32)] {
+            for fuel in 0u64..=90 {
+                let mut pair = Vec::with_capacity(2);
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut c = Config::default();
+                    c.limits.fuel = Some(fuel);
+                    let eng = Engine::with_execution_policy(c, policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                    let External::Func(f) = ins.export(&st, "loop_ne").unwrap() else {
+                        panic!()
+                    };
+                    let res = st
+                        .invoke(f, &[Value::I32(base), Value::I32(count)])
+                        .map_err(|e| (e.kind, e.trap_code, e.message));
+                    pair.push((res, st.current_fuel));
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "loop_ne parity mismatch for base={base}, count={count}, fuel={fuel}"
+                );
+            }
+        }
+
+        // Countdown + constant-bound loops with fuel sweep!
+        for fuel in 0u64..=120 {
+            let mut pair = Vec::with_capacity(2);
+            for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                let mut c = Config::default();
+                c.limits.fuel = Some(fuel);
+                let eng = Engine::with_execution_policy(c, policy).unwrap();
+                let m = eng.compile(&wasm).unwrap();
+                let mut st = Store::new(&eng);
+                let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                let External::Func(f) = ins.export(&st, "loop_countdown").unwrap() else {
+                    panic!()
+                };
+                let res = st
+                    .invoke(f, &[Value::I32(5)])
+                    .map_err(|e| (e.kind, e.trap_code, e.message));
+                pair.push((res, st.current_fuel));
+            }
+            assert_eq!(
+                pair[0], pair[1],
+                "loop_countdown parity mismatch for fuel={fuel}"
+            );
+        }
+
+        // LoadF32Add + LoadF64Shl3AddAcc: dual-NaN payload order + OOB trap + fuel sweep!
+        for (addr, bits, acc_f32) in [
+            (32i32, 1.25_f32.to_bits() as i32, 2.5_f32.to_bits()),
+            (32i32, 0x7fc0_0002_u32 as i32, 0x7fc0_0001_u32), // dual-NaN LHS payload
+            (65534i32, 0, 1.0_f32.to_bits()),                 // OOB trap
+        ] {
+            for fuel in 0u64..=20 {
+                let mut pair = Vec::with_capacity(2);
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut c = Config::default();
+                    c.limits.fuel = Some(fuel);
+                    let eng = Engine::with_execution_policy(c, policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                    let External::Func(f) = ins.export(&st, "f32_load_add").unwrap() else {
+                        panic!()
+                    };
+                    let res = st
+                        .invoke(
+                            f,
+                            &[Value::I32(addr), Value::I32(bits), Value::F32(acc_f32)],
+                        )
+                        .map_err(|e| (e.kind, e.trap_code, e.message));
+                    pair.push((res, st.current_fuel));
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "f32_load_add parity mismatch for addr={addr}, fuel={fuel}"
+                );
+            }
+        }
+
+        for (base, idx, acc_f64) in [
+            (64i32, 3i32, 1.5_f64.to_bits()),
+            (64i32, 3i32, 0x7ff8_0000_0000_0009_u64),
+            (65536i32, 1i32, 1.0_f64.to_bits()), // OOB trap
+        ] {
+            for fuel in 0u64..=25 {
+                let mut pair = Vec::with_capacity(2);
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut c = Config::default();
+                    c.limits.fuel = Some(fuel);
+                    let eng = Engine::with_execution_policy(c, policy).unwrap();
+                    let m = eng.compile(&wasm).unwrap();
+                    let mut st = Store::new(&eng);
+                    let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                    let External::Func(f) = ins.export(&st, "f64_shl3_add").unwrap() else {
+                        panic!()
+                    };
+                    let res = st
+                        .invoke(f, &[Value::I32(base), Value::I32(idx), Value::F64(acc_f64)])
+                        .map_err(|e| (e.kind, e.trap_code, e.message));
+                    pair.push((res, st.current_fuel));
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "f64_shl3_add parity mismatch for base={base}, idx={idx}, fuel={fuel}"
+                );
+            }
+        }
+
+        // F32MulAdd two-rounding IEEE-754 + dual-NaN parity on pure_leaf!
+        let f32_p = f32::from_bits(1.0_f32.to_bits() + 1).to_bits();
+        let f32_m = f32::from_bits(1.0_f32.to_bits() - 1).to_bits();
+        for (acc, a, b) in [
+            ((-1.0_f32).to_bits(), f32_p, f32_m),
+            (0x7fc0_0001, 0x7fc0_0002, 1.0_f32.to_bits()),
+            (
+                (-0.0_f32).to_bits(),
+                (-0.0_f32).to_bits(),
+                1.0_f32.to_bits(),
+            ),
+        ] {
+            let mut pair = Vec::with_capacity(2);
+            for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                let eng = Engine::with_execution_policy(Config::default(), policy).unwrap();
+                let m = eng.compile(&wasm).unwrap();
+                let mut st = Store::new(&eng);
+                let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                let External::Func(f) = ins.export(&st, "f32_fma_leaf").unwrap() else {
+                    panic!()
+                };
+                pair.push(
+                    st.invoke(f, &[Value::F32(acc), Value::F32(a), Value::F32(b)])
+                        .unwrap(),
+                );
+            }
+            assert_eq!(pair[0], pair[1], "f32_fma_leaf parity mismatch");
+        }
+    }
+
+    #[test]
+    fn fast_register_dense_mem0_hoisting_across_grow_and_cross_instance_parity() {
+        // Module B: own 1-page dense mem0 (active data "BBBB" at 0).
+        // Exports:
+        //  - "mem_b": memory 0
+        //  - "grow_and_rw": (grow_pages: i32, v: i32) -> i32
+        //      Reads i32 at 0, grows mem0 by `grow_pages`, writes `v` as i32 + v128 at 65536 (new page!),
+        //      reads back both, and returns sum.
+        //  - "tail_b": (x: i32) -> i32
+        //      Reads i32 at 0 of B's mem0, adds `x`, returns.
+        let mut b_type = vec![2];
+        b_type.extend_from_slice(&[0x60, 2, 0x7f, 0x7f, 1, 0x7f]); // 0
+        b_type.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // 1
+        let b_func = vec![2, 0, 1];
+        let b_mem = vec![1, 0x00, 1]; // 1 page
+        let b_data = vec![1, 0x00, 0x41, 0x00, 0x0b, 4, 0x02, 0x00, 0x00, 0x00]; // mem_b[0] = 2
+        let mut b_exp = vec![3];
+        for (name, kind, idx) in [
+            ("mem_b", 0x02u8, 0u8),
+            ("grow_and_rw", 0x00, 0),
+            ("tail_b", 0x00, 1),
+        ] {
+            b_exp.push(name.len() as u8);
+            b_exp.extend_from_slice(name.as_bytes());
+            b_exp.push(kind);
+            b_exp.push(idx);
+        }
+        let mut b_body0_code = Vec::new();
+        // local 2 = mem_b[0]
+        b_body0_code.extend_from_slice(&[0x41, 0x00, 0x28, 0x02, 0x00, 0x21, 0x02]);
+        // old_pages = memory.grow(grow_pages); drop
+        b_body0_code.extend_from_slice(&[0x20, 0x00, 0x40, 0x00, 0x1a]);
+        // mem_b[65536] = v (i32.store at new page!)
+        b_body0_code.extend_from_slice(&[0x41, 0x80, 0x80, 0x04, 0x20, 0x01, 0x36, 0x02, 0x00]);
+        // mem_b[65552] = i32x4.splat(v + 1) (v128.store at new page!)
+        b_body0_code.extend_from_slice(&[0x41, 0x90, 0x80, 0x04, 0x20, 0x01, 0x41, 0x01, 0x6a]);
+        simd_op(&mut b_body0_code, 17); // i32x4.splat
+        b_body0_code.extend_from_slice(&[0xfd, 0x0b, 0x00, 0x00]); // v128.store
+        // return local 2 + mem_b[65536] + i32x4.extract_lane 3 (v128.load 65552)
+        b_body0_code.extend_from_slice(&[0x20, 0x02]);
+        b_body0_code.extend_from_slice(&[0x41, 0x80, 0x80, 0x04, 0x28, 0x02, 0x00, 0x6a]);
+        b_body0_code.extend_from_slice(&[0x41, 0x90, 0x80, 0x04, 0xfd, 0x00, 0x00, 0x00]);
+        simd_op(&mut b_body0_code, 27); // i32x4.extract_lane
+        b_body0_code.push(3);
+        b_body0_code.push(0x6a);
+        let b_body0 = body(&[(1, 0x7f)], &b_body0_code);
+        let b_body1 = body(&[], &[0x41, 0x00, 0x28, 0x02, 0x00, 0x20, 0x00, 0x6a]);
+        let mut b_code = vec![2];
+        b_code.extend_from_slice(&b_body0);
+        b_code.extend_from_slice(&b_body1);
+        let wasm_b = wasm_mod(&[
+            sec(1, &b_type),
+            sec(3, &b_func),
+            sec(5, &b_mem),
+            sec(7, &b_exp),
+            sec(10, &b_code),
+            sec(11, &b_data),
+        ]);
+
+        // Module A: own 1-page dense mem0 (active data: mem_a[0] = 100).
+        // Imports: b.grow_and_rw (func 0), b.tail_b (func 1).
+        // Exports: "mem_a", "run_a": (grow_a: i32, grow_b: i32, v: i32) -> i32, "tail_to_b": (x: i32) -> i32
+        let mut a_type = vec![3];
+        a_type.extend_from_slice(&[0x60, 2, 0x7f, 0x7f, 1, 0x7f]); // 0: (i32, i32) -> i32
+        a_type.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // 1: (i32) -> i32
+        a_type.extend_from_slice(&[0x60, 3, 0x7f, 0x7f, 0x7f, 1, 0x7f]); // 2: (i32, i32, i32) -> i32
+        let mut a_imp = vec![2];
+        a_imp.extend_from_slice(&[
+            1, b'b', 11, b'g', b'r', b'o', b'w', b'_', b'a', b'n', b'd', b'_', b'r', b'w', 0x00, 0,
+        ]);
+        a_imp.extend_from_slice(&[1, b'b', 6, b't', b'a', b'i', b'l', b'_', b'b', 0x00, 1]);
+        let a_func = vec![2, 2, 1];
+        let a_mem = vec![1, 0x00, 1];
+        let a_data = vec![1, 0x00, 0x41, 0x00, 0x0b, 4, 100, 0, 0, 0]; // mem_a[0] = 100
+        let mut a_exp = vec![3];
+        for (name, kind, idx) in [
+            ("mem_a", 0x02u8, 0u8),
+            ("run_a", 0x00, 2),
+            ("tail_to_b", 0x00, 3),
+        ] {
+            a_exp.push(name.len() as u8);
+            a_exp.extend_from_slice(name.as_bytes());
+            a_exp.push(kind);
+            a_exp.push(idx);
+        }
+        // run_a(grow_a, grow_b, v):
+        //  1) write mem_a[16] = v * 2
+        //  2) r_b = call b.grow_and_rw(grow_b, v) (cross-instance call + grow in B + SwitchInst back to A!)
+        //  3) verify mem_a[0] is still 100 and mem_a[16] is still v * 2!
+        //  4) grow mem_a by `grow_a` pages; write i32(v * 3) at mem_a[65536] and read back!
+        //  5) return mem_a[0] + mem_a[16] + r_b + mem_a[65536]
+        let a_body0 = body(
+            &[(1, 0x7f)],
+            &[
+                // mem_a[16] = v * 2
+                0x41, 0x10, 0x20, 0x02, 0x41, 0x02, 0x6c, 0x36, 0x02, 0x00,
+                // local 3 = call b.grow_and_rw(grow_b, v)
+                0x20, 0x01, 0x20, 0x02, 0x10, 0x00, 0x21, 0x03,
+                // memory.grow(grow_a); drop
+                0x20, 0x00, 0x40, 0x00, 0x1a, // mem_a[65536] = v * 3
+                0x41, 0x80, 0x80, 0x04, 0x20, 0x02, 0x41, 0x03, 0x6c, 0x36, 0x02, 0x00,
+                // return mem_a[0] + mem_a[16] + local 3 + mem_a[65536]
+                0x41, 0x00, 0x28, 0x02, 0x00, 0x41, 0x10, 0x28, 0x02, 0x00, 0x6a, 0x20, 0x03, 0x6a,
+                0x41, 0x80, 0x80, 0x04, 0x28, 0x02, 0x00, 0x6a,
+            ],
+        );
+        // tail_to_b(x): reads mem_a[0], adds x, then return_call b.tail_b!
+        let a_body1 = body(
+            &[],
+            &[0x41, 0x00, 0x28, 0x02, 0x00, 0x20, 0x00, 0x6a, 0x12, 0x01],
+        );
+        let mut a_code = vec![2];
+        a_code.extend_from_slice(&a_body0);
+        a_code.extend_from_slice(&a_body1);
+        let wasm_a = wasm_mod(&[
+            sec(1, &a_type),
+            sec(2, &a_imp),
+            sec(3, &a_func),
+            sec(5, &a_mem),
+            sec(7, &a_exp),
+            sec(10, &a_code),
+            sec(11, &a_data),
+        ]);
+
+        // 1) Cross-instance grow + dense slice refresh + cross-instance tail call across fuel sweep!
+        for fuel in [
+            None,
+            Some(0),
+            Some(1),
+            Some(5),
+            Some(15),
+            Some(25),
+            Some(40),
+            Some(80),
+        ] {
+            let mut pair = Vec::with_capacity(2);
+            for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                let mut cfg = Config::default();
+                cfg.features.simd = true;
+                cfg.features.tail_call = true;
+                cfg.limits.fuel = fuel;
+                let eng = Engine::with_execution_policy(cfg, policy).unwrap();
+                let mb = eng.compile(&wasm_b).unwrap();
+                let ma = eng.compile(&wasm_a).unwrap();
+                let mut st = Store::new(&eng);
+                let ins_b = Linker::new(&eng).instantiate(&mut st, &mb).unwrap();
+                let mut lnk = Linker::new(&eng);
+                lnk.define(
+                    "b",
+                    "grow_and_rw",
+                    ins_b.export(&st, "grow_and_rw").unwrap(),
+                )
+                .unwrap();
+                lnk.define("b", "tail_b", ins_b.export(&st, "tail_b").unwrap())
+                    .unwrap();
+                let ins_a = lnk.instantiate(&mut st, &ma).unwrap();
+                let External::Func(f_run_a) = ins_a.export(&st, "run_a").unwrap() else {
+                    panic!()
+                };
+                let External::Func(f_tail) = ins_a.export(&st, "tail_to_b").unwrap() else {
+                    panic!()
+                };
+                let r1 = st
+                    .invoke(f_run_a, &[Value::I32(2), Value::I32(1), Value::I32(10)])
+                    .map_err(|e| (e.kind, e.trap_code, e.message));
+                let f1 = st.current_fuel;
+                if fuel.is_none() && policy == ExecutionPolicy::Register {
+                    let External::Memory(ma_h) = ins_a.export(&st, "mem_a").unwrap() else {
+                        panic!()
+                    };
+                    let External::Memory(mb_h) = ins_b.export(&st, "mem_b").unwrap() else {
+                        panic!()
+                    };
+                    assert!(
+                        st.mems[ma_h.0.index].bytes.is_dense(),
+                        "mem_a must stay dense after growing to 3 pages"
+                    );
+                    assert!(
+                        st.mems[mb_h.0.index].bytes.is_dense(),
+                        "mem_b must stay dense after growing to 2 pages"
+                    );
+                    assert_eq!(r1, Ok(RunOutcome::Returned(vec![Value::I32(173)])));
+                }
+                let r2 = st
+                    .invoke(f_tail, &[Value::I32(7)])
+                    .map_err(|e| (e.kind, e.trap_code, e.message));
+                let f2 = st.current_fuel;
+                if fuel.is_none() {
+                    // mem_a[0] (100) + 7 = 107 -> tail_b adds mem_b[0] (2) -> 109!
+                    assert_eq!(r2, Ok(RunOutcome::Returned(vec![Value::I32(109)])));
+                }
+                pair.push((r1, f1, r2, f2));
+            }
+            assert_eq!(
+                pair[0], pair[1],
+                "cross-instance dense grow parity mismatch for fuel={fuel:?}"
+            );
+        }
+
+        // 2) Grow dense mem0 past DENSE_MAX_BYTES mid-function (demotion from dense -> sparse)!
+        let demote_pages = (crate::linear::DENSE_MAX_BYTES / 65536) as i32 + 2;
+        let mut pair = Vec::with_capacity(2);
+        for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+            let mut cfg = Config::default();
+            cfg.features.simd = true;
+            cfg.features.tail_call = true;
+            cfg.limits.max_memory_pages = (demote_pages + 8) as u64;
+            cfg.limits.max_memory_bytes = ((demote_pages + 8) as u64) * 65536;
+            cfg.limits.max_store_memory_bytes = cfg.limits.max_memory_bytes * 2;
+            let eng = Engine::with_execution_policy(cfg, policy).unwrap();
+            let mb = eng.compile(&wasm_b).unwrap();
+            let ma = eng.compile(&wasm_a).unwrap();
+            let mut st = Store::new(&eng);
+            let ins_b = Linker::new(&eng).instantiate(&mut st, &mb).unwrap();
+            let mut lnk = Linker::new(&eng);
+            lnk.define(
+                "b",
+                "grow_and_rw",
+                ins_b.export(&st, "grow_and_rw").unwrap(),
+            )
+            .unwrap();
+            lnk.define("b", "tail_b", ins_b.export(&st, "tail_b").unwrap())
+                .unwrap();
+            let ins_a = lnk.instantiate(&mut st, &ma).unwrap();
+            let External::Func(f_run_a) = ins_a.export(&st, "run_a").unwrap() else {
+                panic!()
+            };
+            let res = st
+                .invoke(
+                    f_run_a,
+                    &[Value::I32(demote_pages), Value::I32(1), Value::I32(11)],
+                )
+                .unwrap();
+            if policy == ExecutionPolicy::Register {
+                let External::Memory(ma_h) = ins_a.export(&st, "mem_a").unwrap() else {
+                    panic!()
+                };
+                assert!(
+                    !st.mems[ma_h.0.index].bytes.is_dense(),
+                    "mem_a must demote cleanly to sparse when grown past DENSE_MAX_BYTES"
+                );
+            }
+            pair.push(res);
+        }
+        assert_eq!(pair[0], pair[1]);
+    }
+
+    #[test]
+    fn register_sparse_empty_mem_zero_len_bulk_oob_traps() {
+        // `(memory 0)` stays sparse (`p0_slice`/`p1_slice` empty, `p1_base = 65536`);
+        // zero-length `memory.fill(65536, 0, 0)` and `memory.copy(65536, 65536, 0)` MUST trap OOB!
+        let fill_body = body(
+            &[],
+            &[0x41, 0x80, 0x80, 0x04, 0x41, 0, 0x41, 0, 0xfc, 11, 0],
+        );
+        let copy_body = body(
+            &[],
+            &[
+                0x41, 0x80, 0x80, 0x04, 0x41, 0x80, 0x80, 0x04, 0x41, 0, 0xfc, 10, 0, 0,
+            ],
+        );
+        let mut code = vec![2];
+        code.extend_from_slice(&fill_body);
+        code.extend_from_slice(&copy_body);
+
+        let wasm = wasm_mod(&[
+            sec(1, &[1, 0x60, 0, 0]),
+            sec(3, &[2, 0, 0]),
+            sec(5, &[1, 0x00, 0]),
+            sec(
+                7,
+                &[
+                    2, 4, b'f', b'i', b'l', b'l', 0, 0, 4, b'c', b'o', b'p', b'y', 0, 1,
+                ],
+            ),
+            sec(10, &code),
+        ]);
+        for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+            let eng = Engine::with_execution_policy(Config::default(), policy).unwrap();
+            let module = eng.compile(&wasm).unwrap();
+            let mut st = Store::new(&eng);
+            let ins = Linker::new(&eng).instantiate(&mut st, &module).unwrap();
+            for name in ["fill", "copy"] {
+                let External::Func(f) = ins.export(&st, name).unwrap() else {
+                    panic!()
+                };
+                let err = st.invoke(f, &[]).expect_err("expected OOB trap");
+                assert_eq!(
+                    err.trap_code,
+                    Some(wtime_types::TrapCode::MemoryOutOfBounds),
+                    "{name} policy={policy:?} got {err:?}"
+                );
+            }
+        }
     }
 }

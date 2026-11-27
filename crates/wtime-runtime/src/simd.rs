@@ -1594,12 +1594,16 @@ fn relaxed(op: u16, s: &mut Vec<Value>) -> Result<()> {
                     let x = f32::from_bits(x as u32);
                     let y = f32::from_bits(y as u32);
                     let z = f32::from_bits(z as u32);
-                    ((if op.is_multiple_of(2) { -x } else { x }) * y + z).to_bits() as u64
+                    (if op.is_multiple_of(2) { -x } else { x })
+                        .mul_add(y, z)
+                        .to_bits() as u64
                 } else {
                     let x = f64::from_bits(x);
                     let y = f64::from_bits(y);
                     let z = f64::from_bits(z);
-                    ((if op.is_multiple_of(2) { -x } else { x }) * y + z).to_bits()
+                    (if op.is_multiple_of(2) { -x } else { x })
+                        .mul_add(y, z)
+                        .to_bits()
                 };
                 put(&mut out, i, w, r)
             }
