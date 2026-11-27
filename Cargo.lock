@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "wtime-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "wtime-runtime",
  "wtime-types",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "wtime-conformance"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "sha2",
  "wast",
@@ -198,14 +198,14 @@ dependencies = [
 
 [[package]]
 name = "wtime-decode"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "wtime-types",
 ]
 
 [[package]]
 name = "wtime-runtime"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "wtime-types",
  "wtime-validate",
@@ -213,11 +213,11 @@ dependencies = [
 
 [[package]]
 name = "wtime-types"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "wtime-validate"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "wtime-decode",
  "wtime-types",

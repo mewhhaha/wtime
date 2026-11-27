@@ -2,6 +2,73 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.8] - 2026-11-27
+
+SIMD, vectorization, loop optimization, and virtual-memory bounds-checking
+performance release across both `wtime-aot` (native `x64` and `aarch64`) and
+the safe-Rust `wtime-runtime` `register-executor`: EVEX/ZMM SLP widening,
+`xmm16..xmm31` register expansion, hardware FMA, dynamic/relational/inclusive
+software BCE, 4× counted loop unrolling, opt-in `--guard-pages` for
+`--blot-cdylib` (`x64` and `aarch64`), and unboxed `[u64; 2]` v128 + Wasm 3.0
+relaxed FMA execution in `register-executor`. Core crates remain
+`#![forbid(unsafe_code)]` with zero external production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **AVX-512 (`x64-v4`) EVEX/ZMM SLP widening, `xmm16..xmm31`, hardware FMA, & fast SIMD lowering**:
+  - Added `Op::SlpWideChain` (`slp_fuse_v128_wide`) widening adjacent 128-bit
+    SIMD chains to 256-bit YMM (`x64-v3`) and 512-bit ZMM (`x64-v4`) with
+    `k1` opmask NaN canonicalization, cold out-of-line 128-bit overlap
+    fallbacks, hoisted `vzeroupper`, and exact-order NEON lowering on
+    `aarch64`.
+  - Unlocked `xmm16..xmm31` on `x64-v4` (AVX-512VL EVEX), lowered `v128` via
+    3-address VEX/EVEX with memory-operand folding, broadcasts, single-insn
+    `vcvtudq2ps`, and fast `i8x16.shuffle` paths, and emitted hardware FMA
+    (`vfmadd231*`/`vfnmadd231*` on `x64`, `fmla`/`fmls` on `aarch64`) for
+    Wasm 3.0 `relaxed_madd`/`relaxed_nmadd`.
+- **Stage 2 pure-software BCE & 4× counted loop unrolling**:
+  - Added `version_dynamic_counted_loops` dynamic loop-versioned software BCE
+    (covering both strict `<`/`>` and inclusive `<=`/`>=` signed/unsigned bounds
+    with wrap-safe preheader guards; disabled under `--spectre-mitigations`),
+    dominating-guard relational `LtU`/`LeU` propagation and branch folding, and
+    `Op::Select` `live_flags` reuse.
+  - Added `Term::BranchIf` countdown loop rotation and 4× counted loop
+    unrolling (`unroll_counted_loops_4x`) for exact constant multiples
+    (`T >= 8 && T % 4 == 0`, inc/dec) and dynamic loops (`LtU`/`LtS` inc and
+    `i -= 1 != 0` countdown) with single-step parallel escaping-value
+    substitution.
+- **Opt-in `--guard-pages` for `--blot-cdylib` (`--backend x64` and `--backend aarch64`)**:
+  - Default `--blot-cdylib` builds remain signal-handler-free. Opt-in
+    `--guard-pages` reserves `8 GiB + 64 KiB` `PROT_NONE` for `memory32`
+    (including `(memory 0 0)`), emits `DT_FLAGS_1 = DF_1_NODELETE` and a
+    64-byte writable `GuardState` tail in `PT_LOAD 2`, and installs a
+    thread-safe one-time chained `SA_SIGINFO | SA_ONSTACK | SA_NODEFER`
+    `SIGSEGV` handler scoped strictly to `[GuestCodeStart, GuestCodeEnd)`,
+    per-invocation `Ctx` recovery slots, and `[mem_base, mem_base + 8 GiB + 64 KiB)`.
+  - Preserves host callee-saved registers (`MXCSR`/`vzeroupper` on `x64`,
+    `D8..D15` on `aarch64`) and pinned globals on trap unwind; saves/zeroes/restores
+    guard slots across `HELPER_HOST_CALL` and nested `blot_aot_active_*`
+    reentry; chains non-guest faults cleanly (including `si_code <= 0`
+    software `SIGSEGV` under `SIG_IGN` and `SIG_DFL` via `tgkill`); fixes
+    coalesced `Op::BoundsCheck` + DCE interaction (`bounds_check_covered_by_subsequent_mem_op`);
+    rejects `--guard-pages` on `--backend c`/`rust` or combined with
+    `--spectre-mitigations` (exit code `2`); and isolates build and incremental
+    cache keys.
+
+### Core libraries (`wtime-runtime`)
+- **Unboxed `v128`, Wasm 3.0 relaxed FMA, dense `mem0` hoisting, & fused superinstructions (`register-executor`)**:
+  - Unboxed hot `v128` SIMD operations and Wasm 3.0 relaxed FMA
+    (`0xfa05..=0xfa08`) directly into `[u64; 2]` `RegOp` slots (plus fused
+    two-rounding `F64x2MulAdd`, safe SWAR `i8x16`/`i16x8` arithmetic,
+    `i64x2.mul`, `i32x4` cmp/shift, `bitmask`/`any_true`, and guarded
+    `SimdExtract32`), preserving `#![forbid(unsafe_code)]`, zero external
+    production dependencies, `size_of::<RegOp>() <= 12`, and exact fuel,
+    cancellation, and NaN parity.
+  - Hoisted dense `mem0` slice access inside `dispatch_inner` (with safe reload
+    across grow/calls/instance switches), fixed sparse zero-length
+    `memory.copy`/`memory.fill` OOB bounds checks at offset `65536`, added 10
+    fused scalar superinstructions, and switched canonical Wasm 3.0 relaxed FMA
+    to single-rounding `f32::mul_add` / `f64::mul_add`.
+
 ## [0.1.7] - 2026-11-26
 
 Major execution-performance release across both `wtime-aot` (native `x64` and
