@@ -2,6 +2,50 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.11] - 2026-11-27
+
+Multi-module Wasm GC, Threads/atomics, and host runtime release for `wtime-aot`
+(`--backend x64`) and the new standalone `wtime-aot-host` crate — enabling full
+multi-module Wasm GC language runtimes (such as Scriptw) to compile ahead of
+time and execute natively with zero LLVM, zero V8, and zero Cranelift. Core
+crates (`wtime-types`, `wtime-decode`, `wtime-validate`, `wtime-runtime`) and
+`wtime-cli` remain `#![forbid(unsafe_code)]` with zero external production
+dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Wasm Threads & atomics on `--backend x64`**:
+  - Added x64 lowering and native encoding for `atomic.fence`, atomic
+    loads/stores, `rmw.add/sub/and/or/xor/xchg`, `cmpxchg`, and
+    `memory.atomic.wait32/wait64/notify` via Store runtime callbacks.
+- **Multi-module `StoreCdylib` ABI (`WTST0001`)**:
+  - Added `X64Target::StoreCdylib` emitting shared `.so` images with a single
+    `wt_store_get_desc` ELF descriptor, compact `WTST0001` binary metadata,
+    cross-module `call`/`call_indirect`/`call_ref`, shared/private multi-memory,
+    cross-module exception tags, and `wt_store_init_instance`.
+  - Preserved callee-saved Wasm `Xmm8..Xmm13` and `MXCSR` across
+    `emit_store_host_trampoline` on both normal and trap/exception return paths.
+  - Raised `StoreCdylib`-only local/signature caps (`STORE_MAX_TOTAL_LOCALS`,
+    `STORE_MAX_TOTAL_SIG_ARITY`) for large JS-to-WasmGC modules while keeping
+    `BlotCdylib` and `StandaloneExec` validation limits unchanged.
+- **Library API (`tools/wtime-aot/src/lib.rs`)**:
+  - Exposed `wtime-aot` as a safe-Rust (`#![forbid(unsafe_code)]`) library
+    crate alongside the `wtime-aot` CLI binary.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- Added standalone `wtime-aot-host` crate (excluded from the zero-dependency
+  core workspace) implementing `Engine`, `Config`, `Module`, `Store`, `Linker`,
+  `Instance`, `Memory`, `SharedMemory`, `Table`, `Global`, `Func`, `Tag`,
+  `RootScope`, `Rooted`, `OwnedRooted`, and `InterruptHandle`.
+- Implemented a precise Cheney semi-space copying garbage collector with Wasm
+  safepoint stack walking across reentrant Host↔Wasm calls, `WeakAnyRef`,
+  `GcEphemeron`, WeakMap reference tables, `ExternRef` finalization, and
+  recoverable `GcHeapOutOfMemory` (`StoreLimits`).
+- Added end-to-end native test suite (`tools/wtime-aot/host/tests/store_suite.rs`,
+  9 tests covering multi-module linking, reentrant GC stack walking,
+  weak/ephemeron chains, cross-module exceptions, shared memory atomics,
+  recoverable GC OOM, preemptive `InterruptHandle`, and `Xmm8..Xmm13` C-ABI
+  preservation).
+
 ## [0.1.10] - 2026-11-27
 
 AOT vectorization, SIMD lowering, and binary-heap optimization release for
