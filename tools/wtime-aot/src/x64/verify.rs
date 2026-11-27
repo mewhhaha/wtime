@@ -1761,6 +1761,120 @@ fn verify_inst_types(
             }
             expect_no_res(ir, bi, res, "SlpWideChain")?;
         }
+        Op::SimdOuterLoop { desc_idx, args } => {
+            let Some(desc) = ir.outer_simd_loops.get(desc_idx as usize) else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: SimdOuterLoop desc_idx {desc_idx} out of range",
+                    ir.func_index
+                ));
+            };
+            if desc.n_vregs > super::ir::MAX_OUTER_SIMD_VREGS
+                || desc.n_f32_args > desc.n_vregs
+                || desc.inner_trips == 0
+                || desc.inner_steps.is_empty()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: invalid SimdOuterLoop descriptor",
+                    ir.func_index
+                ));
+            }
+            let sl = ir.pool_slice(args);
+            if sl.len() != 2 + desc.n_f32_args as usize {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: SimdOuterLoop arg count mismatch",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, sl[0], Ty::I32, "SimdOuterLoop.start_px")?;
+            expect_ty(ir, bi, sl[1], Ty::I32, "SimdOuterLoop.end_px")?;
+            for &fv in &sl[2..] {
+                expect_ty(ir, bi, fv, Ty::F32, "SimdOuterLoop.f32_arg")?;
+            }
+            let chk_vreg = |v: u8, what: &str| -> Result<(), String> {
+                if v >= desc.n_vregs {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: SimdOuterLoop {what} vreg {v} >= {}",
+                        ir.func_index, desc.n_vregs
+                    ));
+                }
+                Ok(())
+            };
+            let chk_steps = |steps: &[super::ir::OuterSimdStep],
+                             allow_break: bool|
+             -> Result<(), String> {
+                for &st in steps {
+                    match st {
+                        super::ir::OuterSimdStep::BcastConst { dst, const_idx } => {
+                            chk_vreg(dst, "BcastConst.dst")?;
+                            if usize::from(const_idx) >= desc.const_f32s.len() {
+                                return Err(format!(
+                                    "verify_ir fn {} bb{bi}: SimdOuterLoop const_idx out of range",
+                                    ir.func_index
+                                ));
+                            }
+                        }
+                        super::ir::OuterSimdStep::CvtPxToF32 { dst, .. } => {
+                            chk_vreg(dst, "CvtPxToF32.dst")?;
+                        }
+                        super::ir::OuterSimdStep::Move { dst, src } => {
+                            chk_vreg(dst, "Move.dst")?;
+                            chk_vreg(src, "Move.src")?;
+                        }
+                        super::ir::OuterSimdStep::F32Bin { op, dst, lhs, rhs } => {
+                            if !matches!(
+                                op,
+                                FloatBinOp::Add
+                                    | FloatBinOp::Sub
+                                    | FloatBinOp::Mul
+                                    | FloatBinOp::Div
+                            ) {
+                                return Err(format!(
+                                    "verify_ir fn {} bb{bi}: unsupported SimdOuterLoop F32Bin {op:?}",
+                                    ir.func_index
+                                ));
+                            }
+                            chk_vreg(dst, "F32Bin.dst")?;
+                            chk_vreg(lhs, "F32Bin.lhs")?;
+                            chk_vreg(rhs, "F32Bin.rhs")?;
+                        }
+                        super::ir::OuterSimdStep::F32Un { op, dst, src } => {
+                            if !matches!(
+                                op,
+                                super::ir::FloatUnOp::Neg
+                                    | super::ir::FloatUnOp::Abs
+                                    | super::ir::FloatUnOp::Sqrt
+                            ) {
+                                return Err(format!(
+                                    "verify_ir fn {} bb{bi}: unsupported SimdOuterLoop F32Un {op:?}",
+                                    ir.func_index
+                                ));
+                            }
+                            chk_vreg(dst, "F32Un.dst")?;
+                            chk_vreg(src, "F32Un.src")?;
+                        }
+                        super::ir::OuterSimdStep::BreakIf { lhs, rhs, .. } => {
+                            if !allow_break {
+                                return Err(format!(
+                                    "verify_ir fn {} bb{bi}: SimdOuterLoop BreakIf outside inner_steps",
+                                    ir.func_index
+                                ));
+                            }
+                            chk_vreg(lhs, "BreakIf.lhs")?;
+                            chk_vreg(rhs, "BreakIf.rhs")?;
+                        }
+                    }
+                }
+                Ok(())
+            };
+            chk_steps(&desc.init_steps, false)?;
+            chk_steps(&desc.pre_steps, false)?;
+            chk_steps(&desc.inner_steps, true)?;
+            for &(d, s) in &desc.backedge_copies {
+                chk_vreg(d, "backedge.dst")?;
+                chk_vreg(s, "backedge.src")?;
+            }
+            expect_res(ir, bi, res, Ty::I32, "SimdOuterLoop")?;
+        }
         Op::V128Splat { kind, val } => {
             expect_ty(ir, bi, val, kind.scalar_ty(), "V128Splat")?;
             expect_res(ir, bi, res, Ty::V128, "V128Splat")?;
@@ -2834,6 +2948,17 @@ pub fn verify_alloc_with_config(
                     MASK_RAX_RDX | MASK_RCX | (1 << 6),
                     (1 << 0) | (1 << 1) | (1 << 2),
                 ),
+                Op::SimdOuterLoop { .. } => {
+                    for &x in &super::regalloc::XMM_CALLEE_SAVED {
+                        if !used_callee_xmm_set.contains(&x) {
+                            return Err(format!(
+                                "verify_alloc fn {} bb{b} inst {ii}: SimdOuterLoop missing callee-saved {x:?}",
+                                ir.func_index
+                            ));
+                        }
+                    }
+                    (MASK_RAX_RDX | MASK_RCX | (1 << 6) | (1 << 7), 0x3fff)
+                }
                 Op::PgoRecordCi { .. } => (1 << 0, 0),
                 Op::SlpWideChain { desc_idx, args } if !cfg.allow_xmm16_31 => {
                     let n_loads = ir.wide_chains[desc_idx as usize].n_loads as usize;

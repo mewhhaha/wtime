@@ -656,6 +656,7 @@ impl<'a> Lower<'a> {
                                     | VecReduceKind::I32Dot,
                                 ..
                             }
+                            | Op::SimdOuterLoop { .. }
                             | Op::V128ToI32 { .. } => true,
                             Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
                             Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
@@ -6935,6 +6936,9 @@ impl<'a> Lower<'a> {
                         .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128));
                 }
             }
+            Op::SimdOuterLoop { desc_idx, args } => {
+                self.emit_simd_outer_loop(desc_idx, args, res.unwrap());
+            }
             Op::SlpWideChain { desc_idx, args } => {
                 use super::ir::{WideStep, WideStepOp};
                 let desc = self.ir.wide_chains[desc_idx as usize].clone();
@@ -7917,6 +7921,22 @@ impl<'a> Lower<'a> {
             }
             Op::V128Shift { op, v, shift } => {
                 let r = res.unwrap();
+                if matches!(op, 0xfd8b..=0xfd8d | 0xfdab..=0xfdad | 0xfdcb | 0xfdcd)
+                    && let Loc::Remat(RematConst::I32(c)) = self.loc(shift)
+                {
+                    let vr = self.fp_read(v, SCRATCH_FP1);
+                    let d = self.fp_write_reg(r);
+                    super::simd_lower::emit_v128_shift_imm(
+                        &mut self.asm,
+                        op,
+                        d,
+                        vr,
+                        c as u32,
+                        self.isa,
+                    );
+                    self.fp_commit(r, d);
+                    return Ok(());
+                }
                 let need_low16 = op == 0xfd6c;
                 let vr = if need_low16 {
                     self.fp_read_low16(v, SCRATCH_FP1)
@@ -8660,6 +8680,474 @@ impl<'a> Lower<'a> {
         true
     }
 
+    /// Emits `Op::SimdOuterLoop`: outer-vectorized pure `f32` nested loop with lane masking and
+    /// wrapping `i32` sum reduction across 16-wide AVX-512 (`zmm` + `k1`), 8-wide AVX2 (`ymm`),
+    /// or 4-wide SSE2 (`xmm`).
+    fn emit_simd_outer_loop(&mut self, desc_idx: u32, args: ValRange, res: Val) {
+        use super::ir::{CmpOp, FloatBinOp, FloatUnOp, OuterSimdStep};
+        const VREGS: [Xmm; 16] = [
+            Xmm::Xmm0,
+            Xmm::Xmm1,
+            Xmm::Xmm2,
+            Xmm::Xmm3,
+            Xmm::Xmm4,
+            Xmm::Xmm5,
+            Xmm::Xmm6,
+            Xmm::Xmm7,
+            Xmm::Xmm8,
+            Xmm::Xmm9,
+            Xmm::Xmm10,
+            Xmm::Xmm11,
+            Xmm::Xmm12,
+            Xmm::Xmm13,
+            Xmm::Xmm14,
+            Xmm::Xmm15,
+        ];
+        const V_IT: Xmm = Xmm::Xmm12;
+        const V_CTRL: Xmm = Xmm::Xmm13; // v_ones on AVX-512; v_active on AVX2/SSE2
+        const V_S1: Xmm = Xmm::Xmm14;
+        const V_S2: Xmm = Xmm::Xmm15;
+
+        let desc = self.ir.outer_simd_loops[desc_idx as usize].clone();
+        let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+        let has_avx512 = self.isa.has_avx512;
+        let has_avx2 = self.isa.has_avx2;
+        let lanes: u32 = if has_avx512 {
+            16
+        } else if has_avx2 {
+            8
+        } else {
+            4
+        };
+
+        // 1. Parallel-move `start_px -> Rdi`, `end_px -> Rsi`, and runtime `f32_args -> Xmm0..`.
+        let gp_moves = [
+            (
+                MoveLoc::Gp(Gp::Rdi),
+                MoveLoc::from(self.loc(arg_vals[0])),
+                Ty::I32,
+            ),
+            (
+                MoveLoc::Gp(Gp::Rsi),
+                MoveLoc::from(self.loc(arg_vals[1])),
+                Ty::I32,
+            ),
+        ];
+        emit_parallel_moves(&mut self.asm, &gp_moves);
+        let mut fp_moves: Vec<(MoveLoc, MoveLoc, Ty)> =
+            Vec::with_capacity(desc.n_f32_args as usize);
+        for k in 0..desc.n_f32_args as usize {
+            fp_moves.push((
+                MoveLoc::Xmm(VREGS[k]),
+                MoveLoc::from(self.loc(arg_vals[2 + k])),
+                Ty::F32,
+            ));
+        }
+        emit_parallel_moves(&mut self.asm, &fp_moves);
+
+        let lbl_done = self.asm.new_label();
+        let lbl_outer = self.asm.new_label();
+        let lbl_inner = self.asm.new_label();
+        let lbl_inner_done = self.asm.new_label();
+
+        // Empty-range guard (`start_px >=u end_px` -> return 0).
+        self.asm.xor_rr(false, Gp::Rax, Gp::Rax);
+        self.asm.cmp_rr(false, Gp::Rdi, Gp::Rsi);
+        self.asm.jcc(Cond::Ae, lbl_done);
+        self.asm.sub_rr(false, Gp::Rsi, Gp::Rdi); // Rsi = rem_outer = end_px - start_px >= 1
+
+        // Helper closures for width-polymorphic vector primitives.
+        let bcast_u32 = |asm: &mut Asm, dst: Xmm, bits: u32| {
+            if bits == 0 {
+                if has_avx512 {
+                    asm.vpxord_zzz(dst, dst, dst);
+                } else if has_avx2 {
+                    asm.vpxor_yyy(dst, dst, dst);
+                } else {
+                    asm.pxor(dst, dst);
+                }
+                return;
+            }
+            asm.mov_ri32(SCRATCH_GP1, bits);
+            if has_avx512 {
+                asm.vmovd_xr(dst, SCRATCH_GP1);
+                asm.vpbroadcastd_zx(dst, dst);
+            } else if has_avx2 {
+                asm.vmovd_xr(dst, SCRATCH_GP1);
+                asm.vpbroadcastd_yx(dst, dst);
+            } else {
+                asm.movd_xr(dst, SCRATCH_GP1);
+                asm.pshufd(dst, dst, 0x00);
+            }
+        };
+        let vmove = |asm: &mut Asm, dst: Xmm, src: Xmm| {
+            if dst == src {
+                return;
+            }
+            if has_avx512 {
+                asm.vmovaps_zz(dst, src);
+            } else if has_avx2 {
+                asm.vmovaps_yy(dst, src);
+            } else {
+                asm.movaps_rr(dst, src);
+            }
+        };
+
+        // 2. Broadcast runtime F32 args once before the outer loop.
+        for &r in VREGS.iter().take(desc.n_f32_args as usize) {
+            if has_avx512 {
+                self.asm.vbroadcastss_zx(r, r);
+            } else if has_avx2 {
+                self.asm.vbroadcastss_yx(r, r);
+            } else {
+                self.asm.pshufd(r, r, 0x00);
+            }
+        }
+        if has_avx512 {
+            bcast_u32(&mut self.asm, V_CTRL, 1);
+        }
+
+        // Intern `[0, 1, ..., W-1]` ramp in local rodata (16-byte aligned).
+        let mut ramp_bytes = Vec::with_capacity((lanes as usize) * 4);
+        for i in 0..lanes {
+            ramp_bytes.extend_from_slice(&i.to_le_bytes());
+        }
+        let ramp_off = self.asm.add_local_rodata(16, &ramp_bytes);
+
+        let load_ramp = |asm: &mut Asm, dst: Xmm| {
+            asm.lea_rip(SCRATCH_GP1, RelocTarget::LocalRodata(ramp_off));
+            if has_avx512 {
+                asm.vmovdqu32_zm(dst, Mem::base(SCRATCH_GP1));
+            } else if has_avx2 {
+                asm.vmovdqu_ym(dst, Mem::base(SCRATCH_GP1));
+            } else {
+                asm.movdqu_xm(dst, Mem::base(SCRATCH_GP1));
+            }
+        };
+
+        let emit_step = |asm: &mut Asm, st: OuterSimdStep| match st {
+            OuterSimdStep::BcastConst { dst, const_idx } => {
+                bcast_u32(
+                    asm,
+                    VREGS[dst as usize],
+                    desc.const_f32s[const_idx as usize],
+                );
+            }
+            OuterSimdStep::CvtPxToF32 { dst, .. } => {
+                let d = VREGS[dst as usize];
+                if has_avx512 {
+                    asm.vmovd_xr(V_S1, Gp::Rdi);
+                    asm.vpbroadcastd_zx(V_S1, V_S1);
+                    load_ramp(asm, V_S2);
+                    asm.vpaddd_zzz(V_S1, V_S1, V_S2);
+                    asm.vcvtdq2ps_zz(d, V_S1);
+                } else if has_avx2 {
+                    asm.vmovd_xr(V_S1, Gp::Rdi);
+                    asm.vpbroadcastd_yx(V_S1, V_S1);
+                    load_ramp(asm, V_S2);
+                    asm.vpaddd_yyy(V_S1, V_S1, V_S2);
+                    asm.vcvtdq2ps_yy(d, V_S1);
+                } else {
+                    asm.movd_xr(V_S1, Gp::Rdi);
+                    asm.pshufd(V_S1, V_S1, 0x00);
+                    load_ramp(asm, V_S2);
+                    asm.paddd(V_S1, V_S2);
+                    asm.cvtdq2ps(d, V_S1);
+                }
+            }
+            OuterSimdStep::Move { dst, src } => {
+                vmove(asm, VREGS[dst as usize], VREGS[src as usize]);
+            }
+            OuterSimdStep::F32Bin { op, dst, lhs, rhs } => {
+                let (d, l, r) = (
+                    VREGS[dst as usize],
+                    VREGS[lhs as usize],
+                    VREGS[rhs as usize],
+                );
+                if has_avx512 {
+                    match op {
+                        FloatBinOp::Add => asm.vaddps_zzz(d, l, r),
+                        FloatBinOp::Sub => asm.vsubps_zzz(d, l, r),
+                        FloatBinOp::Mul => asm.vmulps_zzz(d, l, r),
+                        FloatBinOp::Div => asm.vdivps_zzz(d, l, r),
+                        _ => unreachable!(),
+                    }
+                } else if has_avx2 {
+                    match op {
+                        FloatBinOp::Add => asm.vaddps_yyy(d, l, r),
+                        FloatBinOp::Sub => asm.vsubps_yyy(d, l, r),
+                        FloatBinOp::Mul => asm.vmulps_yyy(d, l, r),
+                        FloatBinOp::Div => asm.vdivps_yyy(d, l, r),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    let sse_op = |asm: &mut Asm, a: Xmm, b: Xmm| match op {
+                        FloatBinOp::Add => asm.addps(a, b),
+                        FloatBinOp::Sub => asm.subps(a, b),
+                        FloatBinOp::Mul => asm.mulps(a, b),
+                        FloatBinOp::Div => asm.divps(a, b),
+                        _ => unreachable!(),
+                    };
+                    if d == l {
+                        sse_op(asm, d, r);
+                    } else if d == r && matches!(op, FloatBinOp::Add | FloatBinOp::Mul) {
+                        sse_op(asm, d, l);
+                    } else if d == r {
+                        asm.movaps_rr(V_S1, l);
+                        sse_op(asm, V_S1, r);
+                        asm.movaps_rr(d, V_S1);
+                    } else {
+                        asm.movaps_rr(d, l);
+                        sse_op(asm, d, r);
+                    }
+                }
+            }
+            OuterSimdStep::F32Un { op, dst, src } => {
+                let (d, s) = (VREGS[dst as usize], VREGS[src as usize]);
+                match op {
+                    FloatUnOp::Sqrt => {
+                        if has_avx512 {
+                            asm.vsqrtps_zz(d, s);
+                        } else if has_avx2 {
+                            asm.vsqrtps_yy(d, s);
+                        } else {
+                            asm.sqrtps(d, s);
+                        }
+                    }
+                    FloatUnOp::Neg => {
+                        bcast_u32(asm, V_S1, 0x8000_0000);
+                        if has_avx512 {
+                            asm.vpxord_zzz(d, s, V_S1);
+                        } else if has_avx2 {
+                            asm.vpxor_yyy(d, s, V_S1);
+                        } else {
+                            asm.movaps_rr(d, s);
+                            asm.pxor(d, V_S1);
+                        }
+                    }
+                    FloatUnOp::Abs => {
+                        bcast_u32(asm, V_S1, 0x7fff_ffff);
+                        if has_avx512 {
+                            asm.vpandd_zzz(d, s, V_S1);
+                        } else if has_avx2 {
+                            asm.vpand_yyy(d, s, V_S1);
+                        } else {
+                            asm.movaps_rr(d, s);
+                            asm.pand(d, V_S1);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            OuterSimdStep::BreakIf {
+                cop,
+                break_on_true,
+                lhs,
+                rhs,
+                delta_after,
+            } => {
+                let (l, r) = (VREGS[lhs as usize], VREGS[rhs as usize]);
+                let (ca, cb, pred_avx, pred_sse) = if break_on_true {
+                    match cop {
+                        CmpOp::GtS => (r, l, 0x15, 5), // !(l > r)  == !(r < l)  (NLT_UQ / NLT_US)
+                        CmpOp::GeS => (r, l, 0x16, 6), // !(l >= r) == !(r <= l) (NLE_UQ / NLE_US)
+                        CmpOp::LtS => (l, r, 0x15, 5), // !(l < r)               (NLT_UQ / NLT_US)
+                        CmpOp::LeS => (l, r, 0x16, 6), // !(l <= r)              (NLE_UQ / NLE_US)
+                        CmpOp::Eq => (l, r, 0x04, 4),  // !(l == r)              (NEQ_UQ)
+                        CmpOp::Ne => (l, r, 0x00, 0),  // !(l != r)              (EQ_OQ)
+                        _ => unreachable!(),
+                    }
+                } else {
+                    match cop {
+                        CmpOp::GtS => (r, l, 0x11, 1), // l > r  == r < l  (LT_OQ / LT_OS)
+                        CmpOp::GeS => (r, l, 0x12, 2), // l >= r == r <= l (LE_OQ / LE_OS)
+                        CmpOp::LtS => (l, r, 0x11, 1), // l < r            (LT_OQ / LT_OS)
+                        CmpOp::LeS => (l, r, 0x12, 2), // l <= r           (LE_OQ / LE_OS)
+                        CmpOp::Eq => (l, r, 0x00, 0),  // l == r           (EQ_OQ)
+                        CmpOp::Ne => (l, r, 0x04, 4),  // l != r           (NEQ_UQ)
+                        _ => unreachable!(),
+                    }
+                };
+                if has_avx512 {
+                    asm.vcmpps_k1_k1_z(ca, cb, pred_avx);
+                    asm.kortestw_k1_k1();
+                    asm.jcc(Cond::E, lbl_inner_done);
+                    if delta_after == 1 {
+                        asm.vpaddd_zzz_k1(V_IT, V_IT, V_CTRL);
+                    } else if delta_after != 0 {
+                        bcast_u32(asm, V_S1, delta_after as u32);
+                        asm.vpaddd_zzz_k1(V_IT, V_IT, V_S1);
+                    }
+                } else if has_avx2 {
+                    asm.vcmpps_yyyi(V_S1, ca, cb, pred_avx);
+                    asm.vpand_yyy(V_CTRL, V_CTRL, V_S1);
+                    asm.vptest_yy(V_CTRL, V_CTRL);
+                    asm.jcc(Cond::E, lbl_inner_done);
+                    if delta_after == 1 {
+                        asm.vpsubd_yyy(V_IT, V_IT, V_CTRL);
+                    } else if delta_after == -1 {
+                        asm.vpaddd_yyy(V_IT, V_IT, V_CTRL);
+                    } else if delta_after != 0 {
+                        bcast_u32(asm, V_S1, delta_after as u32);
+                        asm.vpand_yyy(V_S1, V_S1, V_CTRL);
+                        asm.vpaddd_yyy(V_IT, V_IT, V_S1);
+                    }
+                } else {
+                    asm.movaps_rr(V_S1, ca);
+                    asm.cmpps(V_S1, cb, pred_sse);
+                    asm.pand(V_CTRL, V_S1);
+                    asm.movmskps(SCRATCH_GP1, V_CTRL);
+                    asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    asm.jcc(Cond::E, lbl_inner_done);
+                    if delta_after == 1 {
+                        asm.psubd(V_IT, V_CTRL);
+                    } else if delta_after == -1 {
+                        asm.paddd(V_IT, V_CTRL);
+                    } else if delta_after != 0 {
+                        bcast_u32(asm, V_S1, delta_after as u32);
+                        asm.pand(V_S1, V_CTRL);
+                        asm.paddd(V_IT, V_S1);
+                    }
+                }
+            }
+        };
+
+        // 3. One-time outer-invariant init steps.
+        for &st in &desc.init_steps {
+            emit_step(&mut self.asm, st);
+        }
+
+        // 4. Outer chunk loop (`W` lanes per trip; tail lanes naturally masked off).
+        self.asm.mark_align16(lbl_outer);
+        self.asm.bind(lbl_outer);
+        self.asm.mov_ri32(Gp::Rdx, lanes);
+        self.asm.cmp_ri(false, Gp::Rsi, lanes as i32);
+        self.asm.cmovcc(Cond::B, false, Gp::Rdx, Gp::Rsi); // Rdx = chunk_lanes in 1..=W
+
+        // Initialize active mask for `chunk_lanes` and `V_IT`.
+        if has_avx512 {
+            self.asm.mov_ri32(SCRATCH_GP1, 1);
+            self.asm.mov_rr(false, Gp::Rcx, Gp::Rdx);
+            self.asm.shl_cl(false, SCRATCH_GP1);
+            self.asm.sub_ri(false, SCRATCH_GP1, 1);
+            self.asm.kmovw_k1_r32(SCRATCH_GP1);
+            self.asm.vpxord_zzz(V_IT, V_IT, V_IT);
+            if desc.base_it != 0 {
+                bcast_u32(&mut self.asm, V_S1, desc.base_it as u32);
+                self.asm.vpaddd_zzz_k1(V_IT, V_IT, V_S1);
+            }
+        } else if has_avx2 {
+            self.asm.vmovd_xr(V_S1, Gp::Rdx);
+            self.asm.vpbroadcastd_yx(V_S1, V_S1);
+            load_ramp(&mut self.asm, V_S2);
+            self.asm.vpcmpgtd_yyy(V_CTRL, V_S1, V_S2);
+            self.asm.vpxor_yyy(V_IT, V_IT, V_IT);
+            if desc.base_it != 0 {
+                bcast_u32(&mut self.asm, V_S1, desc.base_it as u32);
+                self.asm.vpand_yyy(V_S1, V_S1, V_CTRL);
+                self.asm.vpaddd_yyy(V_IT, V_IT, V_S1);
+            }
+        } else {
+            self.asm.movd_xr(V_S1, Gp::Rdx);
+            self.asm.pshufd(V_S1, V_S1, 0x00);
+            load_ramp(&mut self.asm, V_S2);
+            self.asm.movaps_rr(V_CTRL, V_S1);
+            self.asm.pcmpgtd(V_CTRL, V_S2);
+            self.asm.pxor(V_IT, V_IT);
+            if desc.base_it != 0 {
+                bcast_u32(&mut self.asm, V_S1, desc.base_it as u32);
+                self.asm.pand(V_S1, V_CTRL);
+                self.asm.paddd(V_IT, V_S1);
+            }
+        }
+
+        // Per-chunk pre-inner steps (e.g. `px -> cx`, `zr = 0`, `zi = 0`).
+        for &st in &desc.pre_steps {
+            emit_step(&mut self.asm, st);
+        }
+
+        // 5. Inner vector loop (`inner_trips` iterations, early-breaks when all lanes inactive).
+        self.asm.mov_ri32(Gp::Rcx, desc.inner_trips);
+        self.asm.mark_align16(lbl_inner);
+        self.asm.bind(lbl_inner);
+        for &st in &desc.inner_steps {
+            emit_step(&mut self.asm, st);
+        }
+
+        // Emit parallel backedge state copies using `V_S1` as cycle breaker.
+        let mut pending: Vec<(Xmm, Xmm)> = desc
+            .backedge_copies
+            .iter()
+            .map(|&(d, s)| (VREGS[d as usize], VREGS[s as usize]))
+            .filter(|&(d, s)| d != s)
+            .collect();
+        while !pending.is_empty() {
+            if let Some(pos) = (0..pending.len()).find(|&i| {
+                let d = pending[i].0;
+                pending
+                    .iter()
+                    .enumerate()
+                    .all(|(j, &(_, s))| j == i || s != d)
+            }) {
+                let (d, s) = pending.swap_remove(pos);
+                vmove(&mut self.asm, d, s);
+            } else {
+                let d0 = pending[0].0;
+                vmove(&mut self.asm, V_S1, d0);
+                for (_, s) in &mut pending {
+                    if *s == d0 {
+                        *s = V_S1;
+                    }
+                }
+            }
+        }
+
+        self.asm.sub_ri(false, Gp::Rcx, 1);
+        self.asm.jcc(Cond::Ne, lbl_inner);
+
+        // 6. Horizontal sum of `V_IT` (`i32` lanes) -> `Rax`.
+        self.asm.bind(lbl_inner_done);
+        if has_avx512 {
+            self.asm.vextracti64x4_yz(V_S1, V_IT, 1);
+            self.asm.vpaddd_yyy(V_IT, V_IT, V_S1);
+            self.asm.vextracti128_xy(V_S1, V_IT, 1);
+            self.asm.vpaddd_xxx(V_IT, V_IT, V_S1);
+            self.asm.vpshufd(V_S1, V_IT, 0x0e);
+            self.asm.vpaddd_xxx(V_IT, V_IT, V_S1);
+            self.asm.vpshufd(V_S1, V_IT, 0x01);
+            self.asm.vpaddd_xxx(V_IT, V_IT, V_S1);
+            self.asm.vmovd_rx(SCRATCH_GP1, V_IT);
+        } else if has_avx2 {
+            self.asm.vextracti128_xy(V_S1, V_IT, 1);
+            self.asm.vpaddd_xxx(V_IT, V_IT, V_S1);
+            self.asm.vpshufd(V_S1, V_IT, 0x0e);
+            self.asm.vpaddd_xxx(V_IT, V_IT, V_S1);
+            self.asm.vpshufd(V_S1, V_IT, 0x01);
+            self.asm.vpaddd_xxx(V_IT, V_IT, V_S1);
+            self.asm.vmovd_rx(SCRATCH_GP1, V_IT);
+        } else {
+            self.asm.pshufd(V_S1, V_IT, 0x0e);
+            self.asm.paddd(V_IT, V_S1);
+            self.asm.pshufd(V_S1, V_IT, 0x01);
+            self.asm.paddd(V_IT, V_S1);
+            self.asm.movd_rx(SCRATCH_GP1, V_IT);
+        }
+        self.asm.add_rr(false, Gp::Rax, SCRATCH_GP1);
+        self.asm.add_rr(false, Gp::Rdi, Gp::Rdx);
+        self.asm.sub_rr(false, Gp::Rsi, Gp::Rdx);
+        self.asm.jcc(Cond::Ne, lbl_outer);
+
+        self.asm.bind(lbl_done);
+        if has_avx2 {
+            self.asm.vzeroupper();
+        }
+        let d = self.gp_write_reg(res);
+        if d != Gp::Rax {
+            self.asm.mov_rr(false, d, Gp::Rax);
+        }
+        self.gp_commit(res, d);
+    }
+
     /// Emits the cold exact-order 128-bit VEX/EVEX fallback for `Op::SlpWideChain` when a
     /// runtime partial overlap between `dst` and a load stream is detected.
     fn emit_slp_wide_overlap_fallback(&mut self, desc_idx: u32, args: ValRange) {
@@ -9272,9 +9760,12 @@ pub fn lower_ir_to_x64_with_budget(
     asm.use_vex = isa.has_avx2;
     asm.guard_legacy_sse_vzeroupper = isa.has_avx2
         && ir.blocks.iter().any(|bb| {
-            bb.insts
-                .iter()
-                .any(|ins| matches!(ins.op, Op::SlpWideChain { .. } | Op::F64x4BinMem { .. }))
+            bb.insts.iter().any(|ins| {
+                matches!(
+                    ins.op,
+                    Op::SlpWideChain { .. } | Op::SimdOuterLoop { .. } | Op::F64x4BinMem { .. }
+                )
+            })
         });
     let bb_labels: Vec<Label> = (0..ir.blocks.len()).map(|_| asm.new_label()).collect();
 

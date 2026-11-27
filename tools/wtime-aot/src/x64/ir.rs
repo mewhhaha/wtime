@@ -306,6 +306,9 @@ impl SimdSplatKind {
     }
 }
 
+/// Internal fused unary SIMD op: zero-extend low 4 `u8` lanes to `i32x4` (`pmovzxbd`/`vpmovzxbd`).
+pub const V128_UN_I32X4_EXTEND_LOW_I8X16_U: u16 = 0xfe01;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SimdLaneKind {
     I8x16S,
@@ -931,6 +934,14 @@ pub enum Op {
         expected_func: u32,
     },
 
+    /// Outer-vectorized pure nested `f32` loop with early-exit lane masking and wrapping `i32` sum
+    /// reduction (`args` = `[start_px: I32, end_px: I32, f32_arg_0..]` for
+    /// `IrFunc::outer_simd_loops[desc_idx]`).
+    SimdOuterLoop {
+        desc_idx: u32,
+        args: ValRange,
+    },
+
     Trap(u8),
 }
 
@@ -981,6 +992,7 @@ impl Op {
             | Op::MemByteBlur3Div { .. }
             | Op::F64x4BinMem { .. }
             | Op::SlpWideChain { .. }
+            | Op::SimdOuterLoop { .. }
             | Op::F64AxpyLoop { .. }
             | Op::VecElemLoop { .. }
             | Op::VecReduceLoop { .. }
@@ -1165,7 +1177,7 @@ impl Op {
                 f(lhs);
                 f(rhs);
             }
-            Op::SlpWideChain { args, .. } => {
+            Op::SlpWideChain { args, .. } | Op::SimdOuterLoop { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
                     f(v);
                 }
@@ -1579,6 +1591,72 @@ pub struct WideChainDesc {
     pub steps: Vec<WideStep>,
 }
 
+/// Maximum virtual vector registers available inside `OuterSimdLoopDesc` (`0..12`).
+/// Reserved control regs are `12` (`v_it`), `13` (`v_active` / `v_ones`), `14..15` (scratch).
+pub const MAX_OUTER_SIMD_VREGS: u8 = 12;
+
+/// Single vector micro-op inside an outer-vectorized pure `f32` nested loop (`Op::SimdOuterLoop`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OuterSimdStep {
+    /// Broadcast `f32` constant `desc.const_f32s[const_idx]` to all lanes of `dst`.
+    BcastConst { dst: u8, const_idx: u8 },
+    /// Convert current chunk lane indices `[px + 0, ..., px + W - 1]` to `f32` in `dst`.
+    CvtPxToF32 { dst: u8, signed: bool },
+    /// Copy vector register `src` to `dst`.
+    Move { dst: u8, src: u8 },
+    /// Exact IEEE-754 elementwise binary `f32` op (`Add`, `Sub`, `Mul`, `Div`; NO FMA).
+    F32Bin {
+        op: FloatBinOp,
+        dst: u8,
+        lhs: u8,
+        rhs: u8,
+    },
+    /// Exact IEEE-754 elementwise unary `f32` op (`Neg`, `Abs`, `Sqrt`).
+    F32Un { op: FloatUnOp, dst: u8, src: u8 },
+    /// Early-exit FP comparison mask update:
+    /// - If `break_on_true`: lanes where `lhs <cop> rhs` is TRUE exit (`active &= !(lhs <cop> rhs)`).
+    /// - Else: lanes where `lhs <cop> rhs` is FALSE exit (`active &= (lhs <cop> rhs)`).
+    ///
+    /// If all lanes become inactive, break out of the inner vector loop immediately;
+    /// otherwise increment `v_it` by `delta_after` (wrapping `i32`) on all remaining active lanes.
+    BreakIf {
+        cop: CmpOp,
+        break_on_true: bool,
+        lhs: u8,
+        rhs: u8,
+        delta_after: i32,
+    },
+}
+
+/// Metadata for one `Op::SimdOuterLoop` stored on `IrFunc::outer_simd_loops`.
+///
+/// Computes the exact wrapping `i32` sum of an inner pure `f32` early-exit counted loop
+/// over `px in [start_px, end_px)` (unsigned, `start_px <= end_px`, and when `CvtPxToF32`
+/// uses unsigned conversion, `end_px <= i32::MAX` so signed/unsigned lane conversion matches).
+/// `args` layout: `[start_px: I32, end_px: I32, f32_arg_0: F32, ..., f32_arg_{n-1}: F32]`.
+/// Runtime `f32_arg_k` (`0..n_f32_args`) are pre-broadcast once before the outer loop into vreg `k`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OuterSimdLoopDesc {
+    /// Number of runtime `F32` args in `args[2..]` (pre-broadcast into vregs `0..n_f32_args`).
+    pub n_f32_args: u8,
+    /// Number of virtual vector regs used (`n_f32_args <= n_vregs <= MAX_OUTER_SIMD_VREGS`).
+    pub n_vregs: u8,
+    /// Compile-time `f32` constants (raw IEEE-754 bits) referenced by `BcastConst`.
+    pub const_f32s: Vec<u32>,
+    /// Initial per-lane `i32` iteration value added to active lanes before the inner loop.
+    pub base_it: i32,
+    /// Exact constant number of inner loop trips (`>= 1`).
+    pub inner_trips: u32,
+    /// One-time outer-loop-invariant const broadcasts run once before the outer chunk loop.
+    pub init_steps: Vec<OuterSimdStep>,
+    /// Per-chunk pre-inner vector steps (e.g. `px -> cx` and initial inner state).
+    pub pre_steps: Vec<OuterSimdStep>,
+    /// Inner loop body steps (executed up to `inner_trips` times until all lanes exit).
+    pub inner_steps: Vec<OuterSimdStep>,
+    /// End-of-iteration parallel copies `(dst_state_vreg, next_vreg)` applied after `inner_steps`.
+    pub backedge_copies: Vec<(u8, u8)>,
+}
+
 #[derive(Clone)]
 pub struct IrFunc {
     pub func_index: usize,
@@ -1591,6 +1669,7 @@ pub struct IrFunc {
     pub v128_consts: Vec<[u8; 16]>,
     pub br_tables: Vec<BrTableData>,
     pub wide_chains: Vec<WideChainDesc>,
+    pub outer_simd_loops: Vec<OuterSimdLoopDesc>,
     pub needs_stack_check: bool,
     /// Extra native stack headroom reserved by a stack-check-retaining caller on behalf of
     /// direct stack-check-elided callees (Step 8a).
@@ -1657,6 +1736,24 @@ impl IrFunc {
             });
         }
 
+        let mut outer_simd_loops = Vec::new();
+        outer_simd_loops
+            .try_reserve_exact(self.outer_simd_loops.len())
+            .ok()?;
+        for ol in &self.outer_simd_loops {
+            outer_simd_loops.push(OuterSimdLoopDesc {
+                n_f32_args: ol.n_f32_args,
+                n_vregs: ol.n_vregs,
+                const_f32s: try_copy(&ol.const_f32s)?,
+                base_it: ol.base_it,
+                inner_trips: ol.inner_trips,
+                init_steps: try_copy(&ol.init_steps)?,
+                pre_steps: try_copy(&ol.pre_steps)?,
+                inner_steps: try_copy(&ol.inner_steps)?,
+                backedge_copies: try_copy(&ol.backedge_copies)?,
+            });
+        }
+
         Some(Self {
             func_index: self.func_index,
             memory64: self.memory64,
@@ -1668,6 +1765,7 @@ impl IrFunc {
             v128_consts,
             br_tables,
             wide_chains,
+            outer_simd_loops,
             needs_stack_check: self.needs_stack_check,
             elided_callee_stack_bytes: self.elided_callee_stack_bytes,
             early_pruned: self.early_pruned,
@@ -1914,6 +2012,7 @@ impl Builder {
             v128_consts: Vec::new(),
             br_tables: Vec::new(),
             wide_chains: Vec::new(),
+            outer_simd_loops: Vec::new(),
             needs_stack_check,
             elided_callee_stack_bytes: 0,
             early_pruned: 0,

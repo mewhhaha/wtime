@@ -561,6 +561,10 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 Op::VecElemLoop { .. } | Op::VecReduceLoop { .. } => {
                     clobbers.push((pos, 0x000f, 0x0007));
                 }
+                Op::SimdOuterLoop { .. } => {
+                    // Clobbers caller-saved X0..X4 and V0..V7, V16..V23 (0 callee-saved regs).
+                    clobbers.push((pos, 0x001f, 0x00ff | (0x00ff << 16)));
+                }
                 Op::PgoRecordCi { .. } => {
                     clobbers.push((pos, 1 << 0, 0));
                 }

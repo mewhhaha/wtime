@@ -5244,6 +5244,7 @@ fn aarch64_regalloc_enforces_liveness_memory_cap_and_filters_cross_block() {
         v128_consts: Vec::new(),
         br_tables: Vec::new(),
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
         needs_stack_check: false,
         elided_callee_stack_bytes: 0,
         early_pruned: 0,
@@ -5741,4 +5742,137 @@ fn aarch64_cdylib_guard_pages_oob_grow_zero_mem_dead_load_and_chaining() {
         .unwrap();
     assert_eq!(vmz.x[0] as u32, 1);
     assert_eq!(vmz.read_bytes(sz, 1).unwrap()[0], 2);
+}
+
+#[test]
+fn aarch64_final_stretch_outer_simd_pmovzxbd_and_sift_down_parity() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_u32, section, type_sec, wasm_module,
+    };
+
+    let enc_f32 = |buf: &mut Vec<u8>, v: f32| {
+        buf.push(0x43);
+        buf.extend_from_slice(&v.to_bits().to_le_bytes());
+    };
+    let enc_simd_op = |buf: &mut Vec<u8>, op: u32| {
+        buf.push(0xfd);
+        leb_u32(buf, op);
+    };
+
+    // f0(mode: i32) -> i32: Op::SimdOuterLoop with NaN / +Inf / -0.0 and trip counts 0, 1, 3, 4, 5, 17!
+    let mut b0 = Vec::new();
+    b0.extend_from_slice(&[0x20, 0, 0x41, 0x7f, 0x46, 0x04, 0x40]); // arg == -1 -> NaN, end=9
+    enc_f32(&mut b0, f32::NAN);
+    b0.extend_from_slice(&[0x21, 5, 0x41, 9, 0x21, 1, 0x05]);
+    b0.extend_from_slice(&[0x20, 0, 0x41, 0x7e, 0x46, 0x04, 0x40]); // arg == -2 -> +Inf, end=9
+    enc_f32(&mut b0, f32::INFINITY);
+    b0.extend_from_slice(&[0x21, 5, 0x41, 9, 0x21, 1, 0x05]);
+    enc_f32(&mut b0, 0.05f32);
+    b0.extend_from_slice(&[0x21, 5, 0x20, 0, 0x21, 1, 0x0b, 0x0b]);
+    b0.extend_from_slice(&[
+        0x41, 0, 0x21, 3, 0x20, 1, 0x45, 0x04, 0x40, 0x41, 0, 0x0f, 0x0b,
+    ]);
+    b0.extend_from_slice(&[0x41, 0, 0x21, 2, 0x03, 0x40]); // outer loop
+    b0.extend_from_slice(&[0x20, 2, 0xb3]);
+    enc_f32(&mut b0, 0.1f32);
+    b0.push(0x94);
+    enc_f32(&mut b0, -1.5f32);
+    b0.extend_from_slice(&[0x92, 0x20, 5, 0x92, 0x21, 6]); // x0
+    b0.extend_from_slice(&[0x41, 0, 0x21, 4, 0x20, 6, 0x21, 7]);
+    b0.extend_from_slice(&[0x02, 0x7f, 0x03, 0x40, 0x20, 7]);
+    enc_f32(&mut b0, 4.0);
+    b0.extend_from_slice(&[0x5e, 0x04, 0x40, 0x20, 4, 0x0c, 2, 0x0b]); // if x > 4.0 break(it)
+    b0.extend_from_slice(&[
+        0x20, 7, 0x20, 7, 0x94, 0x20, 6, 0x92, 0x21, 7, 0x20, 4, 0x41, 1, 0x6a, 0x22, 4, 0x41, 16,
+        0x47, 0x0d, 0, 0x0b, 0x41, 16, 0x0b, 0x20, 3, 0x6a, 0x21, 3, 0x20, 2, 0x41, 1, 0x6a, 0x22,
+        2, 0x20, 1, 0x47, 0x0d, 0, 0x0b, 0x20, 3,
+    ]);
+
+    // f1(x: i32) -> i32: exercises `V128_UN_I32X4_EXTEND_LOW_I8X16_U` on AArch64 NEON (`2× uxtl`).
+    let mut b1 = Vec::new();
+    b1.extend_from_slice(&[0x41, 0, 0x20, 0, 0x36, 2, 0, 0x41, 0]);
+    enc_simd_op(&mut b1, 0);
+    b1.extend_from_slice(&[2, 0]);
+    enc_simd_op(&mut b1, 137);
+    enc_simd_op(&mut b1, 169);
+    b1.extend_from_slice(&[0x21, 1, 0x20, 1]);
+    enc_simd_op(&mut b1, 27);
+    b1.push(0);
+    for lane in 1u8..4 {
+        b1.extend_from_slice(&[0x20, 1]);
+        enc_simd_op(&mut b1, 27);
+        b1.push(lane);
+        b1.push(0x6a);
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[("outer_simd", 0, 0), ("zxbd", 0, 1), ("memory", 2, 0)]),
+        code_sec(&[
+            enc_body(&[(4, 0x7f), (3, 0x7d)], &b0),
+            enc_body(&[(1, 0x7b)], &b1),
+        ]),
+    ]);
+    // Verify Stage 2 IR actually emits `Op::SimdOuterLoop` on f0 and `V128_UN_I32X4_EXTEND_LOW_I8X16_U` on f1.
+    let val = wtime_validate::validate(
+        &wasm,
+        &crate::x64::module::x64_validate_features(),
+        &crate::x64::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = crate::x64::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..2)
+        .map(|bi| crate::x64::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let eff = crate::x64::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        crate::x64::opt::optimize_func_stage2(ir, &module, &eff, None).unwrap();
+        crate::x64::verify::verify_ir(ir, &module).unwrap();
+    }
+    assert!(
+        irs[0]
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| matches!(i.op, crate::x64::ir::Op::SimdOuterLoop { .. })),
+        "AArch64 f0 must emit Op::SimdOuterLoop"
+    );
+    assert!(
+        irs[1]
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| matches!(
+                i.op,
+                crate::x64::ir::Op::V128Un {
+                    op: crate::x64::ir::V128_UN_I32X4_EXTEND_LOW_I8X16_U,
+                    ..
+                }
+            )),
+        "AArch64 f1 must emit V128_UN_I32X4_EXTEND_LOW_I8X16_U"
+    );
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            optimize: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_final_stretch", &img.elf);
+    let calls = [
+        ("outer_simd", Value::I32(0)),
+        ("outer_simd", Value::I32(1)),
+        ("outer_simd", Value::I32(3)),
+        ("outer_simd", Value::I32(4)),
+        ("outer_simd", Value::I32(5)),
+        ("outer_simd", Value::I32(17)),
+        ("outer_simd", Value::I32(-1)),
+        ("outer_simd", Value::I32(-2)),
+        ("zxbd", Value::I32(0x80ff_017fu32 as i32)),
+        ("zxbd", Value::I32(0x1234_5678)),
+    ];
+    assert_aarch64_image_matches_oracle("aarch64 final stretch", &wasm, &calls, 16, &img);
 }

@@ -2707,6 +2707,9 @@ impl Asm {
     pub fn pmovzxbw(&mut self, d: Xmm, s: Xmm) {
         self.sse_38_rr(Some(0x66), 0x30, d, s);
     }
+    pub fn pmovzxbd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x31, d, s);
+    }
     pub fn pmovsxwd(&mut self, d: Xmm, s: Xmm) {
         self.sse_38_rr(Some(0x66), 0x23, d, s);
     }
@@ -3930,6 +3933,9 @@ impl Asm {
     pub fn vpmovzxbw_xx(&mut self, d: Xmm, s: Xmm) {
         self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x30);
     }
+    pub fn vpmovzxbd_xx(&mut self, d: Xmm, s: Xmm) {
+        self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x31);
+    }
     pub fn vpmovsxwd_xx(&mut self, d: Xmm, s: Xmm) {
         self.vex_or_evex_rr(2, 1, false, false, d, None, s, 0x23);
     }
@@ -4321,6 +4327,27 @@ impl Asm {
     }
     pub fn vdivps_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
         self.vex3_ymm_rr(1, 0, false, dst, Some(a), b, 0x5e);
+    }
+    pub fn vmovaps_yy(&mut self, dst: Xmm, src: Xmm) {
+        if dst != src {
+            self.vex3_ymm_rr(1, 0, false, dst, None, src, 0x28);
+        }
+    }
+    pub fn vsqrtps_yy(&mut self, dst: Xmm, src: Xmm) {
+        self.vex3_ymm_rr(1, 0, false, dst, None, src, 0x51);
+    }
+    pub fn vcvtdq2ps_yy(&mut self, dst: Xmm, src: Xmm) {
+        self.vex3_ymm_rr(1, 0, false, dst, None, src, 0x5b);
+    }
+    pub fn vcmpps_yyyi(&mut self, dst: Xmm, a: Xmm, b: Xmm, pred: u8) {
+        self.vex3_ymm_rr(1, 0, false, dst, Some(a), b, 0xc2);
+        self.emit_u8(pred);
+    }
+    pub fn vpcmpgtd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0x66);
+    }
+    pub fn vptest_yy(&mut self, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, a, None, b, 0x17);
     }
     pub fn vaddps_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
         self.vex3_ymm_mem(1, 0, false, dst, Some(a), mem, 0x58);
@@ -4913,6 +4940,49 @@ impl Asm {
     /// `vmovapd zmm/ymm/xmm {k1}, zmm/ymm/xmm` (`EVEX.{128,256,512}.66.0F.W1 28 /r`, merge-masked with `k1`).
     pub fn vmovapd_k1_evex(&mut self, ll: u8, dst: Xmm, src: Xmm) {
         self.evex_rr_mask(1, 1, true, ll, 1, dst, None, src, 0x28);
+    }
+    /// `vmovaps zmm, zmm` (`EVEX.512.0F.W0 28 /r`).
+    pub fn vmovaps_zz(&mut self, dst: Xmm, src: Xmm) {
+        if dst != src {
+            self.evex_rr(1, 0, false, 2, dst, None, src, 0x28);
+        }
+    }
+    /// `vsqrtps zmm, zmm` (`EVEX.512.0F.W0 51 /r`).
+    pub fn vsqrtps_zz(&mut self, dst: Xmm, src: Xmm) {
+        self.evex_rr(1, 0, false, 2, dst, None, src, 0x51);
+    }
+    /// `vcvtdq2ps zmm, zmm` (`EVEX.512.0F.W0 5B /r`).
+    pub fn vcvtdq2ps_zz(&mut self, dst: Xmm, src: Xmm) {
+        self.evex_rr(1, 0, false, 2, dst, None, src, 0x5b);
+    }
+    /// `vcmpps k1 {k1}, zmm, zmm, imm8` (`EVEX.512.0F.W0 C2 /r ib`, masked by `k1` so `k1 &= cmp(a, b)`).
+    pub fn vcmpps_k1_k1_z(&mut self, a: Xmm, b: Xmm, imm: u8) {
+        self.evex_rr_mask(1, 0, false, 2, 1, Xmm::Xmm1, Some(a), b, 0xc2);
+        self.emit_u8(imm);
+    }
+    /// `vpaddd zmm {k1}, zmm, zmm` (`EVEX.512.66.0F.W0 FE /r`, merge-masked by `k1`).
+    pub fn vpaddd_zzz_k1(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.evex_rr_mask(1, 1, false, 2, 1, dst, Some(a), b, 0xfe);
+    }
+    /// `kmovw k1, r32` (`VEX.L0.0F.W0 92 /r`).
+    pub fn kmovw_k1_r32(&mut self, src: Gp) {
+        if src.hi() == 0 {
+            self.emit_u8(0xc5);
+            self.emit_u8(0xf8);
+        } else {
+            self.emit_u8(0xc4);
+            self.emit_u8(0xc1);
+            self.emit_u8(0x78);
+        }
+        self.emit_u8(0x92);
+        self.modrm_reg(1, src.lo());
+    }
+    /// `kortestw k1, k1` (`VEX.L0.0F.W0 98 /r`): sets `ZF = 1` iff `k1 == 0`.
+    pub fn kortestw_k1_k1(&mut self) {
+        self.emit_u8(0xc5);
+        self.emit_u8(0xf8);
+        self.emit_u8(0x98);
+        self.emit_u8(0xc9);
     }
 
     // ---- CPUID, XGETBV, MXCSR, and portable BSR/BSF ----

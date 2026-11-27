@@ -904,6 +904,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         memory64: false,
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
     };
     verify_ir(&good_ir, &empty_mod).unwrap();
     let good_alloc = allocate(&good_ir).unwrap();
@@ -935,6 +936,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         memory64: false,
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
     };
     assert!(verify_ir(&bad_ty, &empty_mod).is_err());
 
@@ -995,6 +997,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         memory64: false,
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
     };
     assert!(verify_ir(&bad_dom, &empty_mod).is_err());
 
@@ -1031,6 +1034,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         memory64: false,
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
     };
     verify_ir(&two_live_ir, &empty_mod).unwrap();
     let mut bad_alloc = allocate(&two_live_ir).unwrap();
@@ -2376,6 +2380,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
         memory64: false,
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
     };
     let alloc = allocate_with_config(&ir, AllocConfig::default(), None).unwrap();
     verify_alloc_with_config(&ir, &alloc, AllocConfig::default()).unwrap();
@@ -3258,6 +3263,7 @@ fn stage3_council_round1_regressions() {
                     memory64: false,
                     early_pruned: 0,
                     wide_chains: Vec::new(),
+                    outer_simd_loops: Vec::new(),
                 };
                 let empty = ValRange { start: 0, len: 0 };
                 let ret_v0 = ValRange { start: 0, len: 1 };
@@ -4723,42 +4729,48 @@ fn heapsort_sift_down_hoists_root_and_linearizes_right_child() {
     super::verify::verify_ir(&irs[2], &module).unwrap();
     let alloc = super::regalloc::allocate(&irs[2]).unwrap();
     super::verify::verify_alloc(&irs[2], &alloc).unwrap();
+    let mut sift_2child_hdrs = 0usize;
     let mut non_linear = Vec::new();
-    let mut linear_tri_count = 0usize;
     for (oi, &b) in alloc.block_order.iter().enumerate() {
         let bb = &irs[2].blocks[b as usize];
-        if let Term::CmpBranch {
-            then_bb, else_bb, ..
-        } = bb.term
-        {
-            for (arm, merge) in [(then_bb.0, else_bb.0), (else_bb.0, then_bb.0)] {
-                let ab = &irs[2].blocks[arm as usize];
-                if ab
-                    .insts
-                    .iter()
-                    .any(|i| matches!(i.op, Op::LoadScaled { .. }))
-                    && matches!(ab.term, Term::Jump { target, .. } if target.0 == merge)
-                {
-                    if alloc.block_order.get(oi + 1) == Some(&arm) {
-                        linear_tri_count += 1;
-                    } else {
-                        non_linear.push((
-                            b,
-                            arm,
-                            merge,
-                            ab.preds,
-                            ab.insts.len(),
-                            ab.is_loop_header,
-                            alloc.block_order.get(oi + 1).copied(),
-                        ));
-                    }
+        let has_off_32768 = bb.insts.iter().any(|i| {
+            matches!(
+                i.op,
+                Op::LoadScaled {
+                    scale: 4,
+                    offset: 32768,
+                    ..
                 }
+            )
+        });
+        let has_off_32772 = bb.insts.iter().any(|i| {
+            matches!(
+                i.op,
+                Op::LoadScaled {
+                    scale: 4,
+                    offset: 32772,
+                    ..
+                }
+            )
+        });
+        let cmp_selects = bb
+            .insts
+            .iter()
+            .filter(|i| matches!(i.op, Op::CmpSelect { .. }))
+            .count();
+        if bb.is_loop_header && has_off_32768 && has_off_32772 && cmp_selects == 3 {
+            sift_2child_hdrs += 1;
+            // The hot fall-through latch block must be placed immediately after `hdr` in `block_order`.
+            if let Term::CmpBranch { then_bb, .. } = bb.term
+                && alloc.block_order.get(oi + 1) != Some(&then_bb.0)
+            {
+                non_linear.push((b, then_bb.0, alloc.block_order.get(oi + 1).copied()));
             }
         }
     }
     assert!(
-        linear_tri_count >= 2 && non_linear.is_empty(),
-        "both right-child LoadScaled triangle arms must be linearized inline (found {linear_tri_count}, non_linear={non_linear:?})"
+        sift_2child_hdrs >= 2 && non_linear.is_empty(),
+        "both heapsort sift_down loops must lower to rotated 2-child LoadScaled(offset+4) + 3×CmpSelect fall-through loops (found {sift_2child_hdrs}, non_linear={non_linear:?})"
     );
 }
 
@@ -4993,6 +5005,7 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
         br_tables: vec![],
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
     };
@@ -5114,6 +5127,7 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
         br_tables: vec![],
         early_pruned: 0,
         wide_chains: Vec::new(),
+        outer_simd_loops: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
     };
@@ -8740,4 +8754,1450 @@ fn x64_scalar_gap_audit_regressions() {
             }
         }
     }
+}
+
+/// Pillar 1 tests:
+/// - `V128Shift` constant-immediate lowering across all 8 lane-shift opcodes & modulo masks (`0, 1, 15, 16, 31, 32, 63, 64, -1`)
+/// - `V128_UN_I32X4_EXTEND_LOW_I8X16_U` (`vpmovzxbd`/`pmovzxbd`) fusion for both extend-chain AND 4-lane extract+splat/replace
+///   plus `GvnKey::V128Un` deduplication
+/// - Variable-stride 4× loop unrolling (`UnrollStep::VarInc`) with wrap-around boundary edge cases (`u32::MAX` near-wrap, step=0, remainders)
+#[test]
+fn x64_final_stretch_p1_simd_shift_pmovzxbd_and_var_stride_unroll() {
+    use super::ir::{Op, V128_UN_I32X4_EXTEND_LOW_I8X16_U};
+    use super::lower::TargetIsa;
+
+    let enc_simd_op = |buf: &mut Vec<u8>, op: u32| {
+        buf.push(0xfd);
+        leb_u32(buf, op);
+    };
+
+    // f0(arg: i32) -> i32: tests both `vpmovzxbd` patterns on the SAME vector (GVN must deduplicate
+    // to ONE `V128Un(0xfe01)`) AND all 8 constant-immediate SIMD shifts including edge counts!
+    let mut b0 = Vec::new();
+    // Load 4 bytes from mem[0] (write `arg` and `arg ^ 0x5a3c91e7` into mem[0..8] first).
+    b0.extend_from_slice(&[0x41, 0, 0x20, 0, 0x36, 2, 0]); // mem[0] = arg
+    b0.push(0x41);
+    b0.push(4);
+    b0.push(0x20);
+    b0.push(0);
+    b0.push(0x41);
+    leb_i32(&mut b0, 0x5a3c_91e7u32 as i32);
+    b0.extend_from_slice(&[0x73, 0x36, 2, 0]); // mem[4] = arg ^ 0x5a3c91e7
+    // local 1 (v128) = v128.load(0)
+    b0.push(0x41);
+    b0.push(0);
+    enc_simd_op(&mut b0, 0); // v128.load
+    b0.extend_from_slice(&[2, 0, 0x21, 1]);
+    // Pattern A: i32x4.splat(i8x16.extract_lane_u 0) + replace_lane 1,2,3 -> local 2 (v128)
+    b0.extend_from_slice(&[0x20, 1]);
+    enc_simd_op(&mut b0, 22); // i8x16.extract_lane_u 0
+    b0.push(0);
+    enc_simd_op(&mut b0, 17); // i32x4.splat
+    for lane in 1u8..4 {
+        b0.extend_from_slice(&[0x20, 1]);
+        enc_simd_op(&mut b0, 22); // i8x16.extract_lane_u
+        b0.push(lane);
+        enc_simd_op(&mut b0, 28); // i32x4.replace_lane
+        b0.push(lane);
+    }
+    b0.extend_from_slice(&[0x21, 2]);
+    // Pattern B: i32x4.extend_low_i16x8_u(i16x8.extend_low_i8x16_u(local 1)) -> local 3 (v128)
+    // Must fuse to V128Un(0xfe01) AND GVN-deduplicate with local 2!
+    b0.extend_from_slice(&[0x20, 1]);
+    enc_simd_op(&mut b0, 137); // i16x8.extend_low_i8x16_u (0xfd89)
+    enc_simd_op(&mut b0, 169); // i32x4.extend_low_i16x8_u (0xfda9)
+    b0.extend_from_slice(&[0x21, 3]);
+    // Apply constant-immediate shifts: shl 31 -> shr_s 31 -> shr_u 5 -> i16x8.shl 0 (elided!)
+    // -> i16x8.shr_s 19 (masks to 3) -> i16x8.shr_u 32 (masks to 0!) -> i64x2.shl 65 (masks to 1)
+    // -> i64x2.shr_u -1 (masks to 63).
+    b0.extend_from_slice(&[0x20, 2]);
+    for &(sop, cnt) in &[
+        (171u32, 31i32), // i32x4.shl
+        (172, 31),       // i32x4.shr_s
+        (173, 5),        // i32x4.shr_u
+        (139, 0),        // i16x8.shl 0
+        (140, 19),       // i16x8.shr_s 19 -> 3
+        (141, 32),       // i16x8.shr_u 32 -> 0
+        (203, 65),       // i64x2.shl 65 -> 1
+        (205, -1),       // i64x2.shr_u -1 -> 63
+    ] {
+        b0.push(0x41);
+        leb_i32(&mut b0, cnt);
+        enc_simd_op(&mut b0, sop);
+    }
+    b0.extend_from_slice(&[0x20, 3]);
+    enc_simd_op(&mut b0, 174); // i32x4.add
+    b0.extend_from_slice(&[0x21, 2]);
+    // Sum all 4 i32 lanes of local 2.
+    b0.extend_from_slice(&[0x20, 2]);
+    enc_simd_op(&mut b0, 27); // i32x4.extract_lane 0
+    b0.push(0);
+    for lane in 1u8..4 {
+        b0.extend_from_slice(&[0x20, 2]);
+        enc_simd_op(&mut b0, 27);
+        b0.push(lane);
+        b0.push(0x6a); // i32.add
+    }
+
+    // f1(packed: i32) -> i32: variable-stride arithmetic loop `i = start; while i <u lim { acc += i; i += step }`
+    // Packed input selects `(start, lim, step)` test cases including near-u32::MAX boundaries!
+    // Use 3 separate helpers? Easier: f1(mode) -> i32 where mode selects `(start, lim, step)`:
+    // mode 0: (0, 257, 3)         -> dynamic unroll + rem
+    // mode 1: (5, 1000, 7)        -> dynamic unroll + rem
+    // mode 2: (10, 10, 0)         -> step = 0, 0 iters (must fail Guard 1 and exit via scalar)
+    // mode 3: (0xffff_fff8, 0xffff_ffff, 1) -> L == 2^32 - 1, S == 1 (passes Guard 3!)
+    // mode 4: (0xffff_fff4, 0xffff_fffe, 2) -> L == 2^32 - 2, S == 2 (L == 0 - S boundary!)
+    // mode 5: (0xffff_fff5, 0xffff_ffff, 2) -> L == 2^32 - 1, S == 2 (fails Guard 3 -> scalar!)
+    // mode 6: (0, 3, 1)           -> L < 4 (fails Guard 2 -> scalar)
+    // mode 7: (2, 100, 30)        -> S > L/4 (fails Guard 2 -> scalar)
+    // Wait: f1 takes (start, lim, step) inside mem[16..28] set by a tiny helper, OR just decode `mode`
+    // into `(local 1=i, local 2=lim, local 3=step)` via simple branches! Even cleaner: use a
+    // non-inlined (or directly exported) 3-param internal helper? No, `bench`/`oracle_driver` calls
+    // `(i32) -> i32`, so decoding `mode` into locals `(i, lim, step)` in `f1` works cleanly and
+    // keeps `lim` and `step` dynamic loop-invariants!
+    let mut b1 = Vec::new();
+    // Write 8 test triples `(start, lim, step)` into mem[64..] and load by `mode & 7`.
+    let cases: [(u32, u32, u32); 8] = [
+        (0, 257, 3),
+        (5, 1000, 7),
+        (10, 10, 0),
+        (0xffff_fff8, 0xffff_ffff, 1),
+        (0xffff_fff4, 0xffff_fffe, 2),
+        (0xffff_fff5, 0xffff_ffff, 2),
+        (0, 3, 1),
+        (2, 100, 30),
+    ];
+    for (ci, &(st, lm, sp)) in cases.iter().enumerate() {
+        let base = 64 + ci * 12;
+        for (k, val) in [st, lm, sp].iter().enumerate() {
+            b1.push(0x41);
+            leb_i32(&mut b1, (base + k * 4) as i32);
+            b1.push(0x41);
+            leb_i32(&mut b1, *val as i32);
+            b1.extend_from_slice(&[0x36, 2, 0]);
+        }
+    }
+    // local 4 = 64 + (arg & 7) * 12 (64 in signed LEB128 is [0xc0, 0x00])
+    b1.extend_from_slice(&[
+        0x20, 0, 0x41, 7, 0x71, 0x41, 12, 0x6c, 0x41, 0xc0, 0x00, 0x6a, 0x21, 4,
+    ]);
+    // local 1 = start, local 2 = lim, local 3 = step, local 5 = acc = 0
+    b1.extend_from_slice(&[0x20, 4, 0x28, 2, 0, 0x21, 1]);
+    b1.extend_from_slice(&[0x20, 4, 0x28, 2, 4, 0x21, 2]);
+    b1.extend_from_slice(&[0x20, 4, 0x28, 2, 8, 0x21, 3]);
+    b1.extend_from_slice(&[0x41, 0, 0x21, 5]);
+    // if start <u lim { do { acc = acc*31 + i; i += step; } while i <u lim }
+    b1.extend_from_slice(&[
+        0x20, 1, 0x20, 2, 0x49, 0x04, 0x40, // if i <u lim
+        0x03, 0x40, // loop
+        0x20, 5, 0x41, 31, 0x6c, 0x20, 1, 0x6a, 0x21, 5, // acc = acc * 31 + i
+        0x20, 1, 0x20, 3, 0x6a, 0x22, 1, // i = i + step
+        0x20, 2, 0x49, 0x0d, 0, // br_if 0 (i <u lim)
+        0x0b, 0x0b, // end loop, end if
+        0x20, 5, // return acc
+    ]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[("simd_f", 0, 0), ("var_unroll", 0, 1), ("memory", 2, 0)]),
+        code_sec(&[enc_body(&[(3, 0x7b)], &b0), enc_body(&[(5, 0x7f)], &b1)]),
+    ]);
+
+    // 1. Verify Stage 2 IR: f0 has EXACTLY ONE `V128Un(V128_UN_I32X4_EXTEND_LOW_I8X16_U)` (fused + GVN-deduped!)
+    //    and f1 has 4× unrolled variable-stride loop (4× `I32BinImm(Mul, _, 31)` in one block)!
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2(ir, &module, &eff, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+    }
+    let zxbd_cnt: usize = irs[0]
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| {
+            matches!(
+                i.op,
+                Op::V128Un {
+                    op: V128_UN_I32X4_EXTEND_LOW_I8X16_U,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        zxbd_cnt, 1,
+        "f0 must fuse both patterns and GVN-deduplicate to exactly 1 V128_UN_I32X4_EXTEND_LOW_I8X16_U"
+    );
+    let has_4x_var_unroll = irs[1].blocks.iter().any(|bb| {
+        bb.is_loop_header
+            && bb
+                .insts
+                .iter()
+                .filter(|i| matches!(i.op, Op::I32BinImm(super::ir::IntBinOp::Mul, _, 31)))
+                .count()
+                == 4
+    });
+    assert!(
+        has_4x_var_unroll,
+        "f1 dynamic variable-stride loop must be 4× unrolled by unroll_counted_loops_4x"
+    );
+
+    // 2. Compile for x86-64-v2 (SSE2/SSE4.1), x86-64-v3 (AVX2), and x86-64-v4 (AVX-512) and check
+    //    disasm + native oracle parity!
+    let isa_v2 = TargetIsa::default();
+    let isa_v3 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: false,
+    };
+    let isa_v4 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: true,
+    };
+    let mk_opts = |isa: TargetIsa| super::X64CompileOptions {
+        isa,
+        verify: true,
+        ..Default::default()
+    };
+    let so_v2 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v2)).unwrap();
+    let so_v3 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v3)).unwrap();
+    let so_v4 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v4)).unwrap();
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let root = crate::build::create_fresh_test_root("wtime-aot-p1-parity");
+        let disasm_so = |name: &str, bytes: &[u8]| -> String {
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let out = std::process::Command::new("objdump")
+                .args(["-d", "-M", "intel"])
+                .arg(&p)
+                .output()
+                .expect("objdump must succeed");
+            assert!(out.status.success());
+            let txt = String::from_utf8(out.stdout).unwrap();
+            assert!(!txt.contains("(bad)"), "{name} has (bad) disasm:\n{txt}");
+            txt
+        };
+        let d_v2 = disasm_so("v2.so", &so_v2);
+        let d_v3 = disasm_so("v3.so", &so_v3);
+        let _d_v4 = disasm_so("v4.so", &so_v4);
+        assert!(d_v2.contains("pmovzxbd"), "v2 must emit pmovzxbd");
+        assert!(d_v2.contains("pslld"), "v2 must emit immediate pslld");
+        assert!(d_v3.contains("vpmovzxbd"), "v3 must emit vpmovzxbd");
+        assert!(d_v3.contains("vpslld"), "v3 must emit immediate vpslld");
+        assert!(d_v3.contains("vpsrad"), "v3 must emit immediate vpsrad");
+
+        if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+            use std::io::Write as _;
+            use std::process::{Command, Stdio};
+
+            let calls: Vec<(&str, u32)> = vec![
+                ("simd_f", 0x0000_0000),
+                ("simd_f", 0x80ff_017f),
+                ("simd_f", 0xdead_beef),
+                ("var_unroll", 0),
+                ("var_unroll", 1),
+                ("var_unroll", 2),
+                ("var_unroll", 3),
+                ("var_unroll", 4),
+                ("var_unroll", 5),
+                ("var_unroll", 6),
+                ("var_unroll", 7),
+            ];
+            let cfg = wtime_runtime::Config {
+                features: super::module::x64_validate_features(),
+                limits: super::module::x64_validate_limits(),
+            };
+            let engine = wtime_runtime::Engine::new(cfg).unwrap();
+            let rt_mod = engine.compile(&wasm).unwrap();
+            let mut store = wtime_runtime::Store::new(&engine);
+            let inst = wtime_runtime::Linker::new(&engine)
+                .instantiate(&mut store, &rt_mod)
+                .unwrap();
+            let mut expected = Vec::new();
+            for &(name, arg) in &calls {
+                let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+                    unreachable!()
+                };
+                match store.invoke(f, &[wtime_runtime::Value::I32(arg as i32)]) {
+                    Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                        wtime_runtime::Value::I32(v) => expected.push(v as u32),
+                        other => panic!("{other:?}"),
+                    },
+                    other => panic!("{name}({arg:#x}) unexpected {other:?}"),
+                }
+            }
+            let mut script = String::new();
+            for &(name, arg) in &calls {
+                script.push_str(&format!("call {name} {arg:x}\n"));
+            }
+            let mut variants: Vec<&str> = vec!["v2.so"];
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                variants.push("v3.so");
+            }
+            if std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512dq")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+            {
+                variants.push("v4.so");
+            }
+            for vname in variants {
+                let p = root.0.join(vname);
+                let mut child = Command::new(driver)
+                    .arg(&p)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(script.as_bytes())
+                    .unwrap();
+                let out = child.wait_with_output().unwrap();
+                assert!(out.status.success(), "{vname} failed: {out:?}");
+                let stdout = std::str::from_utf8(&out.stdout).unwrap();
+                let mut lines = stdout.lines();
+                assert_eq!(lines.next(), Some("NEW_OK"));
+                for (idx, (&(cname, arg), &exp)) in calls.iter().zip(&expected).enumerate() {
+                    let line = lines.next().unwrap();
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    let rc: i32 = parts[1].parse().unwrap();
+                    let res = u64::from_str_radix(parts[2], 16).unwrap();
+                    let trap: u8 = parts[3].parse().unwrap();
+                    assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(exp)),
+                        "{vname} #{idx} {cname}({arg:#x}) mismatch"
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4);
+}
+
+/// Pillar 2 tests:
+/// - Pure nested `f32` outer-loop SIMD vectorization (`Op::SimdOuterLoop`) across SSE2 (`v2`),
+///   AVX2 (`v3`), AVX-512 (`v4`), and Spectre (must NOT emit `SimdOuterLoop`)
+/// - Tests 2×-unrolled Mandelbrot-style loop (constant `0..35` non-multiple of 4/8/16!) AND
+///   dynamic-bound loop testing trip counts `0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33`, plus
+///   **NaN, +Inf, -Inf, ±0.0** inputs across ALL 6 FP break comparisons (`gt`, `ge`, `lt`, `le`, `eq`, `ne`),
+///   both `break_on_true = true` and `break_on_true = false`, and caller `Xmm8..Xmm13` preservation!
+#[test]
+fn x64_final_stretch_p2_outer_simd_loop_disasm_nan_and_parity() {
+    use super::ir::Op;
+    use super::lower::TargetIsa;
+
+    let enc_f32 = |buf: &mut Vec<u8>, v: f32| {
+        buf.push(0x43);
+        buf.extend_from_slice(&v.to_bits().to_le_bytes());
+    };
+
+    // Helper: builds a pure nested f32 loop `(end_or_mode: i32) -> i32` where `px in start..end`,
+    // `x0 = f32.convert_i32_u(px) * 0.1 - 1.5 + cy`, running an inner loop up to `max_it = 20`:
+    //   `if cmp_op(x, thresh) { break with it }` (if `break_on_true`), or `if !cmp_op { break }`
+    //   `x = x * x + x0; it += 1`
+    // When `arg == -1`, sets `cy = f32::NAN`; when `arg == -2`, `cy = f32::INFINITY`;
+    // when `arg == -3`, `cy = -0.0`; otherwise `end = arg` (with `start = 0`, `cy = 0.05`)!
+    // Wait: for `arg < 0`, we fix `end = 19` (tests partial tails across W=4/8/16 with NaN/Inf/-0.0!).
+    let make_cmp_loop_body = |cmp_opcode: u8, break_on_true: bool, thresh: f32| -> Vec<u8> {
+        // param 0: mode_or_end (i32)
+        // locals: 1=end(i32), 2=px(i32), 3=total(i32), 4=it(i32), 5=cy(f32), 6=x0(f32), 7=x(f32)
+        let mut b = Vec::new();
+        // if mode == -1 -> cy = NaN, end = 19; else if mode == -2 -> cy = +Inf, end = 19;
+        // else if mode == -3 -> cy = -0.0, end = 19; else -> cy = 0.05, end = mode
+        b.extend_from_slice(&[0x20, 0, 0x41, 0x7f, 0x46, 0x04, 0x40]); // if arg == -1
+        enc_f32(&mut b, f32::NAN);
+        b.extend_from_slice(&[0x21, 5, 0x41, 19, 0x21, 1, 0x05]);
+        b.extend_from_slice(&[0x20, 0, 0x41, 0x7e, 0x46, 0x04, 0x40]); // if arg == -2
+        enc_f32(&mut b, f32::INFINITY);
+        b.extend_from_slice(&[0x21, 5, 0x41, 19, 0x21, 1, 0x05]);
+        b.extend_from_slice(&[0x20, 0, 0x41, 0x7d, 0x46, 0x04, 0x40]); // if arg == -3
+        enc_f32(&mut b, -0.0f32);
+        b.extend_from_slice(&[0x21, 5, 0x41, 19, 0x21, 1, 0x05]);
+        enc_f32(&mut b, 0.05f32);
+        b.extend_from_slice(&[0x21, 5, 0x20, 0, 0x21, 1, 0x0b, 0x0b, 0x0b]);
+
+        // if end >u 0: bottom-tested outer loop `px = 0..end`
+        b.extend_from_slice(&[
+            0x41, 0, 0x21, 3, 0x20, 1, 0x45, 0x04, 0x40, 0x41, 0, 0x0f, 0x0b,
+        ]);
+        b.extend_from_slice(&[0x41, 0, 0x21, 2]);
+        // loop $outer
+        b.extend_from_slice(&[0x03, 0x40]);
+        // x0 = (f32)px * 0.1 - 1.5 + cy
+        b.extend_from_slice(&[0x20, 2, 0xb3]); // f32.convert_i32_u
+        enc_f32(&mut b, 0.1f32);
+        b.push(0x94); // f32.mul
+        enc_f32(&mut b, -1.5f32);
+        b.push(0x92); // f32.add
+        b.extend_from_slice(&[0x20, 5, 0x92, 0x21, 6]); // + cy -> x0
+        b.extend_from_slice(&[0x41, 0, 0x21, 4]); // it = 0
+        b.extend_from_slice(&[0x20, 6, 0x21, 7]); // x = x0
+        // block $inner_done (result i32)
+        b.extend_from_slice(&[0x02, 0x7f, 0x03, 0x40]);
+        // Check `cmp_opcode(x, thresh)`
+        b.extend_from_slice(&[0x20, 7]);
+        enc_f32(&mut b, thresh);
+        b.push(cmp_opcode);
+        if !break_on_true {
+            b.push(0x45); // i32.eqz -> invert branch condition (tests break_on_true = false!)
+        }
+        b.extend_from_slice(&[0x04, 0x40, 0x20, 4, 0x0c, 2, 0x0b]); // if break -> br $inner_done(it)
+        // x = x * x + x0; it += 1; if it != 20 -> br $inner; else br $inner_done(20)
+        b.extend_from_slice(&[
+            0x20, 7, 0x20, 7, 0x94, 0x20, 6, 0x92, 0x21, 7, 0x20, 4, 0x41, 1, 0x6a, 0x22, 4, 0x41,
+            20, 0x47, 0x0d, 0, 0x0b, 0x41, 20,
+            0x0b, // end loop, fallthrough 20, end block -> leaves res_it on stack
+        ]);
+        // total += res_it; px += 1; if px != end -> br $outer
+        b.extend_from_slice(&[
+            0x20, 3, 0x6a, 0x21, 3, 0x20, 2, 0x41, 1, 0x6a, 0x22, 2, 0x20, 1, 0x47, 0x0d, 0,
+            0x0b, // end $outer
+            0x20, 3,
+        ]);
+        b
+    };
+
+    // Build a 2×-unrolled Mandelbrot-style constant-bound loop `0..35` (non-multiple of 4, 8, 16!)
+    // plus a caller function that holds 6 live f32 values across a call to `mandel_35` to verify
+    // `Xmm8..Xmm13` callee-save preservation!
+    let mut bm = Vec::new();
+    // param 0: py (i32)
+    // locals: 1=px(i32), 2=total(i32), 3=it(i32), 4=cy(f32), 5=cx(f32), 6=zr(f32), 7=zi(f32), 8=zr2(f32), 9=zi2(f32), 10=zr1(f32), 11=zi1(f32)
+    bm.extend_from_slice(&[0x20, 0, 0xb3]);
+    enc_f32(&mut bm, 0.03f32);
+    bm.push(0x94);
+    enc_f32(&mut bm, -0.5f32);
+    bm.extend_from_slice(&[0x92, 0x21, 4]); // cy
+    bm.extend_from_slice(&[0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2]);
+    bm.extend_from_slice(&[0x03, 0x40]); // $outer (0..35)
+    bm.extend_from_slice(&[0x20, 1, 0xb3]);
+    enc_f32(&mut bm, 0.08f32);
+    bm.push(0x94);
+    enc_f32(&mut bm, -2.0f32);
+    bm.extend_from_slice(&[0x92, 0x21, 5]); // cx
+    bm.extend_from_slice(&[0x41, 0, 0x21, 3]);
+    enc_f32(&mut bm, 0.0);
+    bm.extend_from_slice(&[0x21, 6]);
+    enc_f32(&mut bm, 0.0);
+    bm.extend_from_slice(&[0x21, 7]);
+    bm.extend_from_slice(&[0x02, 0x7f, 0x03, 0x40]); // block $done(i32) { loop $in
+    // Step 0: zr2 = zr*zr, zi2 = zi*zi; if zr2 + zi2 > 4.0 -> br $done(it)
+    bm.extend_from_slice(&[
+        0x20, 6, 0x20, 6, 0x94, 0x21, 8, 0x20, 7, 0x20, 7, 0x94, 0x21, 9, 0x20, 8, 0x20, 9, 0x92,
+    ]);
+    enc_f32(&mut bm, 4.0);
+    bm.extend_from_slice(&[0x5e, 0x04, 0x40, 0x20, 3, 0x0c, 2, 0x0b]); // f32.gt
+    // Step 1: zi1 = (zr + zr)*zi + cy; zr1 = (zr2 - zi2) + cx; if zr1^2 + zi1^2 > 4.0 -> br $done(it + 1)
+    bm.extend_from_slice(&[
+        0x20, 6, 0x20, 6, 0x92, 0x20, 7, 0x94, 0x20, 4, 0x92, 0x21, 11, 0x20, 8, 0x20, 9, 0x93,
+        0x20, 5, 0x92, 0x21, 10, 0x20, 10, 0x20, 10, 0x94, 0x21, 8, 0x20, 11, 0x20, 11, 0x94, 0x21,
+        9, 0x20, 8, 0x20, 9, 0x92,
+    ]);
+    enc_f32(&mut bm, 4.0);
+    bm.extend_from_slice(&[0x5e, 0x04, 0x40, 0x20, 3, 0x41, 1, 0x6a, 0x0c, 2, 0x0b]);
+    // Update zr, zi; it += 2; if it != 40 -> br $in; else br $done(40)
+    bm.extend_from_slice(&[
+        0x20, 8, 0x20, 9, 0x93, 0x20, 5, 0x92, 0x21, 6, 0x20, 10, 0x20, 10, 0x92, 0x20, 11, 0x94,
+        0x20, 4, 0x92, 0x21, 7, 0x20, 3, 0x41, 2, 0x6a, 0x22, 3, 0x41, 40, 0x47, 0x0d, 0, 0x0b,
+        0x41, 40, 0x0b, // end loop, fallthrough 40, end block
+        0x20, 2, 0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x41, 35, 0x47, 0x0d, 0, 0x0b,
+        0x20, 2,
+    ]);
+
+    // Caller `call_mandel_preserve(py)` holding 6 live f32s across `call mandel_35` to test Xmm8..13 save/restore!
+    let mut bc = Vec::new();
+    // locals 1..=6 (f32), 7 (i32)
+    for k in 0..6u8 {
+        bc.extend_from_slice(&[0x20, 0, 0x41, k + 1, 0x6a, 0xb2]); // f32.convert_i32_s(py + k + 1)
+        enc_f32(&mut bc, 0.25f32);
+        bc.extend_from_slice(&[0x94, 0x21, k + 1]);
+    }
+    bc.extend_from_slice(&[0x20, 0, 0x10, 0, 0x21, 7]); // call f0 (mandel_35)
+    // Fold all 6 preserved f32s into return i32!
+    bc.extend_from_slice(&[0x20, 7]);
+    for k in 1..=6u8 {
+        bc.extend_from_slice(&[0x20, k, 0xbc, 0x73]); // i32.reinterpret_f32, xor
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        export_sec(&[
+            ("mandel_35", 0, 0),
+            ("call_preserve", 0, 1),
+            ("cmp_gt", 0, 2),
+            ("cmp_ge", 0, 3),
+            ("cmp_lt", 0, 4),
+            ("cmp_le", 0, 5),
+            ("cmp_eq", 0, 6),
+            ("cmp_ne", 0, 7),
+            ("cmp_not_le", 0, 8),
+        ]),
+        code_sec(&[
+            enc_body(&[(3, 0x7f), (8, 0x7d)], &bm),
+            enc_body(&[(6, 0x7d), (1, 0x7f)], &bc),
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x5e, true, 4.0),
+            ), // f32.gt
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x60, true, 4.0),
+            ), // f32.ge
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x5d, true, -0.5),
+            ), // f32.lt
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x5f, true, -0.5),
+            ), // f32.le
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x5b, true, 0.0),
+            ), // f32.eq
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x5c, true, 0.0),
+            ), // f32.ne
+            enc_body(
+                &[(4, 0x7f), (3, 0x7d)],
+                &make_cmp_loop_body(0x5f, false, 4.0),
+            ), // !(x <= 4.0)
+        ]),
+    ]);
+
+    // 1. Verify Stage 2 IR emits `Op::SimdOuterLoop` on `mandel_35` AND all 7 `cmp_*` functions,
+    //    and does NOT emit `Op::SimdOuterLoop` under `--spectre-mitigations`!
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2(ir, &module, &eff, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+    }
+    for fi in [0usize, 2, 3, 4, 5, 6, 7, 8] {
+        let has_outer = irs[fi]
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| matches!(i.op, Op::SimdOuterLoop { .. }));
+        assert!(has_outer, "func {fi} must emit Op::SimdOuterLoop");
+    }
+
+    let mut irs_sp: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let mut sc = super::opt::Stage2Scratch::default();
+    for ir in &mut irs_sp {
+        super::opt::optimize_func_stage2_with_options(ir, &module, &eff, true, None, &mut sc)
+            .unwrap();
+        assert!(
+            !ir.blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(|i| matches!(i.op, Op::SimdOuterLoop { .. })),
+            "Spectre mode must not emit Op::SimdOuterLoop"
+        );
+    }
+
+    // 2. Compile v2, v3, v4, and Spectre `.so`s + verify disasm + full native oracle parity!
+    let isa_v2 = TargetIsa::default();
+    let isa_v3 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: false,
+    };
+    let isa_v4 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: true,
+    };
+    let mk_opts = |isa: TargetIsa, sp: bool| super::X64CompileOptions {
+        isa,
+        spectre_mitigations: sp,
+        verify: true,
+        ..Default::default()
+    };
+    let so_v2 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v2, false)).unwrap();
+    let so_v3 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v3, false)).unwrap();
+    let so_v4 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v4, false)).unwrap();
+    let so_sp = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v2, true)).unwrap();
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let root = crate::build::create_fresh_test_root("wtime-aot-p2-parity");
+        let disasm_so = |name: &str, bytes: &[u8]| -> String {
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let out = std::process::Command::new("objdump")
+                .args(["-d", "-M", "intel"])
+                .arg(&p)
+                .output()
+                .expect("objdump must succeed");
+            assert!(out.status.success());
+            let txt = String::from_utf8(out.stdout).unwrap();
+            assert!(!txt.contains("(bad)"), "{name} has (bad) disasm:\n{txt}");
+            txt
+        };
+        let d_v2 = disasm_so("v2.so", &so_v2);
+        let d_v3 = disasm_so("v3.so", &so_v3);
+        let d_v4 = disasm_so("v4.so", &so_v4);
+        let _d_sp = disasm_so("sp.so", &so_sp);
+        assert!(d_v2.contains("movmskps"), "v2 must emit SSE2 movmskps");
+        assert!(d_v3.contains("vptest"), "v3 must emit AVX2 vptest");
+        assert!(d_v4.contains("kortestw"), "v4 must emit AVX-512 kortestw");
+        assert!(
+            d_v4.contains("vcmpnlt_uqps") || d_v4.contains("c2 cf 15"),
+            "v4 must emit quiet unordered vcmpnlt_uqps (0x15) for NaN-exact break-if-gt"
+        );
+
+        if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+            use std::io::Write as _;
+            use std::process::{Command, Stdio};
+
+            let mut calls: Vec<(&str, i32)> = vec![
+                ("mandel_35", 0),
+                ("mandel_35", 7),
+                ("mandel_35", 19),
+                ("call_preserve", 3),
+                ("call_preserve", 15),
+            ];
+            for cname in [
+                "cmp_gt",
+                "cmp_ge",
+                "cmp_lt",
+                "cmp_le",
+                "cmp_eq",
+                "cmp_ne",
+                "cmp_not_le",
+            ] {
+                for &arg in &[0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, -1, -2, -3] {
+                    calls.push((cname, arg));
+                }
+            }
+            let cfg = wtime_runtime::Config {
+                features: super::module::x64_validate_features(),
+                limits: super::module::x64_validate_limits(),
+            };
+            let engine = wtime_runtime::Engine::new(cfg).unwrap();
+            let rt_mod = engine.compile(&wasm).unwrap();
+            let mut store = wtime_runtime::Store::new(&engine);
+            let inst = wtime_runtime::Linker::new(&engine)
+                .instantiate(&mut store, &rt_mod)
+                .unwrap();
+            let mut expected = Vec::new();
+            for &(name, arg) in &calls {
+                let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+                    unreachable!()
+                };
+                match store.invoke(f, &[wtime_runtime::Value::I32(arg)]) {
+                    Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                        wtime_runtime::Value::I32(v) => expected.push(v as u32),
+                        other => panic!("{other:?}"),
+                    },
+                    other => panic!("{name}({arg}) unexpected {other:?}"),
+                }
+            }
+            let mut script = String::new();
+            for &(name, arg) in &calls {
+                script.push_str(&format!("call {name} {:x}\n", arg as u32));
+            }
+            let mut variants: Vec<&str> = vec!["v2.so", "sp.so"];
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                variants.push("v3.so");
+            }
+            if std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512dq")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+            {
+                variants.push("v4.so");
+            }
+            for vname in variants {
+                let p = root.0.join(vname);
+                let mut child = Command::new(driver)
+                    .arg(&p)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(script.as_bytes())
+                    .unwrap();
+                let out = child.wait_with_output().unwrap();
+                assert!(out.status.success(), "{vname} failed: {out:?}");
+                let stdout = std::str::from_utf8(&out.stdout).unwrap();
+                let mut lines = stdout.lines();
+                assert_eq!(lines.next(), Some("NEW_OK"));
+                for (idx, (&(cname, arg), &exp)) in calls.iter().zip(&expected).enumerate() {
+                    let line = lines.next().unwrap();
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    let rc: i32 = parts[1].parse().unwrap();
+                    let res = u64::from_str_radix(parts[2], 16).unwrap();
+                    let trap: u8 = parts[3].parse().unwrap();
+                    assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(exp)),
+                        "{vname} #{idx} {cname}({arg}) mismatch"
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4, so_sp);
+}
+
+/// Pillar 3 tests:
+/// - Binary-heap `sift_down` optimization (`optimize_sift_down_loops`) covering max-heap (`LtS`)
+///   and min-heap (`GtS`), exact left-biased tie-breaking (`lv == rv`, `root == lv`, `root == rv`),
+///   `i32::MIN`/`i32::MAX` extremes, sizes `0, 1, 2, 3, 4, 5, 7, 16, 17, 2048`, and OOB fallback traps!
+#[test]
+fn x64_final_stretch_p3_sift_down_ties_minmax_edges_and_parity() {
+    use super::lower::TargetIsa;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/heapsort_i32.wasm");
+    let hs_wasm = std::fs::read(&path).expect("read heapsort_i32.wasm");
+
+    // Also build a dedicated tie-breaking + extreme-value + min-heap `sift_down` test module:
+    // `test_sift(case_id: i32) -> i32`:
+    //   0: left == right child tie `[1, 10, 10, 99, 50, 5, 5]` (left wins tie -> descends into 99!)
+    //   1: all equal `[42; 7]` (0 swaps)
+    //   2: i32::MIN / i32::MAX extremes `[MIN, MAX, MIN+1, MAX-1, 0, -1, MAX]`
+    //   3: 1-child leaf only `end = 2`, `[1, 9]`
+    //   4: 2-child -> 1-child leaf `end = 4`, `[1, 5, 4, 9]`
+    //   5: `end = 1`, `[77]` (0 children, 0 swaps)
+    //   6: `end = 0` (0 children, 0 swaps)
+    //   7: OOB `end = 20000` (must trap via slow path!)
+    let datasets: &[(&[i32], i32)] = &[
+        (&[1, 10, 10, 99, 50, 5, 5], 7),
+        (&[42, 42, 42, 42, 42, 42, 42], 7),
+        (
+            &[
+                i32::MIN,
+                i32::MAX,
+                i32::MIN + 1,
+                i32::MAX - 1,
+                0,
+                -1,
+                i32::MAX,
+            ],
+            7,
+        ),
+        (&[1, 9, 0, 0, 0, 0, 0], 2),
+        (&[1, 5, 4, 9, 0, 0, 0], 4),
+        (&[77, 99, 88, 0, 0, 0, 0], 1),
+        (&[55, 66, 77, 0, 0, 0, 0], 0),
+        (&[1, 2, 3, 4, 5, 6, 7], 20000),
+    ];
+    let make_sift_body = |cmp_op: u8| -> Vec<u8> {
+        let mut b_tie = Vec::new();
+        for (ci, &(vals, end_v)) in datasets.iter().enumerate() {
+            b_tie.push(0x20);
+            b_tie.push(0);
+            b_tie.push(0x41);
+            leb_i32(&mut b_tie, ci as i32);
+            b_tie.extend_from_slice(&[0x46, 0x04, 0x40]); // if case == ci
+            for (vi, &v) in vals.iter().enumerate() {
+                b_tie.push(0x41);
+                leb_i32(&mut b_tie, (vi * 4) as i32);
+                b_tie.push(0x41);
+                leb_i32(&mut b_tie, v);
+                b_tie.extend_from_slice(&[0x36, 2, 0x80, 0x80, 0x02]); // offset=32768
+            }
+            b_tie.push(0x41);
+            leb_i32(&mut b_tie, end_v);
+            b_tie.extend_from_slice(&[0x21, 1, 0x0b]); // end = end_v
+        }
+        // Inline sift_down(0, end) matching heapsort_i32.wat (max-heap 0x48 LtS or min-heap 0x4a GtS):
+        b_tie.extend_from_slice(&[
+            0x41, 0, 0x21, 2, // cur = 0
+            0x02, 0x40, 0x03, 0x40, // block $done { loop $sift
+            0x20, 2, 0x41, 1, 0x74, 0x41, 1, 0x6a, 0x22, 3, // child = (cur << 1) + 1
+            0x20, 1, 0x4f, 0x0d, 1, // br_if $done (child >=u end)
+            0x20, 2, 0x21, 4, // swap = cur
+            0x20, 2, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 5, // v_swap = a[cur]
+            0x20, 3, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 6, // v_child = a[child]
+            0x20, 5, 0x20, 6, cmp_op, 0x04, 0x40, // if cmp(v_swap, v_child)
+            0x20, 3, 0x21, 4, 0x20, 6, 0x21, 5, 0x0b, 0x20, 3, 0x41, 1, 0x6a, 0x20, 1, 0x49, 0x04,
+            0x40, // if child+1 <u end
+            0x20, 3, 0x41, 1, 0x6a, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 7, 0x20, 5,
+            0x20, 7, cmp_op, 0x04, 0x40, 0x20, 3, 0x41, 1, 0x6a, 0x21, 4, 0x20, 7, 0x21, 5, 0x0b,
+            0x0b, 0x20, 4, 0x20, 2, 0x46, 0x0d, 1, // br_if $done (swap == cur)
+            0x20, 2, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 8, // tmp = a[cur]
+            0x20, 2, 0x41, 2, 0x74, 0x20, 5, 0x36, 2, 0x80, 0x80, 0x02, // a[cur] = v_swap
+            0x20, 4, 0x41, 2, 0x74, 0x20, 8, 0x36, 2, 0x80, 0x80, 0x02, // a[swap] = tmp
+            0x20, 4, 0x21, 2, 0x0c, 0, 0x0b, 0x0b, // cur = swap; br $sift
+        ]);
+        // Hash all 7 slots so ANY single element mismatch (including wrong tie-break branch!) fails!
+        b_tie.extend_from_slice(&[0x41, 0, 0x21, 8]);
+        for vi in 0..7i32 {
+            b_tie.extend_from_slice(&[0x20, 8, 0x41, 31, 0x6c, 0x41]);
+            leb_i32(&mut b_tie, vi * 4);
+            b_tie.extend_from_slice(&[0x28, 2, 0x80, 0x80, 0x02, 0x73, 0x21, 8]);
+        }
+        b_tie.extend_from_slice(&[0x20, 8]);
+        b_tie
+    };
+    let b_max = make_sift_body(0x48); // i32.lt_s (max-heap)
+    let b_min = make_sift_body(0x4a); // i32.gt_s (min-heap)
+
+    let tie_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[
+            ("test_sift", 0, 0),
+            ("test_sift_min", 0, 1),
+            ("memory", 2, 0),
+        ]),
+        code_sec(&[
+            enc_body(&[(8, 0x7f)], &b_max),
+            enc_body(&[(8, 0x7f)], &b_min),
+        ]),
+    ]);
+
+    // Verify `optimize_sift_down_loops` fires on BOTH max-heap and min-heap in `tie_wasm`!
+    let val = wtime_validate::validate(
+        &tie_wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs = vec![
+        super::ir::lower_wasm_to_ir(val.decoded(), &module, 0).unwrap(),
+        super::ir::lower_wasm_to_ir(val.decoded(), &module, 1).unwrap(),
+    ];
+    let eff = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for (fi, ir) in irs.iter_mut().enumerate() {
+        super::opt::optimize_func_stage2(ir, &module, &eff, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+        assert!(
+            ir.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(
+                i.op,
+                super::ir::Op::LoadScaled {
+                    scale: 4,
+                    offset: 32772,
+                    ..
+                }
+            )),
+            "tie_wasm func {fi} sift_down must trigger optimize_sift_down_loops (LoadScaled offset+4)"
+        );
+    }
+
+    let isa_v2 = TargetIsa::default();
+    let so_sw = super::compile_wasm_to_x64_so(
+        &tie_wasm,
+        &super::X64CompileOptions {
+            isa: isa_v2,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_gp = super::compile_wasm_to_x64_so(
+        &tie_wasm,
+        &super::X64CompileOptions {
+            isa: isa_v2,
+            guard_pages: true,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let hs_sw = super::compile_wasm_to_x64_so(
+        &hs_wasm,
+        &super::X64CompileOptions {
+            isa: isa_v2,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let hs_gp = super::compile_wasm_to_x64_so(
+        &hs_wasm,
+        &super::X64CompileOptions {
+            isa: isa_v2,
+            guard_pages: true,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-p3-parity");
+        let cfg = wtime_runtime::Config {
+            features: super::module::x64_validate_features(),
+            limits: super::module::x64_validate_limits(),
+        };
+        let engine = wtime_runtime::Engine::new(cfg).unwrap();
+
+        // 1. Check all 8 tie/min-max/OOB cases on BOTH max-heap and min-heap in `tie_wasm`.
+        let rt_tie = engine.compile(&tie_wasm).unwrap();
+        let mut store = wtime_runtime::Store::new(&engine);
+        let inst = wtime_runtime::Linker::new(&engine)
+            .instantiate(&mut store, &rt_tie)
+            .unwrap();
+        let mut expected: Vec<(&str, i32, Result<u32, u8>)> = Vec::new();
+        let mut script = String::new();
+        for fname in ["test_sift", "test_sift_min"] {
+            let wtime_runtime::External::Func(f) = inst.export(&store, fname).unwrap() else {
+                unreachable!()
+            };
+            for ci in 0..8i32 {
+                script.push_str(&format!("call {fname} {ci:x}\n"));
+                match store.invoke(f, &[wtime_runtime::Value::I32(ci)]) {
+                    Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                        wtime_runtime::Value::I32(v) => expected.push((fname, ci, Ok(v as u32))),
+                        other => panic!("{other:?}"),
+                    },
+                    Err(e) => {
+                        let code = match e.trap_code {
+                            Some(wtime_types::TrapCode::MemoryOutOfBounds) => 2u8,
+                            other => panic!("{fname} case {ci} unexpected trap {other:?}"),
+                        };
+                        expected.push((fname, ci, Err(code)));
+                    }
+                    other => panic!("{fname} case {ci} unexpected {other:?}"),
+                }
+            }
+        }
+        for (vname, bytes) in [("tie_sw.so", &so_sw), ("tie_gp.so", &so_gp)] {
+            let p = root.0.join(vname);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{vname} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"));
+            for &(fname, ci, exp) in &expected {
+                let line = lines.next().unwrap();
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(v) => assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(v)),
+                        "{vname} {fname} case {ci}"
+                    ),
+                    Err(et) => {
+                        assert_ne!(rc, 0, "{vname} {fname} case {ci} must trap");
+                        assert_eq!(trap, et, "{vname} {fname} case {ci} trap code");
+                    }
+                }
+            }
+        }
+
+        // 2. Check `heapsort_i32.wasm` across small + edge + full sizes (0, 1, 2, 3, 4, 5, 7, 16, 17, 2048).
+        let sizes = [0u32, 1, 2, 3, 4, 5, 7, 16, 17, 2048];
+        let rt_hs = engine.compile(&hs_wasm).unwrap();
+        let mut hstore = wtime_runtime::Store::new(&engine);
+        let hinst = wtime_runtime::Linker::new(&engine)
+            .instantiate(&mut hstore, &rt_hs)
+            .unwrap();
+        let wtime_runtime::External::Func(f_prep) = hinst.export(&hstore, "prepare").unwrap()
+        else {
+            unreachable!()
+        };
+        let wtime_runtime::External::Func(f_run) = hinst.export(&hstore, "run").unwrap() else {
+            unreachable!()
+        };
+        let mut h_exp = Vec::new();
+        let mut h_script = String::new();
+        for &n in &sizes {
+            hstore
+                .invoke(f_prep, &[wtime_runtime::Value::I32(n as i32)])
+                .unwrap();
+            let r = match hstore
+                .invoke(f_run, &[wtime_runtime::Value::I32(n as i32)])
+                .unwrap()
+            {
+                wtime_runtime::RunOutcome::Returned(vals) => match vals[0] {
+                    wtime_runtime::Value::I32(v) => v as u32,
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            };
+            h_exp.push(r);
+            h_script.push_str(&format!("call prepare {n:x}\ncall run {n:x}\n"));
+        }
+        for (vname, bytes) in [("hs_sw.so", &hs_sw), ("hs_gp.so", &hs_gp)] {
+            let p = root.0.join(vname);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(h_script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{vname} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"));
+            for (&n, &exp) in sizes.iter().zip(&h_exp) {
+                let _prep_line = lines.next().unwrap();
+                let run_line = lines.next().unwrap();
+                let parts: Vec<&str> = run_line.split_whitespace().collect();
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                assert_eq!((rc, trap, res), (0, 0, u64::from(exp)), "{vname} n={n}");
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_sw, so_gp, hs_sw, hs_gp);
+}
+
+/// Regression tests for all 5 concrete soundness findings from the independent final-stretch audit:
+/// 1. `optimize_sift_down_loops`: 0-swap early exit (both 2-child and 1-child leaf) must NOT
+///    overwrite `a[init_cur]` when `root_val != a[init_cur]`.
+/// 2. `dominates_sift_bounds`: diamond CFG `if cur <u end { .. } else { .. }` before sift loop
+///    must NOT falsely infer `cur <u end` and must preserve exact OOB trap on `cur = 0x8000_0000`.
+/// 3. `version_dynamic_counted_loops` cloning an enclosing counted loop containing
+///    `Op::SimdOuterLoop` must remap `args: ValRange` (2D row loop storing `SimdOuterLoop` sums).
+/// 4. Sequential multi-loop `vectorize_pure_outer_loops` where Loop 1's `total_next` feeds
+///    Loop 2 must keep `def_op` and SSA dominance valid.
+#[test]
+fn x64_final_stretch_audit_regressions() {
+    use super::ir::Op;
+    use super::lower::TargetIsa;
+
+    let enc_f32 = |buf: &mut Vec<u8>, v: f32| {
+        buf.push(0x43);
+        buf.extend_from_slice(&v.to_bits().to_le_bytes());
+    };
+
+    // f0: `sift_zero_swap(case: i32) -> i32`
+    // end = arg >>u 4 (guarded `<=u 100` BEFORE writing `a[0..3]` so `pre` is a non-empty `Jump`
+    // preheader dominated by `end <=u 100` -> `optimize_sift_down_loops` MUST fire!).
+    // Initializes mem[32768..] = [999, 10, 20], root_val = (arg & 1) ? 5 : 100.
+    // (3<<4):     end=3, root_val=100 (2-child 0-swap -> a[0] MUST remain 999!)
+    // (2<<4):     end=2, root_val=100 (1-child leaf 0-swap -> a[0] MUST remain 999!)
+    // (3<<4) | 1: end=3, root_val=5   (1 swap -> a[0]=20, a[1]=10, a[2]=5!)
+    // locals: 1=end, 2=cur, 3=child, 4=swap, 5=v_swap, 6=v_child, 7=v_right, 8=root_val
+    let mut b0 = Vec::new();
+    b0.extend_from_slice(&[0x20, 0, 0x41, 4, 0x76, 0x21, 1]); // end = arg >>u 4
+    b0.push(0x41);
+    leb_i32(&mut b0, 100);
+    b0.extend_from_slice(&[
+        0x21, 8, // root_val = 100
+        0x20, 0, 0x41, 1, 0x71, 0x04, 0x40, 0x41, 5, 0x21, 8, 0x0b, // if arg & 1 -> 5
+        0x20, 1, 0x41,
+    ]);
+    leb_i32(&mut b0, 100);
+    b0.extend_from_slice(&[0x4b, 0x04, 0x40, 0x41, 0, 0x0f, 0x0b]); // if end >u 100 return 0
+    for (vi, &v) in [999i32, 10, 20].iter().enumerate() {
+        b0.push(0x41);
+        leb_i32(&mut b0, (vi * 4) as i32);
+        b0.push(0x41);
+        leb_i32(&mut b0, v);
+        b0.extend_from_slice(&[0x36, 2, 0x80, 0x80, 0x02]);
+    }
+    // sift_down(0, end) using `root_val` (NOT a[0]) as the hoisted root value:
+    b0.extend_from_slice(&[
+        0x41, 0, 0x21, 2, // cur = 0
+        0x02, 0x40, 0x03, 0x40, // block $done { loop $sift
+        0x20, 2, 0x41, 1, 0x74, 0x41, 1, 0x6a, 0x22, 3, // child = (cur << 1) + 1
+        0x20, 1, 0x4f, 0x0d, 1, // br_if $done (child >=u end)
+        0x20, 2, 0x21, 4, // swap = cur
+        0x20, 8, 0x21, 5, // v_swap = root_val
+        0x20, 3, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 6, // v_child = a[child]
+        0x20, 5, 0x20, 6, 0x48, 0x04, 0x40, // if v_swap <s v_child
+        0x20, 3, 0x21, 4, 0x20, 6, 0x21, 5, 0x0b, 0x20, 3, 0x41, 1, 0x6a, 0x20, 1, 0x49, 0x04,
+        0x40, // if child+1 <u end
+        0x20, 3, 0x41, 1, 0x6a, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 7, 0x20, 5, 0x20,
+        7, 0x48, 0x04, 0x40, 0x20, 3, 0x41, 1, 0x6a, 0x21, 4, 0x20, 7, 0x21, 5, 0x0b, 0x0b, 0x20,
+        4, 0x20, 2, 0x46, 0x0d, 1, // br_if $done (swap == cur)
+        0x20, 2, 0x41, 2, 0x74, 0x20, 5, 0x36, 2, 0x80, 0x80, 0x02, // a[cur] = v_swap
+        0x20, 4, 0x41, 2, 0x74, 0x20, 8, 0x36, 2, 0x80, 0x80, 0x02, // a[swap] = root_val
+        0x20, 4, 0x21, 2, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Return a[0] ^ (a[1] * 31) ^ (a[2] * 961)
+    b0.extend_from_slice(&[
+        0x41, 0, 0x28, 2, 0x80, 0x80, 0x02, 0x41, 4, 0x28, 2, 0x80, 0x80, 0x02, 0x41, 31, 0x6c,
+        0x73, 0x41, 8, 0x28, 2, 0x80, 0x80, 0x02, 0x41,
+    ]);
+    leb_i32(&mut b0, 961);
+    b0.extend_from_slice(&[0x6c, 0x73]);
+
+    // f1: `sift_diamond(init_cur: i32) -> i32`
+    // Diamond CFG `if init_cur <u 10 {} else { mem[0] = 1 }` followed by sift_down(init_cur, 10).
+    // On `init_cur = 0x8000_0000`, `2*init_cur + 1 == 1 <u 10`, so `a[init_cur]` MUST trap OOB!
+    let mut b1 = Vec::new();
+    for (vi, &v) in [1i32, 10, 20, 3, 4, 5, 6, 7, 8, 9].iter().enumerate() {
+        b1.push(0x41);
+        leb_i32(&mut b1, (vi * 4) as i32);
+        b1.push(0x41);
+        leb_i32(&mut b1, v);
+        b1.extend_from_slice(&[0x36, 2, 0x80, 0x80, 0x02]);
+    }
+    b1.extend_from_slice(&[
+        0x41, 10, 0x21, 1, // end = 10
+        0x20, 0, 0x20, 1, 0x49, 0x04, 0x40, // if init_cur <u end
+        0x05, 0x41, 0, 0x41, 1, 0x36, 2, 0, 0x0b, // else mem[0] = 1
+        0x20, 0, 0x21, 2, // cur = init_cur
+        0x02, 0x40, 0x03, 0x40, 0x20, 2, 0x41, 1, 0x74, 0x41, 1, 0x6a, 0x22, 3, 0x20, 1, 0x4f,
+        0x0d, 1, 0x20, 2, 0x21, 4, 0x20, 2, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 5,
+        0x20, 3, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 6, 0x20, 5, 0x20, 6, 0x48, 0x04,
+        0x40, 0x20, 3, 0x21, 4, 0x20, 6, 0x21, 5, 0x0b, 0x20, 3, 0x41, 1, 0x6a, 0x20, 1, 0x49,
+        0x04, 0x40, 0x20, 3, 0x41, 1, 0x6a, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80, 0x02, 0x21, 7,
+        0x20, 5, 0x20, 7, 0x48, 0x04, 0x40, 0x20, 3, 0x41, 1, 0x6a, 0x21, 4, 0x20, 7, 0x21, 5,
+        0x0b, 0x0b, 0x20, 4, 0x20, 2, 0x46, 0x0d, 1, 0x20, 2, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x80,
+        0x02, 0x21, 8, 0x20, 2, 0x41, 2, 0x74, 0x20, 5, 0x36, 2, 0x80, 0x80, 0x02, 0x20, 4, 0x41,
+        2, 0x74, 0x20, 8, 0x36, 2, 0x80, 0x80, 0x02, 0x20, 4, 0x21, 2, 0x0c, 0, 0x0b, 0x0b, 0x41,
+        0, 0x28, 2, 0x80, 0x80, 0x02,
+    ]);
+
+    // f2: `mandel_2d_row_bce(rows: i32) -> i32`
+    // Enclosing counted loop `py = 0..rows` with `mem[py*4] = row_sum` (BCE-versioned!) around
+    // an inner `SimdOuterLoop` `(px = 0..20, it = 0..16)` taking `cy = f32(py) * 0.1 - 0.5`.
+    // locals: 1=py, 2=px, 3=row_sum, 4=it, 5=grand, 6=cy(f32), 7=x0(f32), 8=x(f32)
+    let mut b2 = Vec::new();
+    b2.extend_from_slice(&[
+        0x41, 0, 0x21, 5, // grand = 0
+        0x20, 0, 0x45, 0x04, 0x40, 0x41, 0, 0x0f, 0x0b, // if rows == 0 return 0
+        0x41, 0, 0x21, 1, // py = 0
+        0x03, 0x40, // loop $rows
+        0x20, 1, 0xb3, // f32.convert_i32_u(py)
+    ]);
+    enc_f32(&mut b2, 0.1);
+    b2.push(0x94);
+    enc_f32(&mut b2, -0.5);
+    b2.extend_from_slice(&[0x92, 0x21, 6]); // cy
+    b2.extend_from_slice(&[
+        0x41, 0, 0x21, 2, // px = 0
+        0x41, 0, 0x21, 3, // row_sum = 0
+        0x03, 0x40, // loop $px (0..20)
+        0x20, 2, 0xb3,
+    ]);
+    enc_f32(&mut b2, 0.08);
+    b2.push(0x94);
+    enc_f32(&mut b2, -1.2);
+    b2.extend_from_slice(&[0x92, 0x20, 6, 0x92, 0x21, 7]); // x0
+    b2.extend_from_slice(&[0x41, 0, 0x21, 4, 0x20, 7, 0x21, 8]); // it=0, x=x0
+    b2.extend_from_slice(&[0x02, 0x7f, 0x03, 0x40, 0x20, 8]);
+    enc_f32(&mut b2, 4.0);
+    b2.extend_from_slice(&[
+        0x5e, 0x04, 0x40, 0x20, 4, 0x0c, 2, 0x0b, 0x20, 8, 0x20, 8, 0x94, 0x20, 7, 0x92, 0x21, 8,
+        0x20, 4, 0x41, 1, 0x6a, 0x22, 4, 0x41, 16, 0x47, 0x0d, 0, 0x0b, 0x41, 16, 0x0b, 0x20, 3,
+        0x6a, 0x21, 3, // row_sum += res_it
+        0x20, 2, 0x41, 1, 0x6a, 0x22, 2, 0x41, 20, 0x47, 0x0d, 0, 0x0b, // end $px
+        // mem[py * 4] = row_sum
+        0x20, 1, 0x41, 2, 0x74, 0x20, 3, 0x36, 2, 0, // grand += mem[py * 4]
+        0x20, 5, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0, 0x6a, 0x21, 5, 0x20, 1, 0x41, 1, 0x6a, 0x22,
+        1, 0x20, 0, 0x49, 0x0d, 0, 0x0b, // end $rows
+        0x20, 5,
+    ]);
+
+    // f3: `chained_outer_simd(n: i32) -> i32`
+    // Two sequential vectorizable outer loops where Loop 1's `total_next` feeds Loop 2's `init_total`!
+    // locals: 1=px, 2=total, 3=it, 4=x0(f32), 5=x(f32)
+    let mut b3 = Vec::new();
+    b3.extend_from_slice(&[
+        0x41, 0, 0x21, 2, // total = 0
+        0x20, 0, 0x45, 0x04, 0x40, 0x41, 0, 0x0f, 0x0b, // if n == 0 return 0
+        0x41, 0, 0x21, 1, // px = 0
+        0x03, 0x40, // Loop 1: dynamic 0..n
+        0x20, 1, 0xb3,
+    ]);
+    enc_f32(&mut b3, 0.09);
+    b3.push(0x94);
+    enc_f32(&mut b3, -1.0);
+    b3.extend_from_slice(&[0x92, 0x21, 4, 0x41, 0, 0x21, 3, 0x20, 4, 0x21, 5]);
+    b3.extend_from_slice(&[0x02, 0x7f, 0x03, 0x40, 0x20, 5]);
+    enc_f32(&mut b3, 4.0);
+    b3.extend_from_slice(&[
+        0x5e, 0x04, 0x40, 0x20, 3, 0x0c, 2, 0x0b, 0x20, 5, 0x20, 5, 0x94, 0x20, 4, 0x92, 0x21, 5,
+        0x20, 3, 0x41, 1, 0x6a, 0x22, 3, 0x41, 12, 0x47, 0x0d, 0, 0x0b, 0x41, 12, 0x0b, 0x20, 2,
+        0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x20, 0, 0x47, 0x0d, 0,
+        0x0b, // end Loop 1
+        // Loop 2: static 0..20 starting from `total` produced by Loop 1!
+        0x41, 0, 0x21, 1, 0x03, 0x40, 0x20, 1, 0xb3,
+    ]);
+    enc_f32(&mut b3, 0.07);
+    b3.push(0x94);
+    enc_f32(&mut b3, -0.8);
+    b3.extend_from_slice(&[0x92, 0x21, 4, 0x41, 0, 0x21, 3, 0x20, 4, 0x21, 5]);
+    b3.extend_from_slice(&[0x02, 0x7f, 0x03, 0x40, 0x20, 5]);
+    enc_f32(&mut b3, 4.0);
+    b3.extend_from_slice(&[
+        0x5e, 0x04, 0x40, 0x20, 3, 0x0c, 2, 0x0b, 0x20, 5, 0x20, 5, 0x94, 0x20, 4, 0x92, 0x21, 5,
+        0x20, 3, 0x41, 1, 0x6a, 0x22, 3, 0x41, 12, 0x47, 0x0d, 0, 0x0b, 0x41, 12, 0x0b, 0x20, 2,
+        0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x41, 20, 0x47, 0x0d, 0,
+        0x0b, // end Loop 2
+        0x20, 2,
+    ]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[
+            ("sift_zero_swap", 0, 0),
+            ("sift_diamond", 0, 1),
+            ("mandel_2d_row_bce", 0, 2),
+            ("chained_outer_simd", 0, 3),
+            ("memory", 2, 0),
+        ]),
+        code_sec(&[
+            enc_body(&[(8, 0x7f)], &b0),
+            enc_body(&[(8, 0x7f)], &b1),
+            enc_body(&[(5, 0x7f), (3, 0x7d)], &b2),
+            enc_body(&[(3, 0x7f), (2, 0x7d)], &b3),
+        ]),
+    ]);
+
+    // 1. Verify Stage 2 IR passes `verify_ir` on all 4 functions, `f0` triggers
+    //    `optimize_sift_down_loops` (with guarded sunk exit store), and `f2` emits BOTH
+    //    `Op::SimdOuterLoop` and `Op::StoreScaled` / `Op::StoreUnchecked` (BCE-cloned)!
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2(ir, &module, &eff, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+    }
+    assert!(
+        irs[0]
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| matches!(
+                i.op,
+                Op::LoadScaled {
+                    scale: 4,
+                    offset: 32772,
+                    ..
+                }
+            )),
+        "f0 must exercise optimize_sift_down_loops with 0-swap guard"
+    );
+    let f2_simd_cnt = irs[2]
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| matches!(i.op, Op::SimdOuterLoop { .. }))
+        .count();
+    assert!(
+        f2_simd_cnt >= 2,
+        "f2 must emit Op::SimdOuterLoop AND clone it into BCE fast row loop (found {f2_simd_cnt})"
+    );
+    let f3_simd_cnt = irs[3]
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| matches!(i.op, Op::SimdOuterLoop { .. }))
+        .count();
+    assert!(
+        f3_simd_cnt >= 1,
+        "f3 must emit Op::SimdOuterLoop on sequential chained loops"
+    );
+
+    // 2. Compile for v2, v3, v4 and verify native oracle parity (including OOB trap on diamond)!
+    let isa_v2 = TargetIsa::default();
+    let isa_v3 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: false,
+    };
+    let isa_v4 = TargetIsa {
+        has_abm_bmi1: true,
+        has_bmi2: true,
+        has_avx2: true,
+        has_avx512: true,
+    };
+    let mk_opts = |isa: TargetIsa| super::X64CompileOptions {
+        isa,
+        verify: true,
+        ..Default::default()
+    };
+    let so_v2 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v2)).unwrap();
+    let so_v3 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v3)).unwrap();
+    let so_v4 = super::compile_wasm_to_x64_so(&wasm, &mk_opts(isa_v4)).unwrap();
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let calls: Vec<(&str, u32)> = vec![
+            ("sift_zero_swap", 3 << 4),       // end=3, root_val=100 (2-child 0-swap)
+            ("sift_zero_swap", 2 << 4),       // end=2, root_val=100 (1-child leaf 0-swap)
+            ("sift_zero_swap", (3 << 4) | 1), // end=3, root_val=5   (1 swap)
+            ("sift_diamond", 0),
+            ("sift_diamond", 0x8000_0000),
+            ("mandel_2d_row_bce", 0),
+            ("mandel_2d_row_bce", 1),
+            ("mandel_2d_row_bce", 5),
+            ("mandel_2d_row_bce", 17),
+            ("chained_outer_simd", 0),
+            ("chained_outer_simd", 1),
+            ("chained_outer_simd", 5),
+            ("chained_outer_simd", 17),
+            ("chained_outer_simd", 25),
+        ];
+        let cfg = wtime_runtime::Config {
+            features: super::module::x64_validate_features(),
+            limits: super::module::x64_validate_limits(),
+        };
+        let engine = wtime_runtime::Engine::new(cfg).unwrap();
+        let rt_mod = engine.compile(&wasm).unwrap();
+        let mut store = wtime_runtime::Store::new(&engine);
+        let inst = wtime_runtime::Linker::new(&engine)
+            .instantiate(&mut store, &rt_mod)
+            .unwrap();
+        let mut expected: Vec<Result<u32, u8>> = Vec::new();
+        let mut script = String::new();
+        for &(name, arg) in &calls {
+            script.push_str(&format!("call {name} {arg:x}\n"));
+            let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+                unreachable!()
+            };
+            match store.invoke(f, &[wtime_runtime::Value::I32(arg as i32)]) {
+                Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                    wtime_runtime::Value::I32(v) => expected.push(Ok(v as u32)),
+                    other => panic!("{other:?}"),
+                },
+                Err(e) => {
+                    let code = match e.trap_code {
+                        Some(wtime_types::TrapCode::MemoryOutOfBounds) => 2u8,
+                        other => panic!("{name}({arg:#x}) unexpected trap {other:?}"),
+                    };
+                    expected.push(Err(code));
+                }
+                other => panic!("{name}({arg:#x}) unexpected {other:?}"),
+            }
+        }
+        let root = crate::build::create_fresh_test_root("wtime-aot-final-audit");
+        let mut variants: Vec<(&str, &[u8])> = vec![("v2.so", &so_v2)];
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            variants.push(("v3.so", &so_v3));
+        }
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512dq")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vl")
+        {
+            variants.push(("v4.so", &so_v4));
+        }
+        for (vname, bytes) in variants {
+            let p = root.0.join(vname);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{vname} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"));
+            for (&(cname, arg), &exp) in calls.iter().zip(&expected) {
+                let line = lines.next().unwrap();
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(v) => assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(v)),
+                        "{vname} {cname}({arg:#x}) mismatch"
+                    ),
+                    Err(et) => {
+                        assert_ne!(rc, 0, "{vname} {cname}({arg:#x}) must trap");
+                        assert_eq!(trap, et, "{vname} {cname}({arg:#x}) trap code");
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4);
 }

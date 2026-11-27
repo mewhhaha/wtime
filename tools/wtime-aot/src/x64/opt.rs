@@ -684,7 +684,10 @@ fn rewrite_op_uses_with<F: Fn(&mut Val)>(op: &mut Op, pool: &mut [Val], r: F) {
             r(val);
             r(len);
         }
-        Op::Call { args, .. } | Op::ExnAlloc { args, .. } | Op::SlpWideChain { args, .. } => {
+        Op::Call { args, .. }
+        | Op::ExnAlloc { args, .. }
+        | Op::SlpWideChain { args, .. }
+        | Op::SimdOuterLoop { args, .. } => {
             for v in &mut pool[args.start as usize..args.start as usize + args.len as usize] {
                 r(v);
             }
@@ -2225,6 +2228,7 @@ pub fn try_collect_pre_inline_summary(
                 }
                 Op::ExnAlloc { .. }
                 | Op::SlpWideChain { .. }
+                | Op::SimdOuterLoop { .. }
                 | Op::ExnSetActive(_)
                 | Op::ExnGetActive
                 | Op::ExnClearActive
@@ -3115,6 +3119,7 @@ fn clone_callee_into_caller(
                 },
                 Op::ExnAlloc { .. }
                 | Op::SlpWideChain { .. }
+                | Op::SimdOuterLoop { .. }
                 | Op::ExnSetActive(_)
                 | Op::ExnGetActive
                 | Op::ExnClearActive
@@ -4284,6 +4289,7 @@ pub fn inline_small_helpers_with_pgo(
                     v128_consts: Vec::new(),
                     br_tables: Vec::new(),
                     wide_chains: Vec::new(),
+                    outer_simd_loops: Vec::new(),
                     needs_stack_check: true,
                     elided_callee_stack_bytes: 0,
                     memory64: false,
@@ -5926,6 +5932,7 @@ enum GvnKey {
     F64ReinterpretI64(Val),
     TruncSat(TruncOp, Val),
     Select(Val, Val, Val),
+    V128Un(u16, Val),
 }
 
 fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
@@ -6032,6 +6039,7 @@ fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
         Op::F64ReinterpretI64(a) => GvnKey::F64ReinterpretI64(a),
         Op::Trunc(t, a) if !t.can_trap() => GvnKey::TruncSat(t, a),
         Op::Select { cond, a, b } => GvnKey::Select(cond, a, b),
+        Op::V128Un { op, a } => GvnKey::V128Un(op, a),
         _ => return None,
     })
 }
@@ -8331,6 +8339,94 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     continue;
                                 }
                             }
+                            Op::V128Un { op: 0xfda9, a } => {
+                                // `i32x4.extend_low_i16x8_u(i16x8.extend_low_i8x16_u(x))` ->
+                                // single `pmovzxbd` / `vpmovzxbd` (`V128_UN_I32X4_EXTEND_LOW_I8X16_U`).
+                                if let Some(Op::V128Un { op: 0xfd89, a: src }) =
+                                    st.def_op[a.0 as usize]
+                                {
+                                    inst.op = Op::V128Un {
+                                        op: super::ir::V128_UN_I32X4_EXTEND_LOW_I8X16_U,
+                                        a: src,
+                                    };
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::V128ReplaceLane {
+                                kind: SimdLaneKind::I32x4,
+                                v: v2,
+                                x: x3,
+                                lane: 3,
+                            } => {
+                                // Fuse 4-lane byte-extract + i32x4 rebuild
+                                // (`splat/replace0` + `replace 1,2,3` of `extract_lane_u(src, 0..3)`)
+                                // into single `V128_UN_I32X4_EXTEND_LOW_I8X16_U` (`vpmovzxbd`).
+                                if let Some(Op::V128ReplaceLane {
+                                    kind: SimdLaneKind::I32x4,
+                                    v: v1,
+                                    x: x2,
+                                    lane: 2,
+                                }) = st.def_op[v2.0 as usize]
+                                    && let Some(Op::V128ReplaceLane {
+                                        kind: SimdLaneKind::I32x4,
+                                        v: v0,
+                                        x: x1,
+                                        lane: 1,
+                                    }) = st.def_op[v1.0 as usize]
+                                {
+                                    let x0_opt = match st.def_op[v0.0 as usize] {
+                                        Some(Op::V128Splat {
+                                            kind: SimdSplatKind::I32x4,
+                                            val,
+                                        }) => Some(val),
+                                        Some(Op::V128ReplaceLane {
+                                            kind: SimdLaneKind::I32x4,
+                                            x,
+                                            lane: 0,
+                                            ..
+                                        }) => Some(x),
+                                        _ => None,
+                                    };
+                                    if let Some(x0) = x0_opt
+                                        && let (
+                                            Some(Op::V128ExtractLane {
+                                                kind: SimdLaneKind::I8x16U,
+                                                v: s0,
+                                                lane: 0,
+                                            }),
+                                            Some(Op::V128ExtractLane {
+                                                kind: SimdLaneKind::I8x16U,
+                                                v: s1,
+                                                lane: 1,
+                                            }),
+                                            Some(Op::V128ExtractLane {
+                                                kind: SimdLaneKind::I8x16U,
+                                                v: s2,
+                                                lane: 2,
+                                            }),
+                                            Some(Op::V128ExtractLane {
+                                                kind: SimdLaneKind::I8x16U,
+                                                v: s3,
+                                                lane: 3,
+                                            }),
+                                        ) = (
+                                            st.def_op[x0.0 as usize],
+                                            st.def_op[x1.0 as usize],
+                                            st.def_op[x2.0 as usize],
+                                            st.def_op[x3.0 as usize],
+                                        )
+                                        && s0 == s1
+                                        && s0 == s2
+                                        && s0 == s3
+                                    {
+                                        inst.op = Op::V128Un {
+                                            op: super::ir::V128_UN_I32X4_EXTEND_LOW_I8X16_U,
+                                            a: s0,
+                                        };
+                                        ir_mutated = true;
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -9997,6 +10093,7 @@ fn if_convert_two_ptr_merge_loops(ir: &mut IrFunc, dom: &CfgDom) -> bool {
                         | Op::CallIndirect { .. }
                         | Op::ExnAlloc { .. }
                         | Op::SlpWideChain { .. }
+                        | Op::SimdOuterLoop { .. }
                 )
             })
         {
@@ -11146,7 +11243,7 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
             r(val);
             r(len);
         }
-        Op::SlpWideChain { .. } => {
+        Op::SlpWideChain { .. } | Op::SimdOuterLoop { .. } => {
             // `args: ValRange` remapped by callers (e.g. `split_live_ranges_for_regalloc`).
         }
         Op::Call { .. } | Op::CallIndirect { .. } | Op::ExnAlloc { .. } => {
@@ -12407,6 +12504,11 @@ fn version_checked_counted_loops(
             + promoted_hdr_vals.len();
         let mut needed_pool = entry_args.len as usize;
         for &bb_id in &body {
+            for ins in &ir.blocks[bb_id as usize].insts {
+                if let Op::SlpWideChain { args, .. } | Op::SimdOuterLoop { args, .. } = ins.op {
+                    needed_pool += args.len as usize;
+                }
+            }
             match ir.blocks[bb_id as usize].term {
                 Term::Jump { args, .. } => needed_pool += args.len as usize,
                 Term::BranchIf {
@@ -12540,6 +12642,10 @@ fn version_checked_counted_loops(
                     inst.res = Some(val_map[&r]);
                 }
                 remap_op_uses_map(&mut inst.op, &val_map);
+                if let Op::SlpWideChain { args, .. } | Op::SimdOuterLoop { args, .. } = &mut inst.op
+                {
+                    *args = map_range(ir, *args, &[])?;
+                }
                 // Record provably non-wrapping scaled address values `(base << 1..=3)` in `fast_*`
                 // so the post-SLP SIB pass can fold them into `[r14 + base*scale + disp]` safely.
                 if old_b != hdr
@@ -13975,6 +14081,11 @@ fn version_dynamic_counted_loops(
         let est_guard_vals = 16 + grouped.len() * 8 + promoted_ctrl_vals.len();
         let mut needed_pool = (entry_args.len as usize) * (max_guard_blocks + 2);
         for &bb_id in &body {
+            for ins in &ir.blocks[bb_id as usize].insts {
+                if let Op::SlpWideChain { args, .. } | Op::SimdOuterLoop { args, .. } = ins.op {
+                    needed_pool += args.len as usize;
+                }
+            }
             match ir.blocks[bb_id as usize].term {
                 Term::Jump { args, .. } => needed_pool += args.len as usize,
                 Term::BranchIf {
@@ -14080,6 +14191,10 @@ fn version_dynamic_counted_loops(
                     inst.res = Some(val_map[&r]);
                 }
                 remap_op_uses_map(&mut inst.op, &val_map);
+                if let Op::SlpWideChain { args, .. } | Op::SimdOuterLoop { args, .. } = &mut inst.op
+                {
+                    *args = map_range(ir, *args, &[])?;
+                }
                 // Mark provably non-wrapping `idx << 1..=3` in fast loop for SIB folding.
                 if (is_bottom_tested || old_b != hdr)
                     && let Some(nr) = inst.res
@@ -15620,6 +15735,19 @@ pub fn optimize_func_stage2_with_options(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
+            if allow_bce {
+                if thread_empty_branch_trampolines(ir) {
+                    rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                }
+                if vectorize_pure_outer_loops(ir, &dom)? {
+                    post_rot_changed = true;
+                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                    rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                    if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                        let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                    }
+                }
+            }
             if allow_bce
                 && (op_flags & OP_FLAG_UNCHECKED_MEM) != 0
                 && version_dynamic_counted_loops(
@@ -15697,6 +15825,10 @@ pub fn optimize_func_stage2_with_options(
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
         }
         if thread_empty_branch_trampolines(ir) {
+            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+        }
+        if scaled_folded && optimize_sift_down_loops(ir, &dom, module)? {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
         }
         let _ = split_live_ranges_for_regalloc(ir, &dom, budget)?;
@@ -16098,7 +16230,8 @@ fn split_live_ranges_for_regalloc(
                         Op::Call { args, .. }
                         | Op::CallIndirect { args, .. }
                         | Op::ExnAlloc { args, .. }
-                        | Op::SlpWideChain { args, .. } => {
+                        | Op::SlpWideChain { args, .. }
+                        | Op::SimdOuterLoop { args, .. } => {
                             *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
                         }
                         _ => {}
@@ -16965,6 +17098,962 @@ fn forward_loop_carried_scaled_loads(ir: &mut IrFunc, dom: &CfgDom, module: &X64
         ir.val_pool = pool;
     }
     changed
+}
+
+/// Binary-heap `sift_down` algebraic reassociation + Floyd hole-sift dead-store sinking.
+///
+/// Matches already-versioned, bounds-checked-free (`LoadScaled`/`StoreScaled`) binary-heap sift
+/// loops whose loop-invariant `root_val` has been hoisted into the preheader:
+///   hdr(cur):   left = 2*cur + 1; if left >=u end -> exit
+///   body:       lv = a[left]; (swap1, best1) = (root_val op lv) ? (left, lv) : (cur, root_val);
+///               right = left + 1; if right <u end -> right_bb else join(swap1, best1)
+///   right_bb:   rv = a[right]; (swap2, best2) = (best1 op rv) ? (right, rv) : (swap1, best1);
+///               goto join(swap2, best2)
+///   join(s, b): if s == cur -> exit else latch
+///   latch:      a[cur] = b; a[s] = root_val; goto hdr(s)
+///
+/// When `end <=u 0x3fff_ffff` and `(init_cur <u end || init_cur <=u 0x3fff_fffe)` are proven by
+/// dominating guards, `cur < left < right < end` strictly with zero `u32` wraparound and zero
+/// aliasing across iterations. Rewrites the loop into:
+///   1. Preheader guard `if 2*init_cur + 1 >=u end -> exit`, hoisting `end_m1 = end - 1 >= 1`.
+///   2. Hot 2-child loop (`left <u end_m1`): loads `a[left]` (`offset`) and `a[left+1]`
+///      (`offset + scale`) in parallel, selects `(child, cv) = (lv op rv) ? (left+1, rv) : (left, lv)`
+///      (exact left-biased tie-break for every strict total order `<s, >s, <u, >u`), checks
+///      `root_val op cv`, stores ONLY `a[cur] = cv`, and steps `cur = child`.
+///   3. Cold single-child leaf exit (`left == end_m1`) and sunk exit store `a[final_cur] = root_val`
+///      executed once upon loop termination.
+fn optimize_sift_down_loops(ir: &mut IrFunc, dom: &CfgDom, module: &X64Module) -> Res<bool> {
+    if module.memory64 || ir.blocks.len() < 5 {
+        return Ok(false);
+    }
+
+    let n_vals = ir.val_tys.len();
+    let mut const32: Vec<Option<i32>> = vec![None; n_vals];
+    let mut def_block: Vec<u32> = vec![u32::MAX; n_vals];
+    for &p in &ir.params {
+        def_block[p.0 as usize] = 0;
+    }
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        for &p in &bb.params {
+            def_block[p.0 as usize] = bi as u32;
+        }
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                def_block[r.0 as usize] = bi as u32;
+                if let Op::ConstI32(c) = inst.op {
+                    const32[r.0 as usize] = Some(c);
+                }
+            }
+            match inst.op {
+                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                    for &rv in ir.pool_slice(rets) {
+                        def_block[rv.0 as usize] = bi as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let matching_store_kind = |lk: LoadKind, sk: StoreKind| -> bool {
+        matches!(
+            (lk, sk),
+            (LoadKind::I32, StoreKind::I32) | (LoadKind::I64, StoreKind::I64)
+        )
+    };
+    let is_strict_ord =
+        |cop: CmpOp| -> bool { matches!(cop, CmpOp::LtS | CmpOp::GtS | CmpOp::LtU | CmpOp::GtU) };
+    // Normalize `CmpSelect` for `(x, y)` into `(strict_op, tv_when_x_op_y, fv_otherwise)` where
+    // the condition is strictly `x <strict_op> y`.
+    let norm_cmp_select = |op: Op, is64: bool, x: Val, y: Val| -> Option<(CmpOp, Val, Val)> {
+        let Op::CmpSelect { kind, a, b, tv, fv } = op else {
+            return None;
+        };
+        let cop = match (is64, kind) {
+            (false, CmpBranchKind::I32(c)) | (true, CmpBranchKind::I64(c)) => c,
+            _ => return None,
+        };
+        let (ord_cop, on_true, on_false) = if is_strict_ord(cop) {
+            (cop, tv, fv)
+        } else if matches!(cop, CmpOp::GeS | CmpOp::LeS | CmpOp::GeU | CmpOp::LeU) {
+            (cop.invert_int(), fv, tv)
+        } else {
+            return None;
+        };
+        if a == x && b == y {
+            Some((ord_cop, on_true, on_false))
+        } else if a == y && b == x {
+            Some((ord_cop.swap(), on_true, on_false))
+        } else {
+            None
+        }
+    };
+
+    // Match `CmpBranch` edge proving `lhs <u rhs` -> `(lt_bb, lt_args, ge_bb, ge_args)`.
+    let match_lt_u_branch =
+        |term: Term, lhs: Val| -> Option<(Val, BlockId, ValRange, BlockId, ValRange)> {
+            let Term::CmpBranch {
+                kind: CmpBranchKind::I32(cop),
+                a,
+                b,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } = term
+            else {
+                return None;
+            };
+            if then_bb == else_bb {
+                return None;
+            }
+            match cop {
+                CmpOp::LtU if a == lhs => Some((b, then_bb, then_args, else_bb, else_args)),
+                CmpOp::GtU if b == lhs => Some((a, then_bb, then_args, else_bb, else_args)),
+                CmpOp::GeU if a == lhs => Some((b, else_bb, else_args, then_bb, then_args)),
+                CmpOp::LeU if b == lhs => Some((a, else_bb, else_args, then_bb, then_args)),
+                _ => None,
+            }
+        };
+
+    // Check dominating `end <=u 0x3fff_ffff` and `(init_cur <=u 0x3fff_fffe || init_cur <u end)`.
+    let dominates_sift_bounds =
+        |ir: &IrFunc, const32: &[Option<i32>], pre: u32, init_cur: Val, end: Val| -> bool {
+            let mut end_ok = const32[end.0 as usize].is_some_and(|c| (c as u32) <= 0x3fff_ffff);
+            let mut cur_ok =
+                const32[init_cur.0 as usize].is_some_and(|c| (c as u32) <= 0x3fff_fffe);
+            let mut cur = pre;
+            for _ in 0..4 {
+                if end_ok && cur_ok {
+                    return true;
+                }
+                let p = dom.idom[cur as usize];
+                if p == u32::MAX || p == cur {
+                    break;
+                }
+                // Only extract edge-dominating branch facts when `p` is the SOLE predecessor of `cur`;
+                // otherwise a diamond merge `p -> {cur, other}; other -> cur` could reach `cur` along
+                // the opposite branch where the condition is false.
+                if dom.preds(cur) == [p]
+                    && let Term::CmpBranch {
+                        kind,
+                        a,
+                        b,
+                        then_bb,
+                        else_bb,
+                        ..
+                    } = ir.blocks[p as usize].term
+                {
+                    let on_then = then_bb.0 == cur && else_bb.0 != cur;
+                    let on_else = else_bb.0 == cur && then_bb.0 != cur;
+                    if on_then || on_else {
+                        match kind {
+                            CmpBranchKind::I32Imm(cop, imm) if a == end => {
+                                let eff = if on_then { cop } else { cop.invert_int() };
+                                let ub = match eff {
+                                    CmpOp::LeU => Some(imm as u32),
+                                    CmpOp::LtU => (imm as u32).checked_sub(1),
+                                    _ => None,
+                                };
+                                if ub.is_some_and(|u| u <= 0x3fff_ffff) {
+                                    end_ok = true;
+                                }
+                            }
+                            CmpBranchKind::I32(cop) => {
+                                let eff = if on_then { cop } else { cop.invert_int() };
+                                match eff {
+                                    CmpOp::LtU if a == init_cur && b == end => cur_ok = true,
+                                    CmpOp::GtU if a == end && b == init_cur => cur_ok = true,
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                cur = p;
+            }
+            end_ok && cur_ok
+        };
+
+    let mut changed = false;
+    let mut touched: HashSet<u32> = fx_set();
+    let orig_n_blocks = ir.blocks.len() as u32;
+
+    for hdr in 0..orig_n_blocks {
+        if touched.contains(&hdr)
+            || !ir.blocks[hdr as usize].is_loop_header
+            || ir.blocks[hdr as usize].params.len() != 1
+        {
+            continue;
+        }
+        let cur_v = ir.blocks[hdr as usize].params[0];
+        if ir.val_tys[cur_v.0 as usize] != Ty::I32 {
+            continue;
+        }
+        let preds = dom.preds(hdr);
+        let mut pre_opt = None;
+        let mut latch_opt = None;
+        let mut ok_preds = true;
+        for &p in preds {
+            if dom.dominates(hdr, p) {
+                if latch_opt.is_some() {
+                    ok_preds = false;
+                    break;
+                }
+                latch_opt = Some(p);
+            } else {
+                if pre_opt.is_some() {
+                    ok_preds = false;
+                    break;
+                }
+                pre_opt = Some(p);
+            }
+        }
+        let (Some(pre), Some(latch_bb)) = (pre_opt, latch_opt) else {
+            continue;
+        };
+        if !ok_preds || touched.contains(&pre) || !dom.dominates(pre, hdr) {
+            continue;
+        }
+        let Term::Jump {
+            target: pre_tgt,
+            args: pre_args,
+        } = ir.blocks[pre as usize].term
+        else {
+            continue;
+        };
+        if pre_tgt.0 != hdr || ir.pool_slice(pre_args).len() != 1 {
+            continue;
+        }
+        let init_cur = ir.pool_slice(pre_args)[0];
+        if ir.val_tys[init_cur.0 as usize] != Ty::I32 {
+            continue;
+        }
+
+        // 1. Match `hdr`: `left = (cur << 1) + 1`, `if left <u end -> body else exit`.
+        let mut shl_v: Option<Val> = None;
+        let mut left_v: Option<Val> = None;
+        let mut hdr_ok = true;
+        for inst in &ir.blocks[hdr as usize].insts {
+            if inst.op.has_side_effect() {
+                hdr_ok = false;
+                break;
+            }
+            match (inst.res, inst.op) {
+                (
+                    Some(r),
+                    Op::AddScaled {
+                        is64: false,
+                        base,
+                        idx,
+                        shift: 0,
+                        disp: 1,
+                    },
+                ) if base == cur_v && idx == cur_v => {
+                    left_v = Some(r);
+                }
+                (Some(r), Op::I32BinImm(IntBinOp::Shl, a, 1)) if a == cur_v => shl_v = Some(r),
+                (Some(r), Op::I32Bin(IntBinOp::Add, a, b)) if a == cur_v && b == cur_v => {
+                    shl_v = Some(r);
+                }
+                (Some(r), Op::I32BinImm(IntBinOp::Add | IntBinOp::Or, a, 1))
+                    if Some(a) == shl_v =>
+                {
+                    left_v = Some(r);
+                }
+                (Some(r), Op::I32Bin(IntBinOp::Add | IntBinOp::Or, a, b))
+                    if (Some(a) == shl_v && const32[b.0 as usize] == Some(1))
+                        || (Some(b) == shl_v && const32[a.0 as usize] == Some(1)) =>
+                {
+                    left_v = Some(r);
+                }
+                (Some(_), Op::ConstI32(_)) => {}
+                _ => {
+                    hdr_ok = false;
+                    break;
+                }
+            }
+        }
+        let (true, Some(left)) = (hdr_ok, left_v) else {
+            continue;
+        };
+        let Some((end_v, body_bb_id, body_args, exit_bb, exit_args)) =
+            match_lt_u_branch(ir.blocks[hdr as usize].term, left)
+        else {
+            continue;
+        };
+        let body_bb = body_bb_id.0;
+        if body_args.len != 0
+            || body_bb == hdr
+            || exit_bb.0 == 0
+            || exit_bb.0 == hdr
+            || exit_bb.0 == body_bb
+            || touched.contains(&body_bb)
+            || dom.preds(body_bb) != [hdr]
+            || !ir.blocks[body_bb as usize].params.is_empty()
+        {
+            continue;
+        }
+        let end_db = def_block[end_v.0 as usize];
+        if end_db == u32::MAX || !dom.dominates(end_db, pre) {
+            continue;
+        }
+        if !dominates_sift_bounds(ir, &const32, pre, init_cur, end_v) {
+            continue;
+        }
+
+        // 2. Match `body_bb`: `lv = a[left]`, `(swap1, best1)`, `right = left + 1`, `if right <u end -> right_bb else join_bb`.
+        let mut lv_info: Option<(Val, LoadKind, u8, u64)> = None;
+        let mut swap1_info: Option<(Val, Val, CmpOp)> = None; // (swap1, root_val, heap_op)
+        let mut best1_v: Option<Val> = None;
+        let mut right_v: Option<Val> = None;
+        let mut body_ok = true;
+        for inst in &ir.blocks[body_bb as usize].insts {
+            match (inst.res, inst.op) {
+                (
+                    Some(r),
+                    Op::LoadScaled {
+                        kind,
+                        addr,
+                        scale,
+                        offset,
+                    },
+                ) if lv_info.is_none()
+                    && addr == left
+                    && matches!(kind, LoadKind::I32 | LoadKind::I64)
+                    && u64::from(scale) == kind.bytes()
+                    && offset
+                        .checked_add(u64::from(scale))
+                        .is_some_and(|o| o <= i32::MAX as u64) =>
+                {
+                    lv_info = Some((r, kind, scale, offset));
+                }
+                (Some(r), Op::I32BinImm(IntBinOp::Add, a, 1)) if a == left => {
+                    right_v = Some(r);
+                }
+                (Some(r), Op::I32Bin(IntBinOp::Add, a, b))
+                    if (a == left && const32[b.0 as usize] == Some(1))
+                        || (b == left && const32[a.0 as usize] == Some(1)) =>
+                {
+                    right_v = Some(r);
+                }
+                (Some(r), Op::CmpSelect { a, b, .. }) if lv_info.is_some() => {
+                    let (lv, kind, _, _) = lv_info.unwrap();
+                    let is64 = kind == LoadKind::I64;
+                    let other = if a == lv {
+                        b
+                    } else if b == lv {
+                        a
+                    } else {
+                        body_ok = false;
+                        break;
+                    };
+                    let other_db = def_block[other.0 as usize];
+                    if other_db == u32::MAX || !dom.dominates(other_db, pre) {
+                        body_ok = false;
+                        break;
+                    }
+                    let Some((cop, on_true, on_false)) = norm_cmp_select(inst.op, is64, other, lv)
+                    else {
+                        body_ok = false;
+                        break;
+                    };
+                    if on_true == left && on_false == cur_v && swap1_info.is_none() {
+                        swap1_info = Some((r, other, cop));
+                    } else if on_true == lv && on_false == other && best1_v.is_none() {
+                        if let Some((_, rv0, op0)) = swap1_info
+                            && (rv0 != other || op0 != cop)
+                        {
+                            body_ok = false;
+                            break;
+                        }
+                        if swap1_info.is_none() {
+                            // Remember `(other, cop)` via `swap1_info` check after loop.
+                            best1_v = Some(r);
+                        } else {
+                            best1_v = Some(r);
+                        }
+                    } else {
+                        body_ok = false;
+                        break;
+                    }
+                }
+                (Some(_), Op::ConstI32(_)) => {}
+                _ => {
+                    body_ok = false;
+                    break;
+                }
+            }
+        }
+        let (
+            true,
+            Some((lv, load_kind, scale, offset)),
+            Some((swap1, root_val, heap_op)),
+            Some(best1),
+            Some(right),
+        ) = (body_ok, lv_info, swap1_info, best1_v, right_v)
+        else {
+            continue;
+        };
+        let is64 = load_kind == LoadKind::I64;
+        // Re-verify `best1` matches `(root_val, heap_op)` in case `best1` preceded `swap1`.
+        let best1_verified = ir.blocks[body_bb as usize].insts.iter().any(|ins| {
+            ins.res == Some(best1)
+                && norm_cmp_select(ins.op, is64, root_val, lv) == Some((heap_op, lv, root_val))
+        });
+        if !best1_verified {
+            continue;
+        }
+        let Some((end_v2, right_bb_id, right_args, join_bb_id, join_args_1)) =
+            match_lt_u_branch(ir.blocks[body_bb as usize].term, right)
+        else {
+            continue;
+        };
+        let right_bb = right_bb_id.0;
+        let join_bb = join_bb_id.0;
+        if end_v2 != end_v
+            || right_args.len != 0
+            || join_args_1.len != 2
+            || right_bb == hdr
+            || right_bb == body_bb
+            || join_bb == hdr
+            || join_bb == body_bb
+            || join_bb == right_bb
+            || touched.contains(&right_bb)
+            || touched.contains(&join_bb)
+            || dom.preds(right_bb) != [body_bb]
+            || !ir.blocks[right_bb as usize].params.is_empty()
+        {
+            continue;
+        }
+
+        // 3. Match `right_bb`: `rv = a[right]`, `(swap2, best2)`, `Jump(join_bb, join_args_2)`.
+        let mut rv_v: Option<Val> = None;
+        let mut swap2_v: Option<Val> = None;
+        let mut best2_v: Option<Val> = None;
+        let mut right_ok = true;
+        for inst in &ir.blocks[right_bb as usize].insts {
+            match (inst.res, inst.op) {
+                (
+                    Some(r),
+                    Op::LoadScaled {
+                        kind: rk,
+                        addr,
+                        scale: rs,
+                        offset: roff,
+                    },
+                ) if rv_v.is_none()
+                    && rk == load_kind
+                    && addr == right
+                    && rs == scale
+                    && roff == offset =>
+                {
+                    rv_v = Some(r);
+                }
+                (Some(r), Op::CmpSelect { .. }) if rv_v.is_some() => {
+                    let rv = rv_v.unwrap();
+                    let Some((cop, on_true, on_false)) = norm_cmp_select(inst.op, is64, best1, rv)
+                    else {
+                        right_ok = false;
+                        break;
+                    };
+                    if cop != heap_op {
+                        right_ok = false;
+                        break;
+                    }
+                    if on_true == right && on_false == swap1 && swap2_v.is_none() {
+                        swap2_v = Some(r);
+                    } else if on_true == rv && on_false == best1 && best2_v.is_none() {
+                        best2_v = Some(r);
+                    } else {
+                        right_ok = false;
+                        break;
+                    }
+                }
+                _ => {
+                    right_ok = false;
+                    break;
+                }
+            }
+        }
+        let (true, Some(_rv), Some(swap2), Some(best2)) = (right_ok, rv_v, swap2_v, best2_v) else {
+            continue;
+        };
+        let Term::Jump {
+            target: r_tgt,
+            args: join_args_2,
+        } = ir.blocks[right_bb as usize].term
+        else {
+            continue;
+        };
+        if r_tgt.0 != join_bb || join_args_2.len != 2 {
+            continue;
+        }
+
+        // 4. Match `join_bb(swap_p, best_p)`: `if swap_p == cur -> exit else latch`.
+        let join_preds = dom.preds(join_bb);
+        if join_preds.len() != 2
+            || !join_preds.contains(&body_bb)
+            || !join_preds.contains(&right_bb)
+            || ir.blocks[join_bb as usize].params.len() != 2
+            || !ir.blocks[join_bb as usize].insts.is_empty()
+        {
+            continue;
+        }
+        let ja1 = ir.pool_slice(join_args_1);
+        let ja2 = ir.pool_slice(join_args_2);
+        let (swap_p, best_p) =
+            if ja1[0] == swap1 && ja2[0] == swap2 && ja1[1] == best1 && ja2[1] == best2 {
+                (
+                    ir.blocks[join_bb as usize].params[0],
+                    ir.blocks[join_bb as usize].params[1],
+                )
+            } else if ja1[1] == swap1 && ja2[1] == swap2 && ja1[0] == best1 && ja2[0] == best2 {
+                (
+                    ir.blocks[join_bb as usize].params[1],
+                    ir.blocks[join_bb as usize].params[0],
+                )
+            } else {
+                continue;
+            };
+        let Term::CmpBranch {
+            kind: CmpBranchKind::I32(jcop),
+            a: ja,
+            b: jb,
+            then_bb: jtb,
+            then_args: jta,
+            else_bb: jeb,
+            else_args: jea,
+        } = ir.blocks[join_bb as usize].term
+        else {
+            continue;
+        };
+        let cmp_swap_cur = (ja == swap_p && jb == cur_v) || (ja == cur_v && jb == swap_p);
+        if !cmp_swap_cur {
+            continue;
+        }
+        let (j_exit, j_exit_args, j_latch, j_latch_args) = match jcop {
+            CmpOp::Eq => (jtb, jta, jeb, jea),
+            CmpOp::Ne => (jeb, jea, jtb, jta),
+            _ => continue,
+        };
+        if j_exit != exit_bb
+            || ir.pool_slice(j_exit_args) != ir.pool_slice(exit_args)
+            || j_latch.0 != latch_bb
+            || j_latch_args.len != 0
+            || touched.contains(&latch_bb)
+            || dom.preds(latch_bb) != [join_bb]
+            || !ir.blocks[latch_bb as usize].params.is_empty()
+        {
+            continue;
+        }
+
+        // 5. Match `latch_bb`: `a[cur] = best_p; a[swap_p] = root_val; Jump(hdr, [swap_p])`.
+        let Term::Jump {
+            target: l_tgt,
+            args: l_args,
+        } = ir.blocks[latch_bb as usize].term
+        else {
+            continue;
+        };
+        if l_tgt.0 != hdr || ir.pool_slice(l_args) != [swap_p] {
+            continue;
+        }
+        if ir.blocks[latch_bb as usize].insts.len() != 2 {
+            continue;
+        }
+        let mut saw_cur_store = false;
+        let mut saw_swap_store = false;
+        let mut store_kind_opt = None;
+        for inst in &ir.blocks[latch_bb as usize].insts {
+            if let (
+                None,
+                Op::StoreScaled {
+                    kind: sk,
+                    addr,
+                    val,
+                    scale: ss,
+                    offset: soff,
+                },
+            ) = (inst.res, inst.op)
+                && matching_store_kind(load_kind, sk)
+                && ss == scale
+                && soff == offset
+            {
+                if addr == cur_v && val == best_p {
+                    saw_cur_store = true;
+                    store_kind_opt = Some(sk);
+                } else if addr == swap_p && val == root_val {
+                    saw_swap_store = true;
+                    store_kind_opt = Some(sk);
+                }
+            }
+        }
+        let (true, true, Some(store_kind)) = (saw_cur_store, saw_swap_store, store_kind_opt) else {
+            continue;
+        };
+
+        // 6. Verify 5 loop blocks are distinct and NO value defined inside escapes outside.
+        let loop_bbs = [hdr, body_bb, right_bb, join_bb, latch_bb];
+        if (0..5).any(|i| ((i + 1)..5).any(|j| loop_bbs[i] == loop_bbs[j])) {
+            continue;
+        }
+        let in_loop_bb = |b: u32| loop_bbs.contains(&b);
+        let exit_args_vec: Vec<Val> = ir.pool_slice(exit_args).to_vec();
+        if exit_args_vec.iter().any(|v| {
+            let db = def_block[v.0 as usize];
+            db == u32::MAX || in_loop_bb(db)
+        }) {
+            continue;
+        }
+        let mut escapes = false;
+        for (bi, bb) in ir.blocks.iter().enumerate() {
+            if in_loop_bb(bi as u32) {
+                continue;
+            }
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    let vi = v.0 as usize;
+                    if vi < def_block.len() && in_loop_bb(def_block[vi]) {
+                        escapes = true;
+                    }
+                });
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                let vi = v.0 as usize;
+                if vi < def_block.len() && in_loop_bb(def_block[vi]) {
+                    escapes = true;
+                }
+            });
+            if escapes {
+                break;
+            }
+        }
+        if escapes {
+            continue;
+        }
+        if ir.blocks.len() + 4 > MAX_BLOCKS_PER_FN
+            || ir.val_tys.len() + 24 > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + exit_args_vec.len() * 2 + 16 > MAX_VAL_POOL_PER_FN
+        {
+            continue;
+        }
+
+        // 7. Rewrite into rotated 6-cycle 2-child loop + cold 1-child leaf + sunk exit store!
+        //    In the hot loop (`hdr` -> fall-through `latch_bb` -> `jb hdr`), `left = 2*cur + 1 < end_m1`
+        //    is carried as a header param and `2*left + 1`, `2*left + 3` are speculatively computed in
+        //    parallel with the two L1 loads `a[left]` & `a[left+1]`, cutting the loop-carried critical
+        //    path to `load (4) + cmp (1) + cmov (1) = 6 cycles` with only 1 taken branch per level.
+        let cmp_kind = if is64 {
+            CmpBranchKind::I64(heap_op)
+        } else {
+            CmpBranchKind::I32(heap_op)
+        };
+        let val_ty = if is64 { Ty::I64 } else { Ty::I32 };
+        let init_cur_const = const32[init_cur.0 as usize];
+        let mut new_val = |ir: &mut IrFunc, ty: Ty, bb: u32| -> Val {
+            let v = ir.push_val(ty);
+            def_block.push(bb);
+            const32.push(None);
+            v
+        };
+
+        let pre_enter_bb = BlockId(ir.blocks.len() as u32);
+        let leaf_step_bb = BlockId(pre_enter_bb.0 + 1);
+        let done_store_bb = BlockId(pre_enter_bb.0 + 2);
+        let store_exit_bb = BlockId(pre_enter_bb.0 + 3);
+
+        // Preheader `pre`: check `left0 = 2*init_cur + 1 <u end`, else exit with zero stores.
+        let left0 = new_val(ir, Ty::I32, pre);
+        let left0_op = if let Some(c) = init_cur_const {
+            Op::ConstI32(((c as u32).wrapping_mul(2).wrapping_add(1)) as i32)
+        } else {
+            Op::AddScaled {
+                is64: false,
+                base: init_cur,
+                idx: init_cur,
+                shift: 0,
+                disp: 1,
+            }
+        };
+        ir.blocks[pre as usize].insts.push(Inst {
+            res: Some(left0),
+            op: left0_op,
+        });
+        ir.blocks[pre as usize].term = Term::CmpBranch {
+            kind: CmpBranchKind::I32(CmpOp::LtU),
+            a: left0,
+            b: end_v,
+            then_bb: pre_enter_bb,
+            then_args: ValRange::EMPTY,
+            else_bb: exit_bb,
+            else_args: exit_args,
+        };
+
+        // `pre_enter_bb`: `end_m1 = end - 1 >= 1`; if `left0 <u end_m1` enter 2-child loop `hdr`,
+        // else `left0 == end_m1` directly enters 1-child leaf `right_bb(init_cur, left0)`.
+        let end_m1 = new_val(ir, Ty::I32, pre_enter_bb.0);
+        let hdr_init_args = ir.push_pool(&[init_cur, left0])?;
+        let leaf_init_args = ir.push_pool(&[init_cur, left0])?;
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: vec![Inst {
+                res: Some(end_m1),
+                op: Op::I32BinImm(IntBinOp::Sub, end_v, 1),
+            }],
+            term: Term::CmpBranch {
+                kind: CmpBranchKind::I32(CmpOp::LtU),
+                a: left0,
+                b: end_m1,
+                then_bb: BlockId(hdr),
+                then_args: hdr_init_args,
+                else_bb: BlockId(right_bb),
+                else_args: leaf_init_args,
+            },
+            is_loop_header: false,
+            preds: 1,
+        });
+
+        // `hdr(cur, left)` (rotated hot 2-child loop header):
+        // Parallel loads `a[left]` & `a[left+1]` + parallel `right`, `2*left+1`, `2*left+3`,
+        // single compare + 3× cmov -> `(child, cv, next_left)`, check `root_val <op> cv`.
+        let hdr_left = new_val(ir, Ty::I32, hdr);
+        ir.blocks[hdr as usize].params.push(hdr_left);
+        let n_lv = new_val(ir, val_ty, hdr);
+        let n_rv = new_val(ir, val_ty, hdr);
+        let n_right = new_val(ir, Ty::I32, hdr);
+        let n_nl_l = new_val(ir, Ty::I32, hdr);
+        let n_nl_r = new_val(ir, Ty::I32, hdr);
+        let n_child = new_val(ir, Ty::I32, hdr);
+        let n_cv = new_val(ir, val_ty, hdr);
+        let n_next_left = new_val(ir, Ty::I32, hdr);
+        let hdr_done_args = ir.push_pool(&[cur_v])?;
+        ir.blocks[hdr as usize].insts = vec![
+            Inst {
+                res: Some(n_lv),
+                op: Op::LoadScaled {
+                    kind: load_kind,
+                    addr: hdr_left,
+                    scale,
+                    offset,
+                },
+            },
+            Inst {
+                res: Some(n_rv),
+                op: Op::LoadScaled {
+                    kind: load_kind,
+                    addr: hdr_left,
+                    scale,
+                    offset: offset + u64::from(scale),
+                },
+            },
+            Inst {
+                res: Some(n_right),
+                op: Op::I32BinImm(IntBinOp::Add, hdr_left, 1),
+            },
+            Inst {
+                res: Some(n_nl_l),
+                op: Op::AddScaled {
+                    is64: false,
+                    base: hdr_left,
+                    idx: hdr_left,
+                    shift: 0,
+                    disp: 1,
+                },
+            },
+            Inst {
+                res: Some(n_nl_r),
+                op: Op::AddScaled {
+                    is64: false,
+                    base: hdr_left,
+                    idx: hdr_left,
+                    shift: 0,
+                    disp: 3,
+                },
+            },
+            Inst {
+                res: Some(n_child),
+                op: Op::CmpSelect {
+                    kind: cmp_kind,
+                    a: n_lv,
+                    b: n_rv,
+                    tv: n_right,
+                    fv: hdr_left,
+                },
+            },
+            Inst {
+                res: Some(n_cv),
+                op: Op::CmpSelect {
+                    kind: cmp_kind,
+                    a: n_lv,
+                    b: n_rv,
+                    tv: n_rv,
+                    fv: n_lv,
+                },
+            },
+            Inst {
+                res: Some(n_next_left),
+                op: Op::CmpSelect {
+                    kind: cmp_kind,
+                    a: n_lv,
+                    b: n_rv,
+                    tv: n_nl_r,
+                    fv: n_nl_l,
+                },
+            },
+        ];
+        ir.blocks[hdr as usize].term = Term::CmpBranch {
+            kind: cmp_kind,
+            a: root_val,
+            b: n_cv,
+            then_bb: BlockId(latch_bb),
+            then_args: ValRange::EMPTY,
+            else_bb: done_store_bb,
+            else_args: hdr_done_args,
+        };
+
+        // `latch_bb` (fall-through from `hdr`): single store `a[cur] = cv`, single conditional backedge
+        // `if next_left <u end_m1 -> hdr(child, next_left) else join_bb`.
+        let latch_next_args = ir.push_pool(&[n_child, n_next_left])?;
+        ir.blocks[latch_bb as usize].insts = vec![Inst {
+            res: None,
+            op: Op::StoreScaled {
+                kind: store_kind,
+                addr: cur_v,
+                val: n_cv,
+                scale,
+                offset,
+            },
+        }];
+        ir.blocks[latch_bb as usize].term = Term::CmpBranch {
+            kind: CmpBranchKind::I32(CmpOp::LtU),
+            a: n_next_left,
+            b: end_m1,
+            then_bb: BlockId(hdr),
+            then_args: latch_next_args,
+            else_bb: BlockId(join_bb),
+            else_args: ValRange::EMPTY,
+        };
+
+        // `body_bb` is now unused (pruned by `rebuild_cfg_and_prune_into`).
+        ir.blocks[body_bb as usize].params.clear();
+        ir.blocks[body_bb as usize].insts.clear();
+        ir.blocks[body_bb as usize].term = Term::Unreachable;
+
+        // `join_bb` (`one_child_or_done`): `if next_left == end_m1 -> right_bb(child, next_left) else done_store(child)`.
+        let join_leaf_args = ir.push_pool(&[n_child, n_next_left])?;
+        let join_done_args = ir.push_pool(&[n_child])?;
+        ir.blocks[join_bb as usize].params.clear();
+        ir.blocks[join_bb as usize].insts.clear();
+        ir.blocks[join_bb as usize].term = Term::CmpBranch {
+            kind: CmpBranchKind::I32(CmpOp::Eq),
+            a: n_next_left,
+            b: end_m1,
+            then_bb: BlockId(right_bb),
+            then_args: join_leaf_args,
+            else_bb: done_store_bb,
+            else_args: join_done_args,
+        };
+
+        // `right_bb(leaf_cur, leaf_left)` (`one_child_leaf`): single left child at bottom of heap.
+        let leaf_cur = new_val(ir, Ty::I32, right_bb);
+        let leaf_left = new_val(ir, Ty::I32, right_bb);
+        let leaf_lv = new_val(ir, val_ty, right_bb);
+        let right_done_args = ir.push_pool(&[leaf_cur])?;
+        ir.blocks[right_bb as usize].params = vec![leaf_cur, leaf_left];
+        ir.blocks[right_bb as usize].insts = vec![Inst {
+            res: Some(leaf_lv),
+            op: Op::LoadScaled {
+                kind: load_kind,
+                addr: leaf_left,
+                scale,
+                offset,
+            },
+        }];
+        ir.blocks[right_bb as usize].term = Term::CmpBranch {
+            kind: cmp_kind,
+            a: root_val,
+            b: leaf_lv,
+            then_bb: leaf_step_bb,
+            then_args: ValRange::EMPTY,
+            else_bb: done_store_bb,
+            else_args: right_done_args,
+        };
+
+        // `leaf_step_bb`: `a[leaf_cur] = leaf_lv; goto done_store(leaf_left)`.
+        let leaf_done_args = ir.push_pool(&[leaf_left])?;
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: vec![Inst {
+                res: None,
+                op: Op::StoreScaled {
+                    kind: store_kind,
+                    addr: leaf_cur,
+                    val: leaf_lv,
+                    scale,
+                    offset,
+                },
+            }],
+            term: Term::Jump {
+                target: done_store_bb,
+                args: leaf_done_args,
+            },
+            is_loop_header: false,
+            preds: 1,
+        });
+
+        // `done_store_bb(final_cur)`: guard against 0-swap early exit (`final_cur == init_cur`) so
+        // an arbitrary dominating `root_val` never overwrites `a[init_cur]` when zero swaps occurred.
+        // Because `cur` strictly increases on every swap (`cur < 2*cur + 1`), `final_cur == init_cur`
+        // iff zero swaps executed.
+        let final_cur = new_val(ir, Ty::I32, done_store_bb.0);
+        let done_skip_exit_args = ir.push_pool(&exit_args_vec)?;
+        let done_store_exit_args = ir.push_pool(&exit_args_vec)?;
+        ir.blocks.push(Block {
+            params: vec![final_cur],
+            insts: Vec::new(),
+            term: Term::CmpBranch {
+                kind: CmpBranchKind::I32(CmpOp::Eq),
+                a: final_cur,
+                b: init_cur,
+                then_bb: exit_bb,
+                then_args: done_skip_exit_args,
+                else_bb: store_exit_bb,
+                else_args: ValRange::EMPTY,
+            },
+            is_loop_header: false,
+            preds: 4,
+        });
+        // `store_exit_bb`: sunk single store `a[final_cur] = root_val; goto exit_bb` (>= 1 swap).
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: vec![Inst {
+                res: None,
+                op: Op::StoreScaled {
+                    kind: store_kind,
+                    addr: final_cur,
+                    val: root_val,
+                    scale,
+                    offset,
+                },
+            }],
+            term: Term::Jump {
+                target: exit_bb,
+                args: done_store_exit_args,
+            },
+            is_loop_header: false,
+            preds: 1,
+        });
+
+        touched.insert(pre);
+        for b in loop_bbs {
+            touched.insert(b);
+        }
+        changed = true;
+    }
+
+    Ok(changed)
 }
 
 /// Late scaled-addition folding: rewrites `base + (idx << {1,2,3})`, `base + (idx * {2,4,8})`,
@@ -22748,6 +23837,7 @@ fn op_touches_linear_mem(op: &Op) -> bool {
             | Op::MemByteBlur3Div { .. }
             | Op::F64x4BinMem { .. }
             | Op::SlpWideChain { .. }
+            | Op::SimdOuterLoop { .. }
             | Op::F64AxpyLoop { .. }
             | Op::VecElemLoop { .. }
             | Op::VecReduceLoop { .. }
@@ -24319,6 +25409,7 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                 | Op::PgoFuncEnter(_)
                 | Op::PgoRecordCi { .. }
                 | Op::SlpWideChain { .. }
+                | Op::SimdOuterLoop { .. }
                 | Op::F64x4BinMem { .. }
                 | Op::F64AxpyLoop { .. }
                 | Op::VecElemLoop { .. }
@@ -24466,7 +25557,13 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                 && dom.dominates(def_block[vi], pre)
         };
 
-        let mut matched: Option<(usize, Val, UnrollLim, CmpOp, bool, u32, bool)> = None;
+        #[derive(Clone, Copy)]
+        enum UnrollStep {
+            Const(u32, bool),
+            VarInc(Val),
+        }
+
+        let mut matched: Option<(usize, Val, UnrollLim, CmpOp, bool, UnrollStep)> = None;
         let mut try_match = |cand: Val, lim: UnrollLim, stay_cop: CmpOp, cand_is_a: bool| {
             if matched.is_some() {
                 return;
@@ -24490,12 +25587,12 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                     }
                 }
             };
-            let step_dir: Option<(u32, bool)> = match def_inst[cand.0 as usize] {
+            let step_dir: Option<UnrollStep> = match def_inst[cand.0 as usize] {
                 Some(Op::I32BinImm(IntBinOp::Add, x, s)) if x == idx => {
                     if (1..=65_536).contains(&s) {
-                        Some((s as u32, true))
+                        Some(UnrollStep::Const(s as u32, true))
                     } else if (-65_536..=-1).contains(&s) {
-                        Some((-s as u32, false))
+                        Some(UnrollStep::Const(-s as u32, false))
                     } else {
                         None
                     }
@@ -24503,32 +25600,42 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                 Some(Op::I32BinImm(IntBinOp::Sub, x, s))
                     if x == idx && (1..=65_536).contains(&s) =>
                 {
-                    Some((s as u32, false))
+                    Some(UnrollStep::Const(s as u32, false))
                 }
-                Some(Op::I32Bin(IntBinOp::Add, x, y)) if x == idx => const_i32_of(y, &def_inst)
-                    .and_then(|s| {
+                Some(Op::I32Bin(IntBinOp::Add, x, y)) if x == idx => {
+                    if let Some(s) = const_i32_of(y, &def_inst) {
                         if (1..=65_536).contains(&s) {
-                            Some((s as u32, true))
+                            Some(UnrollStep::Const(s as u32, true))
                         } else if (-65_536..=-1).contains(&s) {
-                            Some((-s as u32, false))
+                            Some(UnrollStep::Const(-s as u32, false))
                         } else {
                             None
                         }
-                    }),
-                Some(Op::I32Bin(IntBinOp::Add, x, y)) if y == idx => const_i32_of(x, &def_inst)
-                    .and_then(|s| {
+                    } else if is_inv(y) {
+                        Some(UnrollStep::VarInc(y))
+                    } else {
+                        None
+                    }
+                }
+                Some(Op::I32Bin(IntBinOp::Add, x, y)) if y == idx => {
+                    if let Some(s) = const_i32_of(x, &def_inst) {
                         if (1..=65_536).contains(&s) {
-                            Some((s as u32, true))
+                            Some(UnrollStep::Const(s as u32, true))
                         } else if (-65_536..=-1).contains(&s) {
-                            Some((-s as u32, false))
+                            Some(UnrollStep::Const(-s as u32, false))
                         } else {
                             None
                         }
-                    }),
+                    } else if is_inv(x) {
+                        Some(UnrollStep::VarInc(x))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             };
-            if let Some((step, dir_inc)) = step_dir {
-                matched = Some((pos, cand, eff_lim, stay_cop, cand_is_a, step, dir_inc));
+            if let Some(st_kind) = step_dir {
+                matched = Some((pos, cand, eff_lim, stay_cop, cand_is_a, st_kind));
             }
         };
 
@@ -24544,7 +25651,7 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
             }
             _ => {}
         }
-        let Some((idx_pos, cand, lim, stay_cop, cand_is_a, step, dir_inc)) = matched else {
+        let Some((idx_pos, cand, lim, stay_cop, cand_is_a, step_kind)) = matched else {
             continue;
         };
 
@@ -24553,9 +25660,11 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
             continue;
         }
 
-        // Compute exact constant trip count when both `init_idx` and `lim` are constant.
+        // Compute exact constant trip count when `init_idx`, `lim`, and `step` are constant.
         let exact_trips: Option<u64> =
-            if let (Some(ic), UnrollLim::Const(lc)) = (const_i32_of(init_idx, &def_inst), lim) {
+            if let (Some(ic), UnrollLim::Const(lc), UnrollStep::Const(step, dir_inc)) =
+                (const_i32_of(init_idx, &def_inst), lim, step_kind)
+            {
                 let st64 = u64::from(step);
                 let iu = u64::from(ic as u32);
                 let lu = u64::from(lc as u32);
@@ -24766,14 +25875,24 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
             continue;
         }
 
-        // ---- Sub-case 2: Dynamic loop-invariant limit (`LtU`/`LtS` inc OR countdown `i -= 1 != 0`, fast loop) ----
-        let is_dec_nz =
-            !dir_inc && stay_cop == CmpOp::Ne && matches!(lim, UnrollLim::Const(0)) && step == 1;
-        if has_unchecked_mem
-            || (!is_dec_nz && (!dir_inc || !matches!(stay_cop, CmpOp::LtU | CmpOp::LtS)))
-            || step > 16_384
-            || ir.blocks[hdr as usize].insts.len() > MAX_BODY_INSTS_DYN
-        {
+        // ---- Sub-case 2: Dynamic loop-invariant limit/stride (`LtU`/`LtS` inc OR countdown `i -= 1 != 0`, fast loop) ----
+        let is_dec_nz = matches!(step_kind, UnrollStep::Const(1, false))
+            && stay_cop == CmpOp::Ne
+            && matches!(lim, UnrollLim::Const(0));
+        let sub2_ok = match step_kind {
+            UnrollStep::Const(step, dir_inc) => {
+                !has_unchecked_mem
+                    && (is_dec_nz || (dir_inc && matches!(stay_cop, CmpOp::LtU | CmpOp::LtS)))
+                    && step <= 16_384
+                    && ir.blocks[hdr as usize].insts.len() <= MAX_BODY_INSTS_DYN
+            }
+            UnrollStep::VarInc(_) => {
+                !has_unchecked_mem
+                    && stay_cop == CmpOp::LtU
+                    && ir.blocks[hdr as usize].insts.len() <= MAX_BODY_INSTS_DYN
+            }
+        };
+        if !sub2_ok {
             continue;
         }
         // Skip small constant trip counts `< 8`.
@@ -24818,7 +25937,7 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
         let orig_ex_vec: Vec<Val> = ir.pool_slice(exit_args).to_vec();
         let n_defs_per_iter = orig_insts.iter().filter(|i| i.res.is_some()).count();
         let est_blocks = 6;
-        let est_vals = orig_params.len() + 4 * n_defs_per_iter + 6;
+        let est_vals = orig_params.len() + 4 * n_defs_per_iter + 12;
         let est_pool = orig_ent_vec.len() * 6 + orig_be_vec.len() * 2 + orig_ex_vec.len();
         if ir.blocks.len() + est_blocks > MAX_BLOCKS_PER_FN
             || ir.val_tys.len() + est_vals > MAX_IR_VALS_PER_FN
@@ -24827,23 +25946,36 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
             continue;
         }
 
-        let step4 = step * 4;
-        let step3 = step * 3;
-        let cap: u32 = if is_signed {
-            (i32::MAX as u32) - (step4 - 1)
-        } else {
-            u32::MAX - (step4 - 1)
-        };
-        if !is_dec_nz && let UnrollLim::Const(lc) = lim {
-            let lu = lc as u32;
-            if is_signed {
-                if lc < step4 as i32 || lc > cap as i32 {
+        let const_bounds: Option<(u32, u32, u32)> = match step_kind {
+            UnrollStep::Const(step, _) => {
+                let step4 = step * 4;
+                let step3 = step * 3;
+                let cap: u32 = if is_signed {
+                    (i32::MAX as u32) - (step4 - 1)
+                } else {
+                    u32::MAX - (step4 - 1)
+                };
+                if !is_dec_nz && let UnrollLim::Const(lc) = lim {
+                    let lu = lc as u32;
+                    if is_signed {
+                        if lc < step4 as i32 || lc > cap as i32 {
+                            continue;
+                        }
+                    } else if lu < step4 || lu > cap {
+                        continue;
+                    }
+                }
+                Some((step4, step3, cap))
+            }
+            UnrollStep::VarInc(_) => {
+                if let UnrollLim::Const(lc) = lim
+                    && (lc as u32) < 4
+                {
                     continue;
                 }
-            } else if lu < step4 || lu > cap {
-                continue;
+                None
             }
-        }
+        };
 
         // Build `hdr4` (4× unrolled body) and `rem_check_bb` (1× remainder check).
         let hdr4_id = BlockId(ir.blocks.len() as u32);
@@ -24890,27 +26022,26 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
             .collect();
         let rem_ex_args = ir.push_pool(&rem_ex_vec)?;
 
-        // Pre-allocate optional `lim_m3` value (for dynamic `UnrollLim::Val`) so `hdr4` can reference it.
-        let lim_m3_opt: Option<(Val, i32)> = match lim {
-            UnrollLim::Val(_) => {
-                let v = ir.push_val(Ty::I32);
-                def_block.push(u32::MAX);
-                def_inst.push(None);
-                Some((v, step3 as i32))
-            }
-            UnrollLim::Const(_) => None,
+        // Pre-allocate dynamic `lim_m3` value (for `UnrollLim::Val` or `UnrollStep::VarInc`) so `hdr4` can use it.
+        let need_dyn_lim_m3 =
+            matches!(step_kind, UnrollStep::VarInc(_)) || matches!(lim, UnrollLim::Val(_));
+        let lim_m3_val: Option<Val> = if need_dyn_lim_m3 {
+            let v = ir.push_val(Ty::I32);
+            def_block.push(u32::MAX);
+            def_inst.push(None);
+            Some(v)
+        } else {
+            None
         };
         let (hdr4_cmp_kind, hdr4_cmp_b) = if is_dec_nz {
             (CmpBranchKind::I32Imm(CmpOp::GeU, 4), cand4)
+        } else if let Some(lm3_v) = lim_m3_val {
+            (CmpBranchKind::I32(stay_cop), lm3_v)
+        } else if let (UnrollLim::Const(lc), Some((_, step3, _))) = (lim, const_bounds) {
+            let lm3 = (lc as u32).wrapping_sub(step3) as i32;
+            (CmpBranchKind::I32Imm(stay_cop, lm3), cand4)
         } else {
-            match (lim, lim_m3_opt) {
-                (UnrollLim::Const(lc), _) => {
-                    let lm3 = (lc as u32).wrapping_sub(step3) as i32;
-                    (CmpBranchKind::I32Imm(stay_cop, lm3), cand4)
-                }
-                (UnrollLim::Val(_), Some((lm3_v, _))) => (CmpBranchKind::I32(stay_cop), lm3_v),
-                _ => unreachable!(),
-            }
+            unreachable!()
         };
         let (rem_cmp_kind, rem_cmp_b) = if is_dec_nz {
             (CmpBranchKind::I32Imm(CmpOp::Ne, 0), cand4)
@@ -25037,7 +26168,125 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                 init_idx,
                 true,
             )?;
+        } else if let UnrollStep::VarInc(step_v) = step_kind {
+            // Wrap-safe guard chain for variable stride `S = step_v`, `L = lim` (`LtU`):
+            //   1. `S >=u 1`
+            //   2. `S <=u (L >>u 2)`           => `4*S <= L` (so `3*S` & `L - 3*S` never wrap)
+            //   3. `L <=u 0u32.wrapping_sub(S)` => `L + S <= 2^32` (so `x < L - 3*S` implies `x + 4*S <= L + S - 1 <= u32::MAX`)
+            //   4. `init_idx <u L - 3*S`
+            let mut emit_i32 =
+                |ir: &mut IrFunc, bb: BlockId, insts: &mut Vec<Inst>, op: Op| -> Val {
+                    let v = ir.push_val(Ty::I32);
+                    def_block.push(bb.0);
+                    def_inst.push(Some(op));
+                    insts.push(Inst { res: Some(v), op });
+                    v
+                };
+            push_g(
+                ir,
+                &mut cur_bb,
+                &mut cur_insts,
+                CmpBranchKind::I32Imm(CmpOp::GeU, 1),
+                step_v,
+                step_v,
+                false,
+            )?;
+            let lm3_v = lim_m3_val.unwrap();
+            match lim {
+                UnrollLim::Val(lv) => {
+                    let lv_div4 = emit_i32(
+                        ir,
+                        cur_bb,
+                        &mut cur_insts,
+                        Op::I32BinImm(IntBinOp::ShrU, lv, 2),
+                    );
+                    push_g(
+                        ir,
+                        &mut cur_bb,
+                        &mut cur_insts,
+                        CmpBranchKind::I32(CmpOp::LeU),
+                        step_v,
+                        lv_div4,
+                        false,
+                    )?;
+                    let zero_v = emit_i32(ir, cur_bb, &mut cur_insts, Op::ConstI32(0));
+                    let neg_s = emit_i32(
+                        ir,
+                        cur_bb,
+                        &mut cur_insts,
+                        Op::I32Bin(IntBinOp::Sub, zero_v, step_v),
+                    );
+                    push_g(
+                        ir,
+                        &mut cur_bb,
+                        &mut cur_insts,
+                        CmpBranchKind::I32(CmpOp::LeU),
+                        lv,
+                        neg_s,
+                        false,
+                    )?;
+                    let s3_v = emit_i32(
+                        ir,
+                        cur_bb,
+                        &mut cur_insts,
+                        Op::I32BinImm(IntBinOp::Mul, step_v, 3),
+                    );
+                    let sub_op = Op::I32Bin(IntBinOp::Sub, lv, s3_v);
+                    def_block[lm3_v.0 as usize] = cur_bb.0;
+                    def_inst[lm3_v.0 as usize] = Some(sub_op);
+                    cur_insts.push(Inst {
+                        res: Some(lm3_v),
+                        op: sub_op,
+                    });
+                    push_g(
+                        ir,
+                        &mut cur_bb,
+                        &mut cur_insts,
+                        CmpBranchKind::I32(CmpOp::LtU),
+                        init_idx,
+                        lm3_v,
+                        true,
+                    )?;
+                }
+                UnrollLim::Const(lc) => {
+                    let lu = lc as u32;
+                    let max_s = (lu >> 2).min(0u32.wrapping_sub(lu));
+                    push_g(
+                        ir,
+                        &mut cur_bb,
+                        &mut cur_insts,
+                        CmpBranchKind::I32Imm(CmpOp::LeU, max_s as i32),
+                        step_v,
+                        step_v,
+                        false,
+                    )?;
+                    let s3_v = emit_i32(
+                        ir,
+                        cur_bb,
+                        &mut cur_insts,
+                        Op::I32BinImm(IntBinOp::Mul, step_v, 3),
+                    );
+                    let lc_v = emit_i32(ir, cur_bb, &mut cur_insts, Op::ConstI32(lc));
+                    let sub_op = Op::I32Bin(IntBinOp::Sub, lc_v, s3_v);
+                    def_block[lm3_v.0 as usize] = cur_bb.0;
+                    def_inst[lm3_v.0 as usize] = Some(sub_op);
+                    cur_insts.push(Inst {
+                        res: Some(lm3_v),
+                        op: sub_op,
+                    });
+                    push_g(
+                        ir,
+                        &mut cur_bb,
+                        &mut cur_insts,
+                        CmpBranchKind::I32(CmpOp::LtU),
+                        init_idx,
+                        lm3_v,
+                        true,
+                    )?;
+                }
+            }
         } else {
+            let (step4, step3, cap) = const_bounds.unwrap();
             if is_signed && !const_i32_of(init_idx, &def_inst).is_some_and(|c| c >= 0) {
                 push_g(
                     ir,
@@ -25070,8 +26319,8 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                     lv,
                     false,
                 )?;
-                let (lm3_v, s3) = lim_m3_opt.unwrap();
-                let sub_op = Op::I32BinImm(IntBinOp::Sub, lv, s3);
+                let lm3_v = lim_m3_val.unwrap();
+                let sub_op = Op::I32BinImm(IntBinOp::Sub, lv, step3 as i32);
                 def_block[lm3_v.0 as usize] = cur_bb.0;
                 def_inst[lm3_v.0 as usize] = Some(sub_op);
                 cur_insts.push(Inst {
@@ -26535,4 +27784,1637 @@ pub fn run_stack_and_trap_elision(
         ir.elided_callee_stack_bytes = out.elided_callee_stack_bytes[bi];
     }
     Ok(out.fn_can_trap)
+}
+
+/// Outer-loop SIMD vectorization for pure nested `f32` loops with early-exit FP breaks and
+/// associative wrapping `i32` sum reductions (`Op::SimdOuterLoop`).
+///
+/// Recognizes a counted outer loop (`px` stepping by `+1` over `[start_px, end_px)` with a
+/// wrapping `i32` sum accumulator `total += res_it`) containing a pure, memory-free, trap-free
+/// counted `f32` inner loop with `1..=4` sequential early-exit FP checks breaking with
+/// `it + off_j` (e.g. Mandelbrot/Julia escape-time loops, Newton/root-finding iteration counts).
+///
+/// Compiles the loop body into an ISA-independent virtual-register micro-program
+/// (`OuterSimdLoopDesc`, `<= 12` vregs) lowered to 16-wide AVX-512 (`zmm` + `k1`), 8-wide AVX2
+/// (`ymm`), 4-wide SSE2 (`xmm`), and 4-wide AArch64 NEON with exact IEEE-754 arithmetic (NO FMA)
+/// and exact Wasm NaN comparison semantics. Dynamic bounds are runtime-guarded (`start_px <u end_px`
+/// and `end_px <=u i32::MAX` when unsigned `px -> f32` conversion is used) with unmodified scalar
+/// fallback on edge cases.
+fn vectorize_pure_outer_loops(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
+    use super::ir::{MAX_OUTER_SIMD_VREGS, OuterSimdLoopDesc, OuterSimdStep};
+
+    if ir.blocks.len() < 3 || dom.rpo.is_empty() {
+        return Ok(false);
+    }
+
+    let n_vals = ir.val_tys.len();
+    let mut def_block: Vec<u32> = vec![u32::MAX; n_vals];
+    let mut def_op: Vec<Option<Op>> = vec![None; n_vals];
+    for &p in &ir.params {
+        def_block[p.0 as usize] = 0;
+    }
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        for &p in &bb.params {
+            def_block[p.0 as usize] = bi as u32;
+        }
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                def_block[r.0 as usize] = bi as u32;
+                def_op[r.0 as usize] = Some(inst.op);
+            }
+            match inst.op {
+                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                    for &rv in ir.pool_slice(rets) {
+                        def_block[rv.0 as usize] = bi as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let resolve_copy = |mut v: Val, def_op: &[Option<Op>]| -> Val {
+        for _ in 0..8 {
+            if let Some(Op::Copy(src)) = def_op.get(v.0 as usize).copied().flatten() {
+                v = src;
+            } else {
+                break;
+            }
+        }
+        v
+    };
+    let const_i32 = |v: Val, def_op: &[Option<Op>]| -> Option<i32> {
+        let rv = resolve_copy(v, def_op);
+        match def_op.get(rv.0 as usize).copied().flatten() {
+            Some(Op::ConstI32(c)) => Some(c),
+            _ => None,
+        }
+    };
+    let const_f32 = |v: Val, def_op: &[Option<Op>]| -> Option<u32> {
+        let rv = resolve_copy(v, def_op);
+        match def_op.get(rv.0 as usize).copied().flatten() {
+            Some(Op::ConstF32(b)) => Some(b),
+            _ => None,
+        }
+    };
+
+    #[derive(Clone, Copy)]
+    enum EndPx {
+        Const(i32),
+        Val(Val),
+    }
+
+    let mut changed = false;
+    let mut touched: HashSet<u32> = fx_set();
+    let orig_n_blocks = ir.blocks.len() as u32;
+
+    for outer_hdr in 1..orig_n_blocks {
+        if touched.contains(&outer_hdr)
+            || !ir.blocks[outer_hdr as usize].is_loop_header
+            || ir.blocks[outer_hdr as usize].params.len() != 2
+        {
+            continue;
+        }
+        let p0 = ir.blocks[outer_hdr as usize].params[0];
+        let p1 = ir.blocks[outer_hdr as usize].params[1];
+        if ir.val_tys[p0.0 as usize] != Ty::I32 || ir.val_tys[p1.0 as usize] != Ty::I32 {
+            continue;
+        }
+
+        // Unique dominating outside pred `outer_pre` (`Jump`) and unique backedge `outer_latch`.
+        let mut pre_opt = None;
+        let mut latch_opt = None;
+        let mut preds_ok = true;
+        for &p in dom.preds(outer_hdr) {
+            if dom.dominates(outer_hdr, p) {
+                if latch_opt.is_some() {
+                    preds_ok = false;
+                    break;
+                }
+                latch_opt = Some(p);
+            } else {
+                if pre_opt.is_some() {
+                    preds_ok = false;
+                    break;
+                }
+                pre_opt = Some(p);
+            }
+        }
+        let (Some(outer_pre), Some(outer_latch)) = (pre_opt, latch_opt) else {
+            continue;
+        };
+        if !preds_ok
+            || touched.contains(&outer_pre)
+            || touched.contains(&outer_latch)
+            || outer_latch == outer_hdr
+            || !dom.dominates(outer_pre, outer_hdr)
+        {
+            continue;
+        }
+        let Term::Jump {
+            target: pre_tgt,
+            args: pre_args,
+        } = ir.blocks[outer_pre as usize].term
+        else {
+            continue;
+        };
+        if pre_tgt.0 != outer_hdr || pre_args.len != 2 {
+            continue;
+        }
+        let pre_args_vec: Vec<Val> = ir.pool_slice(pre_args).to_vec();
+
+        // Match `outer_latch(res_it)`: `total_next = res_it + total_p`, optional `px_next = px_p + 1`,
+        // `CmpBranch` backedge to `outer_hdr` vs exit to `outer_exit`.
+        if ir.blocks[outer_latch as usize].params.len() != 1 {
+            continue;
+        }
+        let res_it_p = ir.blocks[outer_latch as usize].params[0];
+        if ir.val_tys[res_it_p.0 as usize] != Ty::I32 {
+            continue;
+        }
+        let mut total_pos_opt: Option<(usize, Val)> = None; // (pos in outer_hdr.params, total_next)
+        let mut latch_px_next: Option<(usize, Val)> = None;
+        let mut latch_ok = true;
+        for inst in &ir.blocks[outer_latch as usize].insts {
+            match (inst.res, inst.op) {
+                (Some(r), Op::I32Bin(IntBinOp::Add, a, b)) if total_pos_opt.is_none() => {
+                    let ra = resolve_copy(a, &def_op);
+                    let rb = resolve_copy(b, &def_op);
+                    if (ra == res_it_p && rb == p0) || (rb == res_it_p && ra == p0) {
+                        total_pos_opt = Some((0, r));
+                    } else if (ra == res_it_p && rb == p1) || (rb == res_it_p && ra == p1) {
+                        total_pos_opt = Some((1, r));
+                    } else {
+                        latch_ok = false;
+                        break;
+                    }
+                }
+                (Some(r), Op::I32BinImm(IntBinOp::Add, a, 1)) if latch_px_next.is_none() => {
+                    let ra = resolve_copy(a, &def_op);
+                    if ra == p0 {
+                        latch_px_next = Some((0, r));
+                    } else if ra == p1 {
+                        latch_px_next = Some((1, r));
+                    } else {
+                        latch_ok = false;
+                        break;
+                    }
+                }
+                (Some(r), Op::I32Bin(IntBinOp::Add, a, b)) if latch_px_next.is_none() => {
+                    let ra = resolve_copy(a, &def_op);
+                    let rb = resolve_copy(b, &def_op);
+                    if (ra == p0 && const_i32(rb, &def_op) == Some(1))
+                        || (rb == p0 && const_i32(ra, &def_op) == Some(1))
+                    {
+                        latch_px_next = Some((0, r));
+                    } else if (ra == p1 && const_i32(rb, &def_op) == Some(1))
+                        || (rb == p1 && const_i32(ra, &def_op) == Some(1))
+                    {
+                        latch_px_next = Some((1, r));
+                    } else {
+                        latch_ok = false;
+                        break;
+                    }
+                }
+                (Some(_), Op::ConstI32(_)) => {}
+                _ => {
+                    latch_ok = false;
+                    break;
+                }
+            }
+        }
+        let (true, Some((total_pos, total_next))) = (latch_ok, total_pos_opt) else {
+            continue;
+        };
+        let px_pos = 1 - total_pos;
+        let px_p = ir.blocks[outer_hdr as usize].params[px_pos];
+        let init_total = pre_args_vec[total_pos];
+        let start_px = pre_args_vec[px_pos];
+
+        // Find `px_next = px_p + 1` either in `outer_latch` or in `outer_hdr`.
+        let mut px_next_opt: Option<Val> =
+            latch_px_next.and_then(|(pos, v)| (pos == px_pos).then_some(v));
+        let mut uses_unsigned_cvt = false;
+        let mut outer_hdr_ok = true;
+        for inst in &ir.blocks[outer_hdr as usize].insts {
+            match (inst.res, inst.op) {
+                (Some(r), Op::I32BinImm(IntBinOp::Add, a, 1))
+                    if resolve_copy(a, &def_op) == px_p =>
+                {
+                    px_next_opt = Some(r);
+                }
+                (Some(r), Op::I32Bin(IntBinOp::Add, a, b))
+                    if (resolve_copy(a, &def_op) == px_p && const_i32(b, &def_op) == Some(1))
+                        || (resolve_copy(b, &def_op) == px_p
+                            && const_i32(a, &def_op) == Some(1)) =>
+                {
+                    px_next_opt = Some(r);
+                }
+                (Some(_), Op::F32ConvertI32U(a)) if resolve_copy(a, &def_op) == px_p => {
+                    uses_unsigned_cvt = true;
+                }
+                (Some(_), Op::F32ConvertI32S(a)) if resolve_copy(a, &def_op) == px_p => {}
+                (
+                    Some(_),
+                    Op::F32Bin(
+                        FloatBinOp::Add | FloatBinOp::Sub | FloatBinOp::Mul | FloatBinOp::Div,
+                        ..,
+                    )
+                    | Op::F32Un(FloatUnOp::Neg | FloatUnOp::Abs | FloatUnOp::Sqrt, _)
+                    | Op::ConstF32(_)
+                    | Op::ConstI32(_)
+                    | Op::Copy(_),
+                ) => {}
+                _ => {
+                    outer_hdr_ok = false;
+                    break;
+                }
+            }
+        }
+        let (true, Some(px_next)) = (outer_hdr_ok, px_next_opt) else {
+            continue;
+        };
+
+        // Match `outer_latch.term`: `CmpBranch` testing `px_next != / <u end_px` -> `outer_hdr` vs `outer_exit`.
+        let Term::CmpBranch {
+            kind: lkind,
+            a: la,
+            b: lb,
+            then_bb: ltb,
+            then_args: lta,
+            else_bb: leb,
+            else_args: lea,
+        } = ir.blocks[outer_latch as usize].term
+        else {
+            continue;
+        };
+        let (stay_on_then, back_args, outer_exit, outer_exit_args) =
+            if ltb.0 == outer_hdr && leb.0 != outer_hdr {
+                (true, lta, leb, lea)
+            } else if leb.0 == outer_hdr && ltb.0 != outer_hdr {
+                (false, lea, ltb, lta)
+            } else {
+                continue;
+            };
+        if outer_exit.0 == 0 || back_args.len != 2 {
+            continue;
+        }
+        let back_sl = ir.pool_slice(back_args);
+        if resolve_copy(back_sl[total_pos], &def_op) != total_next
+            || resolve_copy(back_sl[px_pos], &def_op) != px_next
+        {
+            continue;
+        }
+        let end_px_opt: Option<(CmpOp, EndPx)> = match lkind {
+            CmpBranchKind::I32Imm(cop, imm) if resolve_copy(la, &def_op) == px_next => {
+                let sc = if stay_on_then { cop } else { cop.invert_int() };
+                Some((sc, EndPx::Const(imm)))
+            }
+            CmpBranchKind::I32(cop) => {
+                let sc = if stay_on_then { cop } else { cop.invert_int() };
+                let rla = resolve_copy(la, &def_op);
+                let rlb = resolve_copy(lb, &def_op);
+                if rla == px_next {
+                    Some((
+                        sc,
+                        const_i32(rlb, &def_op).map_or(EndPx::Val(rlb), EndPx::Const),
+                    ))
+                } else if rlb == px_next {
+                    Some((
+                        sc.swap(),
+                        const_i32(rla, &def_op).map_or(EndPx::Val(rla), EndPx::Const),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some((outer_stay_cop, end_px)) = end_px_opt else {
+            continue;
+        };
+        if !matches!(outer_stay_cop, CmpOp::Ne | CmpOp::LtU) {
+            continue;
+        }
+        if let EndPx::Val(ev) = end_px {
+            let db = def_block[ev.0 as usize];
+            if db == u32::MAX || !dom.dominates(db, outer_pre) {
+                continue;
+            }
+        }
+
+        // 2. Match `outer_hdr.term`: `Jump -> inner_hdr(inner_init_args)`.
+        let Term::Jump {
+            target: inner_hdr_id,
+            args: inner_init_args,
+        } = ir.blocks[outer_hdr as usize].term
+        else {
+            continue;
+        };
+        let inner_hdr = inner_hdr_id.0;
+        if inner_hdr == outer_hdr
+            || inner_hdr == outer_latch
+            || inner_hdr == outer_exit.0
+            || touched.contains(&inner_hdr)
+            || !ir.blocks[inner_hdr as usize].is_loop_header
+            || dom.preds(inner_hdr).len() != 2
+            || !dom.preds(inner_hdr).contains(&outer_hdr)
+        {
+            continue;
+        }
+        let inner_params = &ir.blocks[inner_hdr as usize].params;
+        if inner_params.len() < 2
+            || inner_params.len() > 5
+            || inner_init_args.len as usize != inner_params.len()
+        {
+            continue;
+        }
+        let inner_init_sl = ir.pool_slice(inner_init_args);
+        let mut it_pos_opt: Option<usize> = None;
+        let mut state_positions: Vec<usize> = Vec::new();
+        let mut inner_params_ok = true;
+        for (pi, &ip) in inner_params.iter().enumerate() {
+            match ir.val_tys[ip.0 as usize] {
+                Ty::I32 if it_pos_opt.is_none() => it_pos_opt = Some(pi),
+                Ty::F32 => state_positions.push(pi),
+                _ => {
+                    inner_params_ok = false;
+                    break;
+                }
+            }
+        }
+        let (true, Some(it_pos)) = (inner_params_ok, it_pos_opt) else {
+            continue;
+        };
+        if state_positions.is_empty() {
+            continue;
+        }
+        let it_p = inner_params[it_pos];
+        let Some(c_init_it) = const_i32(inner_init_sl[it_pos], &def_op) else {
+            continue;
+        };
+
+        // 3. Trace linear inner loop chain `chain = [b0=inner_hdr, ..., inner_latch]` (`1..=4` blocks)
+        //    collecting early-exit `F32` checks and optional break trampoline blocks.
+        struct InnerCheck {
+            cop: CmpOp,
+            break_on_true: bool,
+            a: Val,
+            b: Val,
+            off: i32,
+        }
+        let mut chain: Vec<u32> = Vec::new();
+        let mut checks: Vec<InnerCheck> = Vec::new();
+        let mut break_tramps: Vec<u32> = Vec::new();
+        let mut it_next_opt: Option<(Val, i32)> = None;
+        let mut inner_latch_info: Option<(u32, ValRange, Val, i32, CmpOp)> = None; // (latch_bb, back_args, nat_out, max_it, stay_cop)
+
+        let match_break_arm =
+            |cur_b: u32, tgt: BlockId, targs: ValRange| -> Option<(Option<u32>, i32)> {
+                let off_of_val = |v: Val, allowed_bb: u32| -> Option<i32> {
+                    let rv = resolve_copy(v, &def_op);
+                    if rv == it_p {
+                        return Some(0);
+                    }
+                    if def_block[rv.0 as usize] == allowed_bb {
+                        match def_op[rv.0 as usize] {
+                            Some(Op::I32BinImm(IntBinOp::Add, a, k))
+                                if resolve_copy(a, &def_op) == it_p =>
+                            {
+                                return Some(k);
+                            }
+                            Some(Op::I32Bin(IntBinOp::Add, a, b)) => {
+                                let ra = resolve_copy(a, &def_op);
+                                let rb = resolve_copy(b, &def_op);
+                                if ra == it_p {
+                                    return const_i32(rb, &def_op);
+                                }
+                                if rb == it_p {
+                                    return const_i32(ra, &def_op);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                };
+                if tgt.0 == outer_latch && targs.len == 1 {
+                    let v = ir.pool_slice(targs)[0];
+                    return off_of_val(v, cur_b).map(|k| (None, k));
+                }
+                if targs.len == 0
+                    && tgt.0 != 0
+                    && tgt.0 != outer_hdr
+                    && tgt.0 != inner_hdr
+                    && tgt.0 != outer_latch
+                    && !touched.contains(&tgt.0)
+                    && dom.preds(tgt.0) == [cur_b]
+                    && ir.blocks[tgt.0 as usize].params.is_empty()
+                {
+                    let mut tramp_ok = true;
+                    for ins in &ir.blocks[tgt.0 as usize].insts {
+                        match (ins.res, ins.op) {
+                            (Some(_), Op::I32BinImm(IntBinOp::Add, a, _))
+                                if resolve_copy(a, &def_op) == it_p => {}
+                            (Some(_), Op::ConstI32(_)) => {}
+                            _ => {
+                                tramp_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if tramp_ok
+                        && let Term::Jump {
+                            target: jt,
+                            args: ja,
+                        } = ir.blocks[tgt.0 as usize].term
+                        && jt.0 == outer_latch
+                        && ja.len == 1
+                    {
+                        let v = ir.pool_slice(ja)[0];
+                        return off_of_val(v, tgt.0).map(|k| (Some(tgt.0), k));
+                    }
+                }
+                None
+            };
+
+        let mut cur_b = inner_hdr;
+        let mut chain_ok = true;
+        for _step_b in 0..5 {
+            if chain.contains(&cur_b) || touched.contains(&cur_b) {
+                chain_ok = false;
+                break;
+            }
+            chain.push(cur_b);
+            for inst in &ir.blocks[cur_b as usize].insts {
+                match (inst.res, inst.op) {
+                    (
+                        Some(_),
+                        Op::F32Bin(
+                            FloatBinOp::Add | FloatBinOp::Sub | FloatBinOp::Mul | FloatBinOp::Div,
+                            ..,
+                        )
+                        | Op::F32Un(FloatUnOp::Neg | FloatUnOp::Abs | FloatUnOp::Sqrt, _)
+                        | Op::ConstF32(_)
+                        | Op::ConstI32(_)
+                        | Op::Copy(_),
+                    ) => {}
+                    (Some(r), Op::I32BinImm(IntBinOp::Add, a, k))
+                        if resolve_copy(a, &def_op) == it_p && (1..=16).contains(&k) =>
+                    {
+                        it_next_opt = Some((r, k));
+                    }
+                    _ => {
+                        chain_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !chain_ok {
+                break;
+            }
+
+            match ir.blocks[cur_b as usize].term {
+                Term::CmpBranch {
+                    kind: CmpBranchKind::F32(cop),
+                    a,
+                    b,
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                } if checks.len() < 4 => {
+                    let tb = match_break_arm(cur_b, then_bb, then_args);
+                    let eb = match_break_arm(cur_b, else_bb, else_args);
+                    match (tb, eb) {
+                        (Some((tr, off)), None) if else_args.len == 0 => {
+                            if let Some(tbb) = tr {
+                                break_tramps.push(tbb);
+                            }
+                            checks.push(InnerCheck {
+                                cop,
+                                break_on_true: true,
+                                a: resolve_copy(a, &def_op),
+                                b: resolve_copy(b, &def_op),
+                                off,
+                            });
+                            let nxt = else_bb.0;
+                            if dom.preds(nxt) != [cur_b]
+                                || !ir.blocks[nxt as usize].params.is_empty()
+                            {
+                                chain_ok = false;
+                                break;
+                            }
+                            cur_b = nxt;
+                        }
+                        (None, Some((tr, off))) if then_args.len == 0 => {
+                            if let Some(tbb) = tr {
+                                break_tramps.push(tbb);
+                            }
+                            checks.push(InnerCheck {
+                                cop,
+                                break_on_true: false,
+                                a: resolve_copy(a, &def_op),
+                                b: resolve_copy(b, &def_op),
+                                off,
+                            });
+                            let nxt = then_bb.0;
+                            if dom.preds(nxt) != [cur_b]
+                                || !ir.blocks[nxt as usize].params.is_empty()
+                            {
+                                chain_ok = false;
+                                break;
+                            }
+                            cur_b = nxt;
+                        }
+                        _ => {
+                            chain_ok = false;
+                            break;
+                        }
+                    }
+                }
+                Term::CmpBranch {
+                    kind,
+                    a,
+                    b,
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                } => {
+                    let Some((it_next, _)) = it_next_opt else {
+                        chain_ok = false;
+                        break;
+                    };
+                    let match_nat_exit =
+                        |tgt: BlockId, targs: ValRange| -> Option<(Option<u32>, Val)> {
+                            if tgt.0 == outer_latch && targs.len == 1 {
+                                return Some((None, ir.pool_slice(targs)[0]));
+                            }
+                            if targs.len == 0
+                                && tgt.0 != 0
+                                && tgt.0 != outer_hdr
+                                && tgt.0 != inner_hdr
+                                && tgt.0 != outer_latch
+                                && !touched.contains(&tgt.0)
+                                && dom.preds(tgt.0) == [cur_b]
+                                && ir.blocks[tgt.0 as usize].params.is_empty()
+                                && ir.blocks[tgt.0 as usize]
+                                    .insts
+                                    .iter()
+                                    .all(|ins| matches!(ins.op, Op::ConstI32(_) | Op::Copy(_)))
+                                && let Term::Jump {
+                                    target: jt,
+                                    args: ja,
+                                } = ir.blocks[tgt.0 as usize].term
+                                && jt.0 == outer_latch
+                                && ja.len == 1
+                            {
+                                return Some((Some(tgt.0), ir.pool_slice(ja)[0]));
+                            }
+                            None
+                        };
+                    let (back_on_then, back_args, nat_tramp, nat_out_val) = if then_bb.0
+                        == inner_hdr
+                        && let Some((tr, nv)) = match_nat_exit(else_bb, else_args)
+                    {
+                        (true, then_args, tr, nv)
+                    } else if else_bb.0 == inner_hdr
+                        && let Some((tr, nv)) = match_nat_exit(then_bb, then_args)
+                    {
+                        (false, else_args, tr, nv)
+                    } else {
+                        chain_ok = false;
+                        break;
+                    };
+                    if let Some(tbb) = nat_tramp {
+                        break_tramps.push(tbb);
+                    }
+                    let cmp_info = match kind {
+                        CmpBranchKind::I32Imm(cop, imm) if resolve_copy(a, &def_op) == it_next => {
+                            let sc = if back_on_then { cop } else { cop.invert_int() };
+                            Some((sc, imm))
+                        }
+                        CmpBranchKind::I32(cop) => {
+                            let sc = if back_on_then { cop } else { cop.invert_int() };
+                            let ra = resolve_copy(a, &def_op);
+                            let rb = resolve_copy(b, &def_op);
+                            if ra == it_next {
+                                const_i32(rb, &def_op).map(|m| (sc, m))
+                            } else if rb == it_next {
+                                const_i32(ra, &def_op).map(|m| (sc.swap(), m))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    let Some((sc, max_it)) = cmp_info else {
+                        chain_ok = false;
+                        break;
+                    };
+                    inner_latch_info = Some((cur_b, back_args, nat_out_val, max_it, sc));
+                    break;
+                }
+                _ => {
+                    chain_ok = false;
+                    break;
+                }
+            }
+        }
+        let (
+            true,
+            Some((it_next, step_it)),
+            Some((inner_latch, inner_back_args, nat_out, max_it, inner_stay_cop)),
+        ) = (chain_ok, it_next_opt, inner_latch_info)
+        else {
+            continue;
+        };
+        if checks.is_empty()
+            || !dom.preds(inner_hdr).contains(&inner_latch)
+            || inner_back_args.len as usize != inner_params.len()
+        {
+            continue;
+        }
+        let inner_back_sl = ir.pool_slice(inner_back_args);
+        if resolve_copy(inner_back_sl[it_pos], &def_op) != it_next {
+            continue;
+        }
+
+        // Compute exact inner trip count & verify `base_it` + `delta_after` matches every break + natural exit.
+        let iu = c_init_it as u32;
+        let mu = max_it as u32;
+        let su = step_it as u32;
+        let trips_opt: Option<u32> = match inner_stay_cop {
+            CmpOp::Ne if iu < mu && (mu - iu).is_multiple_of(su) => Some((mu - iu) / su),
+            CmpOp::LtU if iu < mu => {
+                let t = (mu - iu - 1) / su + 1;
+                (u64::from(iu) + u64::from(t) * u64::from(su) <= u64::from(u32::MAX)).then_some(t)
+            }
+            CmpOp::LtS if c_init_it < max_it => {
+                let diff = (i64::from(max_it) - i64::from(c_init_it)) as u64;
+                let t = (diff - 1) / u64::from(su) + 1;
+                (i64::from(c_init_it) + (t as i64) * i64::from(step_it) <= i64::from(i32::MAX))
+                    .then_some(t as u32)
+            }
+            _ => None,
+        };
+        let Some(inner_trips) = trips_opt else {
+            continue;
+        };
+        if inner_trips == 0 || inner_trips > 1_000_000 {
+            continue;
+        }
+        let base_it = c_init_it.wrapping_add(checks[0].off);
+        let mut deltas: Vec<i32> = Vec::with_capacity(checks.len());
+        for j in 0..checks.len() - 1 {
+            deltas.push(checks[j + 1].off.wrapping_sub(checks[j].off));
+        }
+        deltas.push(step_it.wrapping_sub(checks[checks.len() - 1].off.wrapping_sub(checks[0].off)));
+        let expected_nat = base_it.wrapping_add((inner_trips as i32).wrapping_mul(step_it));
+        let actual_nat_opt = if resolve_copy(nat_out, &def_op) == it_next {
+            Some(c_init_it.wrapping_add((inner_trips as i32).wrapping_mul(step_it)))
+        } else {
+            const_i32(nat_out, &def_op)
+        };
+        if actual_nat_opt != Some(expected_nat) {
+            continue;
+        }
+
+        // 4. Verify closed loop ownership and zero escaping values (other than `total_next`).
+        let mut owned_bbs: HashSet<u32> = fx_set();
+        owned_bbs.insert(outer_hdr);
+        owned_bbs.insert(outer_latch);
+        for &b in &chain {
+            owned_bbs.insert(b);
+        }
+        for &b in &break_tramps {
+            owned_bbs.insert(b);
+        }
+        if owned_bbs.contains(&outer_exit.0) || owned_bbs.contains(&outer_pre) {
+            continue;
+        }
+        let all_internal_preds_ok = owned_bbs
+            .iter()
+            .all(|&b| b == outer_hdr || dom.preds(b).iter().all(|p| owned_bbs.contains(p)));
+        if !all_internal_preds_ok {
+            continue;
+        }
+        let outer_exit_args_vec: Vec<Val> = ir.pool_slice(outer_exit_args).to_vec();
+        let mut outside_uses_total_next = false;
+        let mut bad_escape = false;
+        // Check raw `v` (not copy-resolved) so an escaping `Op::Copy` defined inside `owned_bbs`
+        // is properly rejected instead of leaving a dangling/non-dominating SSA use after rewrite.
+        for &v in &outer_exit_args_vec {
+            if v == total_next {
+                continue;
+            }
+            let db = def_block[v.0 as usize];
+            if db == u32::MAX || owned_bbs.contains(&db) {
+                bad_escape = true;
+                break;
+            }
+        }
+        if !bad_escape {
+            for (bi, bb) in ir.blocks.iter().enumerate() {
+                if owned_bbs.contains(&(bi as u32)) {
+                    continue;
+                }
+                for inst in &bb.insts {
+                    inst.op.for_each_use(&ir.val_pool, |v| {
+                        if v == total_next {
+                            outside_uses_total_next = true;
+                        } else if (v.0 as usize) < def_block.len()
+                            && owned_bbs.contains(&def_block[v.0 as usize])
+                        {
+                            bad_escape = true;
+                        }
+                    });
+                }
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    if v == total_next {
+                        outside_uses_total_next = true;
+                    } else if (v.0 as usize) < def_block.len()
+                        && owned_bbs.contains(&def_block[v.0 as usize])
+                    {
+                        bad_escape = true;
+                    }
+                });
+                if bad_escape {
+                    break;
+                }
+            }
+        }
+        if bad_escape {
+            continue;
+        }
+
+        // 5. Build `OuterSimdLoopDesc` with exact virtual register allocation (`0..MAX_OUTER_SIMD_VREGS`).
+        let mut f32_args: Vec<Val> = Vec::new();
+        let mut const_f32s: Vec<u32> = Vec::new();
+        let mut intern_const = |bits: u32| -> Option<u8> {
+            if let Some(p) = const_f32s.iter().position(|&b| b == bits) {
+                return u8::try_from(p).ok();
+            }
+            let idx = u8::try_from(const_f32s.len()).ok()?;
+            const_f32s.push(bits);
+            Some(idx)
+        };
+
+        // Scan all F32 values referenced by `outer_hdr` and `chain`.
+        let mut outer_f32_used_in_chain: Vec<Val> = Vec::new();
+        let mut chain_consts: Vec<u32> = Vec::new();
+        let mut scan_ok = true;
+        let record_f32_ref = |raw_v: Val,
+                              in_chain: bool,
+                              f32_args: &mut Vec<Val>,
+                              outer_used: &mut Vec<Val>,
+                              ch_consts: &mut Vec<u32>|
+         -> bool {
+            let v = resolve_copy(raw_v, &def_op);
+            if ir.val_tys[v.0 as usize] != Ty::F32 {
+                return false;
+            }
+            if let Some(bits) = const_f32(v, &def_op) {
+                if in_chain && !ch_consts.contains(&bits) {
+                    ch_consts.push(bits);
+                }
+                return true;
+            }
+            let db = def_block[v.0 as usize];
+            if db == u32::MAX {
+                return false;
+            }
+            if !owned_bbs.contains(&db) {
+                if !dom.dominates(db, outer_pre) {
+                    return false;
+                }
+                if !f32_args.contains(&v) {
+                    f32_args.push(v);
+                }
+                return true;
+            }
+            if db == outer_hdr {
+                if in_chain && !outer_used.contains(&v) {
+                    outer_used.push(v);
+                }
+                return true;
+            }
+            in_chain && chain.contains(&db)
+        };
+
+        for inst in &ir.blocks[outer_hdr as usize].insts {
+            match inst.op {
+                Op::F32Bin(_, a, b) => {
+                    if !record_f32_ref(
+                        a,
+                        false,
+                        &mut f32_args,
+                        &mut outer_f32_used_in_chain,
+                        &mut chain_consts,
+                    ) || !record_f32_ref(
+                        b,
+                        false,
+                        &mut f32_args,
+                        &mut outer_f32_used_in_chain,
+                        &mut chain_consts,
+                    ) {
+                        scan_ok = false;
+                        break;
+                    }
+                }
+                Op::F32Un(_, a)
+                    if !record_f32_ref(
+                        a,
+                        false,
+                        &mut f32_args,
+                        &mut outer_f32_used_in_chain,
+                        &mut chain_consts,
+                    ) =>
+                {
+                    scan_ok = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        for &sp in &state_positions {
+            if !record_f32_ref(
+                inner_init_sl[sp],
+                false,
+                &mut f32_args,
+                &mut outer_f32_used_in_chain,
+                &mut chain_consts,
+            ) {
+                scan_ok = false;
+            }
+        }
+        for &cb in &chain {
+            for inst in &ir.blocks[cb as usize].insts {
+                match inst.op {
+                    Op::F32Bin(_, a, b) => {
+                        if !record_f32_ref(
+                            a,
+                            true,
+                            &mut f32_args,
+                            &mut outer_f32_used_in_chain,
+                            &mut chain_consts,
+                        ) || !record_f32_ref(
+                            b,
+                            true,
+                            &mut f32_args,
+                            &mut outer_f32_used_in_chain,
+                            &mut chain_consts,
+                        ) {
+                            scan_ok = false;
+                            break;
+                        }
+                    }
+                    Op::F32Un(_, a)
+                        if !record_f32_ref(
+                            a,
+                            true,
+                            &mut f32_args,
+                            &mut outer_f32_used_in_chain,
+                            &mut chain_consts,
+                        ) =>
+                    {
+                        scan_ok = false;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for chk in &checks {
+            if !record_f32_ref(
+                chk.a,
+                true,
+                &mut f32_args,
+                &mut outer_f32_used_in_chain,
+                &mut chain_consts,
+            ) || !record_f32_ref(
+                chk.b,
+                true,
+                &mut f32_args,
+                &mut outer_f32_used_in_chain,
+                &mut chain_consts,
+            ) {
+                scan_ok = false;
+            }
+        }
+        for &sp in &state_positions {
+            if !record_f32_ref(
+                inner_back_sl[sp],
+                true,
+                &mut f32_args,
+                &mut outer_f32_used_in_chain,
+                &mut chain_consts,
+            ) {
+                scan_ok = false;
+            }
+        }
+        if !scan_ok {
+            continue;
+        }
+
+        // Assign pinned vregs:
+        //   0..n_f32_args                : runtime f32_args
+        //   + chain_consts               : one-time init_steps BcastConst
+        //   + outer_f32_used_in_chain    : computed in pre_steps, live across inner loop
+        //   + state_positions            : inner loop FP state params
+        let mut val_vreg: HashMap<Val, u8> = fx_map();
+        let mut const_pinned: HashMap<u32, u8> = fx_map();
+        let mut next_pin: u8 = 0;
+        let mut init_steps: Vec<OuterSimdStep> = Vec::new();
+
+        for &fv in &f32_args {
+            if next_pin >= MAX_OUTER_SIMD_VREGS {
+                scan_ok = false;
+                break;
+            }
+            val_vreg.insert(fv, next_pin);
+            next_pin += 1;
+        }
+        for &bits in &chain_consts {
+            if next_pin >= MAX_OUTER_SIMD_VREGS {
+                scan_ok = false;
+                break;
+            }
+            let Some(cidx) = intern_const(bits) else {
+                scan_ok = false;
+                break;
+            };
+            init_steps.push(OuterSimdStep::BcastConst {
+                dst: next_pin,
+                const_idx: cidx,
+            });
+            const_pinned.insert(bits, next_pin);
+            next_pin += 1;
+        }
+        let mut outer_pinned_set: HashMap<Val, u8> = fx_map();
+        for &ov in &outer_f32_used_in_chain {
+            if next_pin >= MAX_OUTER_SIMD_VREGS {
+                scan_ok = false;
+                break;
+            }
+            outer_pinned_set.insert(ov, next_pin);
+            val_vreg.insert(ov, next_pin);
+            next_pin += 1;
+        }
+        let mut state_vregs: Vec<u8> = Vec::with_capacity(state_positions.len());
+        for &sp in &state_positions {
+            if next_pin >= MAX_OUTER_SIMD_VREGS {
+                scan_ok = false;
+                break;
+            }
+            let sv = inner_params[sp];
+            val_vreg.insert(sv, next_pin);
+            state_vregs.push(next_pin);
+            next_pin += 1;
+        }
+        let n_pinned = next_pin;
+        if !scan_ok || n_pinned >= MAX_OUTER_SIMD_VREGS {
+            continue;
+        }
+        let mut max_vreg: u8 = n_pinned.saturating_sub(1);
+
+        // Compile `pre_steps` (outer_hdr F32 ops + inner state initialization).
+        let outer_insts: Vec<Inst> = ir.blocks[outer_hdr as usize].insts.clone();
+        let mut pre_last_use: HashMap<Val, usize> = fx_map();
+        for (idx, inst) in outer_insts.iter().enumerate() {
+            match inst.op {
+                Op::F32Bin(_, a, b) => {
+                    pre_last_use.insert(resolve_copy(a, &def_op), idx);
+                    pre_last_use.insert(resolve_copy(b, &def_op), idx);
+                }
+                Op::F32Un(_, a) => {
+                    pre_last_use.insert(resolve_copy(a, &def_op), idx);
+                }
+                _ => {}
+            }
+        }
+        for &ov in &outer_f32_used_in_chain {
+            pre_last_use.insert(ov, usize::MAX);
+        }
+        for &sp in &state_positions {
+            pre_last_use.insert(resolve_copy(inner_init_sl[sp], &def_op), usize::MAX);
+        }
+
+        let mut pre_steps: Vec<OuterSimdStep> = Vec::new();
+        let mut pre_vreg: HashMap<Val, u8> = val_vreg.clone();
+        let mut in_use: u16 = (1u16 << n_pinned) - 1;
+        let alloc_temp = |in_use: &mut u16, max_vreg: &mut u8| -> Option<u8> {
+            for r in n_pinned..MAX_OUTER_SIMD_VREGS {
+                if (*in_use & (1u16 << r)) == 0 {
+                    *in_use |= 1u16 << r;
+                    *max_vreg = (*max_vreg).max(r);
+                    return Some(r);
+                }
+            }
+            None
+        };
+        let mut pre_ok = true;
+        for (idx, inst) in outer_insts.iter().enumerate() {
+            let Some(r) = inst.res else { continue };
+            if ir.val_tys[r.0 as usize] != Ty::F32
+                || matches!(inst.op, Op::ConstF32(_) | Op::Copy(_))
+            {
+                continue;
+            }
+            if !pre_last_use.contains_key(&r) {
+                continue;
+            }
+            // Helper to obtain vreg for an operand in `pre_steps`, materializing unpinned ConstF32 into a temp.
+            let mut ephem_temps: Vec<u8> = Vec::new();
+            let mut get_pre_op = |raw_v: Val,
+                                  in_use: &mut u16,
+                                  max_vreg: &mut u8,
+                                  pre_steps: &mut Vec<OuterSimdStep>,
+                                  ephem: &mut Vec<u8>|
+             -> Option<u8> {
+                let v = resolve_copy(raw_v, &def_op);
+                if let Some(&vr) = pre_vreg.get(&v) {
+                    return Some(vr);
+                }
+                if let Some(bits) = const_f32(v, &def_op) {
+                    if let Some(&vr) = const_pinned.get(&bits) {
+                        return Some(vr);
+                    }
+                    let cidx = intern_const(bits)?;
+                    let t = alloc_temp(in_use, max_vreg)?;
+                    pre_steps.push(OuterSimdStep::BcastConst {
+                        dst: t,
+                        const_idx: cidx,
+                    });
+                    ephem.push(t);
+                    return Some(t);
+                }
+                None
+            };
+
+            let step_built: Option<OuterSimdStep> = match inst.op {
+                Op::F32ConvertI32U(_) | Op::F32ConvertI32S(_) => {
+                    let signed = matches!(inst.op, Op::F32ConvertI32S(_));
+                    let dst = if let Some(&p) = outer_pinned_set.get(&r) {
+                        p
+                    } else if let Some(t) = alloc_temp(&mut in_use, &mut max_vreg) {
+                        pre_vreg.insert(r, t);
+                        t
+                    } else {
+                        pre_ok = false;
+                        break;
+                    };
+                    Some(OuterSimdStep::CvtPxToF32 { dst, signed })
+                }
+                Op::F32Bin(bop, a, b) => {
+                    let (Some(lv), Some(rv)) = (
+                        get_pre_op(
+                            a,
+                            &mut in_use,
+                            &mut max_vreg,
+                            &mut pre_steps,
+                            &mut ephem_temps,
+                        ),
+                        get_pre_op(
+                            b,
+                            &mut in_use,
+                            &mut max_vreg,
+                            &mut pre_steps,
+                            &mut ephem_temps,
+                        ),
+                    ) else {
+                        pre_ok = false;
+                        break;
+                    };
+                    // Release dying temps so `dst` can reuse them in-place!
+                    for &et in &ephem_temps {
+                        in_use &= !(1u16 << et);
+                    }
+                    for raw_op in [a, b] {
+                        let ov = resolve_copy(raw_op, &def_op);
+                        if pre_last_use.get(&ov) == Some(&idx)
+                            && let Some(&vr) = pre_vreg.get(&ov)
+                            && vr >= n_pinned
+                        {
+                            in_use &= !(1u16 << vr);
+                        }
+                    }
+                    let dst = if let Some(&p) = outer_pinned_set.get(&r) {
+                        p
+                    } else if let Some(t) = alloc_temp(&mut in_use, &mut max_vreg) {
+                        pre_vreg.insert(r, t);
+                        t
+                    } else {
+                        pre_ok = false;
+                        break;
+                    };
+                    Some(OuterSimdStep::F32Bin {
+                        op: bop,
+                        dst,
+                        lhs: lv,
+                        rhs: rv,
+                    })
+                }
+                Op::F32Un(uop, a) => {
+                    let Some(sv) = get_pre_op(
+                        a,
+                        &mut in_use,
+                        &mut max_vreg,
+                        &mut pre_steps,
+                        &mut ephem_temps,
+                    ) else {
+                        pre_ok = false;
+                        break;
+                    };
+                    for &et in &ephem_temps {
+                        in_use &= !(1u16 << et);
+                    }
+                    let ov = resolve_copy(a, &def_op);
+                    if pre_last_use.get(&ov) == Some(&idx)
+                        && let Some(&vr) = pre_vreg.get(&ov)
+                        && vr >= n_pinned
+                    {
+                        in_use &= !(1u16 << vr);
+                    }
+                    let dst = if let Some(&p) = outer_pinned_set.get(&r) {
+                        p
+                    } else if let Some(t) = alloc_temp(&mut in_use, &mut max_vreg) {
+                        pre_vreg.insert(r, t);
+                        t
+                    } else {
+                        pre_ok = false;
+                        break;
+                    };
+                    Some(OuterSimdStep::F32Un {
+                        op: uop,
+                        dst,
+                        src: sv,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(st) = step_built {
+                pre_steps.push(st);
+            }
+        }
+        if !pre_ok {
+            continue;
+        }
+        // Initialize inner state vregs at end of `pre_steps`.
+        for (mi, &sp) in state_positions.iter().enumerate() {
+            let iv = resolve_copy(inner_init_sl[sp], &def_op);
+            let dst = state_vregs[mi];
+            if let Some(bits) = const_f32(iv, &def_op) {
+                if let Some(&src) = const_pinned.get(&bits) {
+                    pre_steps.push(OuterSimdStep::Move { dst, src });
+                } else if let Some(cidx) = intern_const(bits) {
+                    pre_steps.push(OuterSimdStep::BcastConst {
+                        dst,
+                        const_idx: cidx,
+                    });
+                } else {
+                    pre_ok = false;
+                    break;
+                }
+            } else if let Some(&src) = pre_vreg.get(&iv) {
+                if src != dst {
+                    pre_steps.push(OuterSimdStep::Move { dst, src });
+                }
+            } else {
+                pre_ok = false;
+                break;
+            }
+        }
+        if !pre_ok {
+            continue;
+        }
+
+        // Compile `inner_steps` + `backedge_copies`.
+        enum InnerItem {
+            Inst(Inst),
+            Break {
+                cop: CmpOp,
+                break_on_true: bool,
+                a: Val,
+                b: Val,
+                delta: i32,
+            },
+        }
+        let mut items: Vec<InnerItem> = Vec::new();
+        for (ci, &cb) in chain.iter().enumerate() {
+            for &ins in &ir.blocks[cb as usize].insts {
+                if let Some(r) = ins.res
+                    && ir.val_tys[r.0 as usize] == Ty::F32
+                    && matches!(ins.op, Op::F32Bin(..) | Op::F32Un(..))
+                {
+                    items.push(InnerItem::Inst(ins));
+                }
+            }
+            if ci < checks.len() {
+                let chk = &checks[ci];
+                items.push(InnerItem::Break {
+                    cop: chk.cop,
+                    break_on_true: chk.break_on_true,
+                    a: chk.a,
+                    b: chk.b,
+                    delta: deltas[ci],
+                });
+            }
+        }
+        let mut inner_last_use: HashMap<Val, usize> = fx_map();
+        for (idx, item) in items.iter().enumerate() {
+            match *item {
+                InnerItem::Inst(ins) => match ins.op {
+                    Op::F32Bin(_, a, b) => {
+                        inner_last_use.insert(resolve_copy(a, &def_op), idx);
+                        inner_last_use.insert(resolve_copy(b, &def_op), idx);
+                    }
+                    Op::F32Un(_, a) => {
+                        inner_last_use.insert(resolve_copy(a, &def_op), idx);
+                    }
+                    _ => {}
+                },
+                InnerItem::Break { a, b, .. } => {
+                    inner_last_use.insert(resolve_copy(a, &def_op), idx);
+                    inner_last_use.insert(resolve_copy(b, &def_op), idx);
+                }
+            }
+        }
+        for &sp in &state_positions {
+            inner_last_use.insert(resolve_copy(inner_back_sl[sp], &def_op), usize::MAX);
+        }
+
+        let mut inner_vreg: HashMap<Val, u8> = val_vreg;
+        let mut inner_steps: Vec<OuterSimdStep> = Vec::new();
+        in_use = (1u16 << n_pinned) - 1;
+        let get_in_vreg = |raw_v: Val, inner_vreg: &HashMap<Val, u8>| -> Option<u8> {
+            let v = resolve_copy(raw_v, &def_op);
+            if let Some(&vr) = inner_vreg.get(&v) {
+                return Some(vr);
+            }
+            if let Some(bits) = const_f32(v, &def_op) {
+                return const_pinned.get(&bits).copied();
+            }
+            None
+        };
+        let mut inner_ok = true;
+        for (idx, item) in items.iter().enumerate() {
+            match *item {
+                InnerItem::Inst(ins) => {
+                    let r = ins.res.unwrap();
+                    if !inner_last_use.contains_key(&r) {
+                        continue;
+                    }
+                    match ins.op {
+                        Op::F32Bin(bop, a, b) => {
+                            let (Some(lv), Some(rv)) =
+                                (get_in_vreg(a, &inner_vreg), get_in_vreg(b, &inner_vreg))
+                            else {
+                                inner_ok = false;
+                                break;
+                            };
+                            for raw_op in [a, b] {
+                                let ov = resolve_copy(raw_op, &def_op);
+                                if inner_last_use.get(&ov) == Some(&idx)
+                                    && let Some(&vr) = inner_vreg.get(&ov)
+                                    && vr >= n_pinned
+                                {
+                                    in_use &= !(1u16 << vr);
+                                }
+                            }
+                            let Some(dst) = alloc_temp(&mut in_use, &mut max_vreg) else {
+                                inner_ok = false;
+                                break;
+                            };
+                            inner_vreg.insert(r, dst);
+                            inner_steps.push(OuterSimdStep::F32Bin {
+                                op: bop,
+                                dst,
+                                lhs: lv,
+                                rhs: rv,
+                            });
+                        }
+                        Op::F32Un(uop, a) => {
+                            let Some(sv) = get_in_vreg(a, &inner_vreg) else {
+                                inner_ok = false;
+                                break;
+                            };
+                            let ov = resolve_copy(a, &def_op);
+                            if inner_last_use.get(&ov) == Some(&idx)
+                                && let Some(&vr) = inner_vreg.get(&ov)
+                                && vr >= n_pinned
+                            {
+                                in_use &= !(1u16 << vr);
+                            }
+                            let Some(dst) = alloc_temp(&mut in_use, &mut max_vreg) else {
+                                inner_ok = false;
+                                break;
+                            };
+                            inner_vreg.insert(r, dst);
+                            inner_steps.push(OuterSimdStep::F32Un {
+                                op: uop,
+                                dst,
+                                src: sv,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                InnerItem::Break {
+                    cop,
+                    break_on_true,
+                    a,
+                    b,
+                    delta,
+                } => {
+                    let (Some(lv), Some(rv)) =
+                        (get_in_vreg(a, &inner_vreg), get_in_vreg(b, &inner_vreg))
+                    else {
+                        inner_ok = false;
+                        break;
+                    };
+                    inner_steps.push(OuterSimdStep::BreakIf {
+                        cop,
+                        break_on_true,
+                        lhs: lv,
+                        rhs: rv,
+                        delta_after: delta,
+                    });
+                    for raw_op in [a, b] {
+                        let ov = resolve_copy(raw_op, &def_op);
+                        if inner_last_use.get(&ov) == Some(&idx)
+                            && let Some(&vr) = inner_vreg.get(&ov)
+                            && vr >= n_pinned
+                        {
+                            in_use &= !(1u16 << vr);
+                        }
+                    }
+                }
+            }
+        }
+        if !inner_ok {
+            continue;
+        }
+        let mut backedge_copies: Vec<(u8, u8)> = Vec::with_capacity(state_positions.len());
+        for (mi, &sp) in state_positions.iter().enumerate() {
+            let Some(src) = get_in_vreg(inner_back_sl[sp], &inner_vreg) else {
+                inner_ok = false;
+                break;
+            };
+            backedge_copies.push((state_vregs[mi], src));
+        }
+        let n_vregs = (max_vreg + 1).max(n_pinned);
+        if !inner_ok || n_vregs > MAX_OUTER_SIMD_VREGS {
+            continue;
+        }
+
+        // 6. Rewrite CFG: static constant safe bounds replace directly; dynamic bounds get a guard.
+        let static_safe = match (const_i32(start_px, &def_op), end_px) {
+            (Some(cs), EndPx::Const(ce)) => {
+                let su = cs as u32;
+                let eu = ce as u32;
+                su < eu && eu - su >= 4 && (!uses_unsigned_cvt || eu <= i32::MAX as u32)
+            }
+            _ => false,
+        };
+        if !static_safe && outside_uses_total_next && dom.preds(outer_exit.0) != [outer_latch] {
+            // Dynamic-bound fast+slow split can only materialize an exit block param for
+            // `total_next` when `outer_latch` is `outer_exit`'s sole predecessor.
+            continue;
+        }
+        if ir.blocks.len() + 4 > MAX_BLOCKS_PER_FN
+            || ir.val_tys.len() + 8 > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + f32_args.len() + outer_exit_args_vec.len() * 2 + 10
+                > MAX_VAL_POOL_PER_FN
+        {
+            continue;
+        }
+
+        let desc_idx = ir.outer_simd_loops.len() as u32;
+        ir.outer_simd_loops.push(OuterSimdLoopDesc {
+            n_f32_args: f32_args.len() as u8,
+            n_vregs,
+            const_f32s,
+            base_it,
+            inner_trips,
+            init_steps,
+            pre_steps,
+            inner_steps,
+            backedge_copies,
+        });
+
+        let mut push_val = |ir: &mut IrFunc, ty: Ty, bb: u32, op: Option<Op>| -> Val {
+            let v = ir.push_val(ty);
+            def_block.push(bb);
+            def_op.push(op);
+            v
+        };
+
+        if static_safe {
+            let EndPx::Const(ce) = end_px else {
+                unreachable!()
+            };
+            let end_v = push_val(ir, Ty::I32, outer_pre, Some(Op::ConstI32(ce)));
+            let mut simd_args_vec = Vec::with_capacity(2 + f32_args.len());
+            simd_args_vec.push(start_px);
+            simd_args_vec.push(end_v);
+            simd_args_vec.extend_from_slice(&f32_args);
+            let simd_args = ir.push_pool(&simd_args_vec)?;
+            let simd_op = Op::SimdOuterLoop {
+                desc_idx,
+                args: simd_args,
+            };
+            let vec_sum = push_val(ir, Ty::I32, outer_pre, Some(simd_op));
+            let add_op = Op::I32Bin(IntBinOp::Add, init_total, vec_sum);
+            let total_final = push_val(ir, Ty::I32, outer_pre, Some(add_op));
+            ir.blocks[outer_pre as usize].insts.push(Inst {
+                res: Some(end_v),
+                op: Op::ConstI32(ce),
+            });
+            ir.blocks[outer_pre as usize].insts.push(Inst {
+                res: Some(vec_sum),
+                op: simd_op,
+            });
+            ir.blocks[outer_pre as usize].insts.push(Inst {
+                res: Some(total_final),
+                op: add_op,
+            });
+            let mapped_exit_vec: Vec<Val> = outer_exit_args_vec
+                .iter()
+                .map(|&v| if v == total_next { total_final } else { v })
+                .collect();
+            let mapped_exit = ir.push_pool(&mapped_exit_vec)?;
+            ir.blocks[outer_pre as usize].term = Term::Jump {
+                target: outer_exit,
+                args: mapped_exit,
+            };
+
+            if outside_uses_total_next {
+                let mut pool = std::mem::take(&mut ir.val_pool);
+                let subst_total = |v: &mut Val| {
+                    if *v == total_next {
+                        *v = total_final;
+                    }
+                };
+                for (bi, bb) in ir.blocks.iter_mut().enumerate() {
+                    if owned_bbs.contains(&(bi as u32)) {
+                        continue;
+                    }
+                    for ins in &mut bb.insts {
+                        rewrite_op_uses_with(&mut ins.op, &mut pool, subst_total);
+                        if let Some(r) = ins.res {
+                            def_op[r.0 as usize] = Some(ins.op);
+                        }
+                    }
+                    rewrite_term_uses_with(&mut bb.term, &mut pool, &ir.br_tables, subst_total);
+                }
+                ir.val_pool = pool;
+            }
+            for &b in &owned_bbs {
+                ir.blocks[b as usize].params.clear();
+                ir.blocks[b as usize].insts.clear();
+                ir.blocks[b as usize].term = Term::Unreachable;
+                ir.blocks[b as usize].is_loop_header = false;
+            }
+        } else {
+            // Dynamic bounds: guard `start_px <u end_px` (and `end_px <=u i32::MAX` if unsigned cvt),
+            // keeping the exact original scalar loop on the slow path!
+            let fast_bb = BlockId(ir.blocks.len() as u32);
+            let mut fast_insts: Vec<Inst> = Vec::new();
+            let end_v = match end_px {
+                EndPx::Val(ev) => ev,
+                EndPx::Const(ce) => {
+                    let v = push_val(ir, Ty::I32, outer_pre, Some(Op::ConstI32(ce)));
+                    ir.blocks[outer_pre as usize].insts.push(Inst {
+                        res: Some(v),
+                        op: Op::ConstI32(ce),
+                    });
+                    v
+                }
+            };
+            let mut simd_args_vec = Vec::with_capacity(2 + f32_args.len());
+            simd_args_vec.push(start_px);
+            simd_args_vec.push(end_v);
+            simd_args_vec.extend_from_slice(&f32_args);
+            let simd_args = ir.push_pool(&simd_args_vec)?;
+            let simd_op = Op::SimdOuterLoop {
+                desc_idx,
+                args: simd_args,
+            };
+            let vec_sum = push_val(ir, Ty::I32, fast_bb.0, Some(simd_op));
+            let add_op = Op::I32Bin(IntBinOp::Add, init_total, vec_sum);
+            let total_final = push_val(ir, Ty::I32, fast_bb.0, Some(add_op));
+            fast_insts.push(Inst {
+                res: Some(vec_sum),
+                op: simd_op,
+            });
+            fast_insts.push(Inst {
+                res: Some(total_final),
+                op: add_op,
+            });
+            let exit_param_opt =
+                outside_uses_total_next.then(|| push_val(ir, Ty::I32, outer_exit.0, None));
+            let mut mapped_exit_vec: Vec<Val> = outer_exit_args_vec
+                .iter()
+                .map(|&v| if v == total_next { total_final } else { v })
+                .collect();
+            if let Some(exit_param) = exit_param_opt {
+                touched.insert(outer_exit.0);
+                ir.blocks[outer_exit.0 as usize].params.push(exit_param);
+                mapped_exit_vec.push(total_final);
+                let mut slow_exit_vec = outer_exit_args_vec.clone();
+                slow_exit_vec.push(total_next);
+                let slow_exit_range = ir.push_pool(&slow_exit_vec)?;
+                if let Term::CmpBranch {
+                    then_args,
+                    else_args,
+                    ..
+                } = &mut ir.blocks[outer_latch as usize].term
+                {
+                    if stay_on_then {
+                        *else_args = slow_exit_range;
+                    } else {
+                        *then_args = slow_exit_range;
+                    }
+                }
+                let mut pool = std::mem::take(&mut ir.val_pool);
+                let subst_total = |v: &mut Val| {
+                    if *v == total_next {
+                        *v = exit_param;
+                    }
+                };
+                for (bi, bb) in ir.blocks.iter_mut().enumerate() {
+                    if owned_bbs.contains(&(bi as u32)) {
+                        continue;
+                    }
+                    for ins in &mut bb.insts {
+                        rewrite_op_uses_with(&mut ins.op, &mut pool, subst_total);
+                        if let Some(r) = ins.res {
+                            def_op[r.0 as usize] = Some(ins.op);
+                        }
+                    }
+                    rewrite_term_uses_with(&mut bb.term, &mut pool, &ir.br_tables, subst_total);
+                }
+                ir.val_pool = pool;
+            }
+            let mapped_exit = ir.push_pool(&mapped_exit_vec)?;
+            ir.blocks.push(Block {
+                params: Vec::new(),
+                insts: fast_insts,
+                term: Term::Jump {
+                    target: outer_exit,
+                    args: mapped_exit,
+                },
+                is_loop_header: false,
+                preds: 1,
+            });
+            if uses_unsigned_cvt {
+                let guard2_bb = BlockId(ir.blocks.len() as u32);
+                let slow_args2 = ir.push_pool(&pre_args_vec)?;
+                ir.blocks.push(Block {
+                    params: Vec::new(),
+                    insts: Vec::new(),
+                    term: Term::CmpBranch {
+                        kind: CmpBranchKind::I32Imm(CmpOp::LeU, i32::MAX),
+                        a: end_v,
+                        b: end_v,
+                        then_bb: fast_bb,
+                        then_args: ValRange::EMPTY,
+                        else_bb: BlockId(outer_hdr),
+                        else_args: slow_args2,
+                    },
+                    is_loop_header: false,
+                    preds: 1,
+                });
+                ir.blocks[outer_pre as usize].term = Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::LtU),
+                    a: start_px,
+                    b: end_v,
+                    then_bb: guard2_bb,
+                    then_args: ValRange::EMPTY,
+                    else_bb: BlockId(outer_hdr),
+                    else_args: pre_args,
+                };
+            } else {
+                ir.blocks[outer_pre as usize].term = Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::LtU),
+                    a: start_px,
+                    b: end_v,
+                    then_bb: fast_bb,
+                    then_args: ValRange::EMPTY,
+                    else_bb: BlockId(outer_hdr),
+                    else_args: pre_args,
+                };
+            }
+        }
+
+        touched.insert(outer_pre);
+        for b in owned_bbs {
+            touched.insert(b);
+        }
+        changed = true;
+    }
+
+    Ok(changed)
 }

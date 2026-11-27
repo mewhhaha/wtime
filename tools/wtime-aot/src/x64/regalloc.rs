@@ -1162,6 +1162,16 @@ pub fn allocate_with_config_and_scratch(
                         xmm_mask: (1 << 0) | (1 << 1) | (1 << 2),
                     });
                 }
+                Op::SimdOuterLoop { .. } => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: MASK_RAX_RDX
+                            | MASK_RCX
+                            | (1 << Gp::Rsi.id())
+                            | (1 << Gp::Rdi.id()),
+                        xmm_mask: 0x3fff,
+                    });
+                }
                 Op::PgoRecordCi { .. } => {
                     clobbers.push(Clobber {
                         pos: pos_use,
@@ -3060,6 +3070,13 @@ pub fn allocate_with_config_and_scratch(
     //   [rsp + saved_ret_ptr_off]                           : optional saved caller ret_spill_ptr (8 bytes)
     let mut used_callee_gp_mask = 0u16;
     let mut used_callee_xmm_mask = 0u16;
+    if ir.blocks.iter().any(|bb| {
+        bb.insts
+            .iter()
+            .any(|ins| matches!(ins.op, Op::SimdOuterLoop { .. }))
+    }) {
+        used_callee_xmm_mask |= 0x3f00; // Xmm8..Xmm13
+    }
     for (vi, &loc) in locs.iter().enumerate() {
         if !assigned[vi] {
             continue;

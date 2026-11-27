@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 19;
+const FORMAT_VERSION: u32 = 20;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;

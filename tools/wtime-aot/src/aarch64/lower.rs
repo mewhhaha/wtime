@@ -367,6 +367,7 @@ impl<'a> LowerA64<'a> {
                                     | VecReduceKind::I32Dot,
                                 ..
                             }
+                            | Op::SimdOuterLoop { .. }
                             | Op::V128ToI32 { .. } => true,
                             Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
                             Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
@@ -451,6 +452,290 @@ impl<'a> LowerA64<'a> {
                 unreachable!("aarch64: expected GP val")
             }
         }
+    }
+
+    /// Emits `Op::SimdOuterLoop` on ARMv8-A 4-wide NEON using caller-saved `X0..X4` and
+    /// `V0..V7, V16..V23` (zero callee-saved registers touched; 100% `A64Vm`-compatible).
+    fn emit_simd_outer_loop(&mut self, desc_idx: u32, args: ValRange, res: Val) {
+        use crate::x64::ir::{CmpOp, FloatBinOp, FloatUnOp, OuterSimdStep};
+        const VREGS: [VReg; 12] = [
+            VReg::V0,
+            VReg::V1,
+            VReg::V2,
+            VReg::V3,
+            VReg::V4,
+            VReg::V5,
+            VReg::V6,
+            VReg::V7,
+            VReg::V16,
+            VReg::V17,
+            VReg::V18,
+            VReg::V19,
+        ];
+        const V_IT: VReg = VReg::V20;
+        const V_ACT: VReg = VReg::V21;
+        const VT1: VReg = VReg::V22;
+        const VT2: VReg = VReg::V23;
+
+        let desc = self.ir.outer_simd_loops[desc_idx as usize].clone();
+        let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+
+        let gp_moves = [
+            (
+                MoveLoc::Gp(Reg::X0),
+                MoveLoc::from(self.loc(arg_vals[0])),
+                Ty::I32,
+            ),
+            (
+                MoveLoc::Gp(Reg::X1),
+                MoveLoc::from(self.loc(arg_vals[1])),
+                Ty::I32,
+            ),
+        ];
+        emit_parallel_moves(&mut self.asm, &gp_moves);
+        let mut fp_moves: Vec<(MoveLoc, MoveLoc, Ty)> =
+            Vec::with_capacity(desc.n_f32_args as usize);
+        for k in 0..desc.n_f32_args as usize {
+            fp_moves.push((
+                MoveLoc::Fp(VREGS[k]),
+                MoveLoc::from(self.loc(arg_vals[2 + k])),
+                Ty::F32,
+            ));
+        }
+        emit_parallel_moves(&mut self.asm, &fp_moves);
+
+        let lbl_done = self.asm.new_label();
+        let lbl_outer = self.asm.new_label();
+        let lbl_inner = self.asm.new_label();
+        let lbl_inner_done = self.asm.new_label();
+
+        self.asm.mov_imm32(Reg::X2, 0);
+        self.asm.cmp_r(false, Reg::X0, Reg::X1);
+        self.asm.b_cond(Cond::Hs, lbl_done);
+        self.asm.sub_r(false, Reg::X1, Reg::X1, Reg::X0);
+
+        for &r in VREGS.iter().take(desc.n_f32_args as usize) {
+            self.asm.dup_elt_128(2, r, r, 0);
+        }
+
+        let mut ramp_bytes = [0u8; 16];
+        for i in 0u32..4 {
+            ramp_bytes[(i as usize) * 4..(i as usize) * 4 + 4].copy_from_slice(&i.to_le_bytes());
+        }
+        let ramp_off = self.asm.add_local_rodata(16, &ramp_bytes);
+
+        let bcast_u32 = |asm: &mut A64Asm, dst: VReg, bits: u32| {
+            if bits == 0 {
+                asm.movi_zero_16b(dst);
+            } else {
+                asm.mov_imm32(SGP1, bits);
+                asm.dup_gp_128(2, dst, SGP1);
+            }
+        };
+        let load_ramp = |asm: &mut A64Asm, dst: VReg| {
+            asm.adr_reloc(SGP1, A64RelocTarget::LocalRodata(ramp_off));
+            asm.ldr_q_uimm(dst, SGP1, 0);
+        };
+        let emit_step = |asm: &mut A64Asm, st: OuterSimdStep| match st {
+            OuterSimdStep::BcastConst { dst, const_idx } => {
+                bcast_u32(
+                    asm,
+                    VREGS[dst as usize],
+                    desc.const_f32s[const_idx as usize],
+                );
+            }
+            OuterSimdStep::CvtPxToF32 { dst, signed } => {
+                let d = VREGS[dst as usize];
+                asm.dup_gp_128(2, VT1, Reg::X0);
+                load_ramp(asm, VT2);
+                asm.add_v128(2, VT1, VT1, VT2);
+                if signed {
+                    asm.scvtf_v128(false, d, VT1);
+                } else {
+                    asm.ucvtf_v128(false, d, VT1);
+                }
+            }
+            OuterSimdStep::Move { dst, src } => {
+                let (d, s) = (VREGS[dst as usize], VREGS[src as usize]);
+                if d != s {
+                    asm.mov_16b(d, s);
+                }
+            }
+            OuterSimdStep::F32Bin { op, dst, lhs, rhs } => {
+                let (d, l, r) = (
+                    VREGS[dst as usize],
+                    VREGS[lhs as usize],
+                    VREGS[rhs as usize],
+                );
+                match op {
+                    FloatBinOp::Add => asm.fadd_v128(false, d, l, r),
+                    FloatBinOp::Sub => asm.fsub_v128(false, d, l, r),
+                    FloatBinOp::Mul => asm.fmul_v128(false, d, l, r),
+                    FloatBinOp::Div => asm.fdiv_v128(false, d, l, r),
+                    _ => unreachable!(),
+                }
+            }
+            OuterSimdStep::F32Un { op, dst, src } => {
+                let (d, s) = (VREGS[dst as usize], VREGS[src as usize]);
+                match op {
+                    FloatUnOp::Neg => asm.fneg_v128(false, d, s),
+                    FloatUnOp::Abs => asm.fabs_v128(false, d, s),
+                    FloatUnOp::Sqrt => asm.fsqrt_v128(false, d, s),
+                    _ => unreachable!(),
+                }
+            }
+            OuterSimdStep::BreakIf {
+                cop,
+                break_on_true,
+                lhs,
+                rhs,
+                delta_after,
+            } => {
+                let (l, r) = (VREGS[lhs as usize], VREGS[rhs as usize]);
+                let use_and = match (break_on_true, cop) {
+                    (true, CmpOp::GtS) => {
+                        asm.fcmgt_v128(false, VT1, l, r);
+                        false
+                    }
+                    (true, CmpOp::GeS) => {
+                        asm.fcmge_v128(false, VT1, l, r);
+                        false
+                    }
+                    (true, CmpOp::LtS) => {
+                        asm.fcmgt_v128(false, VT1, r, l);
+                        false
+                    }
+                    (true, CmpOp::LeS) => {
+                        asm.fcmge_v128(false, VT1, r, l);
+                        false
+                    }
+                    (true, CmpOp::Eq) => {
+                        asm.fcmeq_v128(false, VT1, l, r);
+                        false
+                    }
+                    (true, CmpOp::Ne) => {
+                        asm.fcmeq_v128(false, VT1, l, r);
+                        true
+                    }
+                    (false, CmpOp::GtS) => {
+                        asm.fcmgt_v128(false, VT1, l, r);
+                        true
+                    }
+                    (false, CmpOp::GeS) => {
+                        asm.fcmge_v128(false, VT1, l, r);
+                        true
+                    }
+                    (false, CmpOp::LtS) => {
+                        asm.fcmgt_v128(false, VT1, r, l);
+                        true
+                    }
+                    (false, CmpOp::LeS) => {
+                        asm.fcmge_v128(false, VT1, r, l);
+                        true
+                    }
+                    (false, CmpOp::Eq) => {
+                        asm.fcmeq_v128(false, VT1, l, r);
+                        true
+                    }
+                    (false, CmpOp::Ne) => {
+                        asm.fcmeq_v128(false, VT1, l, r);
+                        false
+                    }
+                    _ => unreachable!(),
+                };
+                if use_and {
+                    asm.and_16b(V_ACT, V_ACT, VT1);
+                } else {
+                    asm.bic_16b(V_ACT, V_ACT, VT1);
+                }
+                asm.umov(3, SGP1, V_ACT, 0);
+                asm.umov(3, SGP2, V_ACT, 1);
+                asm.orr_r(true, SGP1, SGP1, SGP2);
+                asm.cbz(true, SGP1, lbl_inner_done);
+                if delta_after == 1 {
+                    asm.sub_v128(2, V_IT, V_IT, V_ACT);
+                } else if delta_after == -1 {
+                    asm.add_v128(2, V_IT, V_IT, V_ACT);
+                } else if delta_after != 0 {
+                    bcast_u32(asm, VT1, delta_after as u32);
+                    asm.and_16b(VT1, VT1, V_ACT);
+                    asm.add_v128(2, V_IT, V_IT, VT1);
+                }
+            }
+        };
+
+        for &st in &desc.init_steps {
+            emit_step(&mut self.asm, st);
+        }
+
+        self.asm.bind(lbl_outer);
+        self.asm.mov_imm32(Reg::X3, 4);
+        self.asm.cmp_imm(false, Reg::X1, 4);
+        self.asm.csel(false, Reg::X3, Reg::X1, Reg::X3, Cond::Lo);
+
+        self.asm.dup_gp_128(2, VT1, Reg::X3);
+        load_ramp(&mut self.asm, VT2);
+        self.asm.cmgt_v128(2, V_ACT, VT1, VT2);
+        self.asm.movi_zero_16b(V_IT);
+        if desc.base_it != 0 {
+            bcast_u32(&mut self.asm, VT1, desc.base_it as u32);
+            self.asm.and_16b(VT1, VT1, V_ACT);
+            self.asm.add_v128(2, V_IT, V_IT, VT1);
+        }
+
+        for &st in &desc.pre_steps {
+            emit_step(&mut self.asm, st);
+        }
+
+        self.asm.mov_imm32(Reg::X4, desc.inner_trips);
+        self.asm.bind(lbl_inner);
+        for &st in &desc.inner_steps {
+            emit_step(&mut self.asm, st);
+        }
+        let mut pending: Vec<(VReg, VReg)> = desc
+            .backedge_copies
+            .iter()
+            .map(|&(d, s)| (VREGS[d as usize], VREGS[s as usize]))
+            .filter(|&(d, s)| d != s)
+            .collect();
+        while !pending.is_empty() {
+            if let Some(pos) = (0..pending.len()).find(|&i| {
+                let d = pending[i].0;
+                pending
+                    .iter()
+                    .enumerate()
+                    .all(|(j, &(_, s))| j == i || s != d)
+            }) {
+                let (d, s) = pending.swap_remove(pos);
+                self.asm.mov_16b(d, s);
+            } else {
+                let d0 = pending[0].0;
+                self.asm.mov_16b(VT1, d0);
+                for (_, s) in &mut pending {
+                    if *s == d0 {
+                        *s = VT1;
+                    }
+                }
+            }
+        }
+        self.asm.sub_imm(false, Reg::X4, Reg::X4, 1);
+        self.asm.cbnz(false, Reg::X4, lbl_inner);
+
+        self.asm.bind(lbl_inner_done);
+        for lane in 0..4u8 {
+            self.asm.umov(2, SGP1, V_IT, lane);
+            self.asm.add_r(false, Reg::X2, Reg::X2, SGP1);
+        }
+        self.asm.add_r(false, Reg::X0, Reg::X0, Reg::X3);
+        self.asm.sub_r(false, Reg::X1, Reg::X1, Reg::X3);
+        self.asm.cbnz(false, Reg::X1, lbl_outer);
+
+        self.asm.bind(lbl_done);
+        let d = self.gp_write_reg(res);
+        if d != Reg::X2 {
+            self.asm.mov_r(false, d, Reg::X2);
+        }
+        self.gp_commit(res, d);
     }
 
     fn gp_commit(&mut self, v: Val, r: Reg) {
@@ -4617,6 +4902,9 @@ impl<'a> LowerA64<'a> {
                 emit_ptr(self, dst, dst_off, SGP1);
                 self.asm.str_q_uimm(SFP2, SGP1, 0);
                 self.asm.str_q_uimm(SFP1, SGP1, 16);
+            }
+            Op::SimdOuterLoop { desc_idx, args } => {
+                self.emit_simd_outer_loop(desc_idx, args, res.unwrap());
             }
             Op::SlpWideChain { desc_idx, args } => {
                 use crate::x64::ir::{WideStep, WideStepOp};

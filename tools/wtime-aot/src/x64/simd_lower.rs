@@ -855,6 +855,7 @@ pub fn emit_v128_un(
             asm.pmovsxwd(dst, dst);
         }
         0xfda9 => asm.pmovzxwd(dst, a), // i32x4.extend_low_i16x8_u
+        super::ir::V128_UN_I32X4_EXTEND_LOW_I8X16_U => asm.pmovzxbd(dst, a), // zero-extend low 4 u8 -> i32x4
         0xfdaa => {
             asm.movaps_rr(dst, a);
             asm.psrldq_imm(dst, 8);
@@ -1076,6 +1077,10 @@ pub fn emit_v128_un_full(
             }
             0xfda9 => {
                 asm.vpmovzxwd_xx(dst, a);
+                return Ok(());
+            }
+            super::ir::V128_UN_I32X4_EXTEND_LOW_I8X16_U => {
+                asm.vpmovzxbd_xx(dst, a);
                 return Ok(());
             }
             0xfdaa => {
@@ -2371,6 +2376,52 @@ pub fn emit_v128_bin_full(
             Ok(())
         }
         _ => emit_v128_bin(asm, op, dst, a, b),
+    }
+}
+
+/// Emits constant-immediate SIMD lane shifts (`i16x8`/`i32x4`/`i64x2`) in 1 instruction
+/// (`vpsll*/vpsrl*/vpsra* xmm, xmm, imm8` or SSE2 `psll*/psrl*/psra*`), masking `shift` per Wasm.
+pub fn emit_v128_shift_imm(asm: &mut Asm, op: u16, dst: Xmm, v: Xmm, shift: u32, isa: TargetIsa) {
+    let mask = match op {
+        0xfd8b..=0xfd8d => 15,
+        0xfdab..=0xfdad => 31,
+        0xfdcb | 0xfdcd => 63,
+        _ => unreachable!("unsupported immediate V128Shift op {op:#x}"),
+    };
+    let cnt = (shift & mask) as u8;
+    if cnt == 0 {
+        if dst != v {
+            asm.movaps_rr(dst, v);
+        }
+        return;
+    }
+    if isa.has_avx2 {
+        match op {
+            0xfd8b => asm.vpsllw_xxi(dst, v, cnt),
+            0xfd8c => asm.vpsraw_xxi(dst, v, cnt),
+            0xfd8d => asm.vpsrlw_xxi(dst, v, cnt),
+            0xfdab => asm.vpslld_xxi(dst, v, cnt),
+            0xfdac => asm.vpsrad_xxi(dst, v, cnt),
+            0xfdad => asm.vpsrld_xxi(dst, v, cnt),
+            0xfdcb => asm.vpsllq_xxi(dst, v, cnt),
+            0xfdcd => asm.vpsrlq_xxi(dst, v, cnt),
+            _ => unreachable!(),
+        }
+        return;
+    }
+    if dst != v {
+        asm.movaps_rr(dst, v);
+    }
+    match op {
+        0xfd8b => asm.psllw_imm(dst, cnt),
+        0xfd8c => asm.psraw_imm(dst, cnt),
+        0xfd8d => asm.psrlw_imm(dst, cnt),
+        0xfdab => asm.pslld_imm(dst, cnt),
+        0xfdac => asm.psrad_imm(dst, cnt),
+        0xfdad => asm.psrld_imm(dst, cnt),
+        0xfdcb => asm.psllq_imm(dst, cnt),
+        0xfdcd => asm.psrlq_imm(dst, cnt),
+        _ => unreachable!(),
     }
 }
 

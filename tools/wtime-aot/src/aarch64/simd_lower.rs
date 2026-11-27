@@ -308,6 +308,10 @@ pub fn emit_a64_v128_un(asm: &mut A64Asm, op: u16, d: VReg, a: VReg) -> Result<(
         0xfda7 => asm.xtl_128(false, false, 1, d, a),
         0xfda8 => asm.xtl_128(false, true, 1, d, a),
         0xfda9 => asm.xtl_128(true, false, 1, d, a),
+        crate::x64::ir::V128_UN_I32X4_EXTEND_LOW_I8X16_U => {
+            asm.xtl_128(true, false, 0, d, a);
+            asm.xtl_128(true, false, 1, d, d);
+        }
         0xfdaa => asm.xtl_128(true, true, 1, d, a),
         0xfdc0 => asm.abs_v128(3, d, a),
         0xfdc1 => asm.neg_v128(3, d, a),
