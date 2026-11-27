@@ -10,6 +10,7 @@ use super::lower::{
     CTX_REG, MEM_BASE_REG, MEM_LEN_REG, PINNED_GLOB_REG, SGP1, SGP2, SGP3, emit_load_off,
     emit_store_off,
 };
+use super::standalone_rt::A64_GUARD_RESERVE_BYTES;
 use crate::x64::ir::Ty;
 use crate::x64::module::{X64ConstVal, X64Module};
 use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables};
@@ -20,19 +21,27 @@ use crate::x64::{
     HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT, HELPER_READ_GLOBAL,
     HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT,
     INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH, OFF_ACTIVE_DEPTH, OFF_ACTIVE_GUEST_RSP,
-    OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP,
-    OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES,
-    OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, TRAP_ALLOC_FAILED, TRAP_CALL_STACK, TRAP_HOST,
-    TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
+    OFF_GUARD_RESUME_PC, OFF_GUARD_RESUME_SP, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
+    OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX, OFF_IN_CALL,
+    OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR,
+    TRAP_ALLOC_FAILED, TRAP_CALL_STACK, TRAP_HOST, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB,
+    TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
 use wtime_types::ValType;
 
 const SYS_OPENAT: u64 = 56;
 const SYS_CLOSE: u64 = 57;
 const SYS_WRITE: u64 = 64;
+const SYS_TGKILL: u64 = 131;
+const SYS_RT_SIGACTION: u64 = 134;
+const SYS_GETPID: u64 = 172;
+const SYS_GETTID: u64 = 178;
 const SYS_MUNMAP: u64 = 215;
 const SYS_MMAP: u64 = 222;
 const SYS_MPROTECT: u64 = 226;
+const SIGSEGV: u32 = 11;
+/// `SA_SIGINFO (0x4) | SA_ONSTACK (0x0800_0000) | SA_NODEFER (0x4000_0000)`.
+const SA_FLAGS_CDYLIB: u64 = 0x4800_0004;
 const AT_FDCWD_U64: u64 = (-100i64) as u64;
 const O_WRONLY_CREAT_TRUNC: u32 = 0x241;
 
@@ -1118,12 +1127,15 @@ pub fn emit_a64_helper_host_call(module: &X64Module, layout: &CtxLayout) -> Resu
     );
     a.cbz(true, Reg::X9, null_host);
 
-    // Guest stack link frame (160 B, 16-byte aligned):
+    // Guest stack link frame (160 B or 176 B with `--guard-pages`, 16-byte aligned):
     //   [SP + 0..16]   = FP, LR
     //   [SP + 16]      = prev_active_guest_rsp
     //   [SP + 24]      = prev_host_rsp
     //   [SP + 32..160] = Q8..Q15 (full 128-bit callee-saved SIMD registers; AAPCS64 only preserves D8..D15)
-    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -160);
+    //   [SP + 160]     = prev_guard_resume_pc (when `layout.use_guard_pages`)
+    //   [SP + 168]     = prev_guard_resume_sp (when `layout.use_guard_pages`)
+    let link_frame: i32 = if layout.use_guard_pages { 176 } else { 160 };
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -link_frame);
     emit_load_off(
         &mut a,
         Ty::I64,
@@ -1143,6 +1155,36 @@ pub fn emit_a64_helper_host_call(module: &X64Module, layout: &CtxLayout) -> Resu
         SGP3,
     );
     a.stp_x(Reg::X10, Reg::X11, Reg::SP, 16);
+    if layout.use_guard_pages {
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X10),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+        emit_load_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X11),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_SP,
+            SGP3,
+        );
+        a.stp_x(Reg::X10, Reg::X11, Reg::SP, 160);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::XZR),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+    }
     a.stp_q(VReg::V8, VReg::V9, Reg::SP, 32);
     a.stp_q(VReg::V10, VReg::V11, Reg::SP, 64);
     a.stp_q(VReg::V12, VReg::V13, Reg::SP, 96);
@@ -1250,7 +1292,28 @@ pub fn emit_a64_helper_host_call(module: &X64Module, layout: &CtxLayout) -> Resu
         OFF_HOST_RSP,
         SGP3,
     );
-    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 160);
+    if layout.use_guard_pages {
+        a.ldp_x(Reg::X12, Reg::X13, Reg::SP, 160);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X12),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X13),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_SP,
+            SGP3,
+        );
+    }
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, link_frame);
 
     a.cbnz(false, Reg::X10, fail_host);
     a.mov_r(true, Reg::X0, Reg::X11);
@@ -1460,6 +1523,7 @@ fn emit_a64_export_call_fixed(
     let lbl_fail_host = a.new_label();
     let lbl_fail_host_rc = a.new_label();
     let lbl_trapped = a.new_label();
+    let lbl_guard_oob = a.new_label();
     let lbl_not_exn = a.new_label();
     let lbl_skip_res = a.new_label();
     let lbl_skip_trap = a.new_label();
@@ -1469,12 +1533,22 @@ fn emit_a64_export_call_fixed(
     a.ldrb_uimm(Reg::X9, Reg::X0, OFF_IN_CALL as u32);
     a.cbnz(false, Reg::X9, lbl_fail_host);
 
-    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+    let frame_sz: i32 = if layout.use_guard_pages { 240 } else { 96 };
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -frame_sz);
     a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
     a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
     a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
     a.stp_x(Reg::X25, Reg::X26, Reg::SP, 64);
     a.stp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+    if layout.use_guard_pages {
+        // Save AAPCS64 callee-saved D8..D15 (via Q8..Q15) and spill `out_trap` on host stack so
+        // guard-page SIGSEGV unwind restores all callee-saved FP regs and `out_trap` safely!
+        a.stp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+        a.stp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+        a.stp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+        a.stp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+        a.str_uimm(true, trap_reg, Reg::SP, 224);
+    }
 
     a.mov_r(true, CTX_REG, Reg::X0);
     a.mov_r(true, Reg::X19, res_reg);
@@ -1533,6 +1607,28 @@ fn emit_a64_export_call_fixed(
         OFF_ACTIVE_GUEST_RSP,
         SGP3,
     );
+    if layout.use_guard_pages {
+        a.adr(Reg::X9, lbl_guard_oob);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X9),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+        a.mov_r(true, Reg::X9, Reg::SP);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X9),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_SP,
+            SGP3,
+        );
+    }
     if has_arg {
         a.mov_r(true, Reg::X0, Reg::X21);
     }
@@ -1549,6 +1645,17 @@ fn emit_a64_export_call_fixed(
         SGP3,
     );
     a.mov_r(true, Reg::SP, SGP2);
+    if layout.use_guard_pages {
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::XZR),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+    }
     emit_a64_pinned_store(&mut a, module, layout);
     a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
 
@@ -1559,6 +1666,21 @@ fn emit_a64_export_call_fixed(
     a.movz(false, Reg::X0, 0, 0);
     a.b(lbl_ep);
 
+    if layout.use_guard_pages {
+        a.bind(lbl_guard_oob);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::XZR),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+        emit_a64_pinned_store(&mut a, module, layout);
+        a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
+        a.ldr_uimm(true, Reg::X20, Reg::SP, 224);
+    }
     a.bind(lbl_trapped);
     a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
     a.b_cond(Cond::Ne, lbl_not_exn);
@@ -1573,12 +1695,18 @@ fn emit_a64_export_call_fixed(
     a.csel(false, Reg::X0, Reg::X9, Reg::X0, Cond::Eq);
 
     a.bind(lbl_ep);
+    if layout.use_guard_pages {
+        a.ldp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+        a.ldp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+        a.ldp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+        a.ldp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+    }
     a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
     a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
     a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
     a.ldp_x(Reg::X25, Reg::X26, Reg::SP, 64);
     a.ldp_x(Reg::X27, Reg::X28, Reg::SP, 80);
-    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, frame_sz);
     a.ret();
 
     a.bind(lbl_fail_host);
@@ -1613,6 +1741,7 @@ fn emit_a64_export_active_fixed(
     let lbl_fail_stack = a.new_label();
     let lbl_fail_stack_rc = a.new_label();
     let lbl_trapped = a.new_label();
+    let lbl_guard_oob = a.new_label();
     let lbl_not_exn = a.new_label();
     let lbl_skip_res = a.new_label();
     let lbl_skip_trap = a.new_label();
@@ -1640,12 +1769,20 @@ fn emit_a64_export_active_fixed(
     a.cmp_r(true, Reg::X9, Reg::X10);
     a.b_cond(Cond::Hi, lbl_fail_stack);
 
-    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+    let frame_sz: i32 = if layout.use_guard_pages { 240 } else { 96 };
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -frame_sz);
     a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
     a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
     a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
     a.stp_x(Reg::X25, Reg::X26, Reg::SP, 64);
     a.stp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+    if layout.use_guard_pages {
+        a.stp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+        a.stp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+        a.stp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+        a.stp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+        a.str_uimm(true, Reg::X3, Reg::SP, 224); // spill out_trap on host stack
+    }
 
     a.mov_r(true, Reg::X19, Reg::X2); // res_out
     a.mov_r(true, Reg::X20, Reg::X3); // trap_out
@@ -1720,11 +1857,43 @@ fn emit_a64_export_active_fixed(
         SGP3,
     );
 
+    if layout.use_guard_pages {
+        a.adr(Reg::X9, lbl_guard_oob);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X9),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X22),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_SP,
+            SGP3,
+        );
+    }
     a.mov_r(true, Reg::X0, Reg::X21);
     a.mov_r(true, Reg::SP, Reg::X22);
     a.bl_reloc(A64RelocTarget::Func(target_fn));
 
     // Restore ctx->host_rsp, host SP, active_depth -= 1, pinned global (preserving X0 & W16!).
+    if layout.use_guard_pages {
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::XZR),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+    }
     a.ldp_x(Reg::X9, Reg::X10, Reg::SP, 0);
     emit_store_off(
         &mut a,
@@ -1764,6 +1933,50 @@ fn emit_a64_export_active_fixed(
     a.movz(false, Reg::X0, 0, 0);
     a.b(lbl_ep);
 
+    if layout.use_guard_pages {
+        a.bind(lbl_guard_oob);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::XZR),
+            None,
+            CTX_REG,
+            OFF_GUARD_RESUME_PC,
+            SGP3,
+        );
+        a.ldp_x(Reg::X9, Reg::X10, Reg::SP, 0);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X9),
+            None,
+            CTX_REG,
+            OFF_HOST_RSP,
+            SGP3,
+        );
+        a.mov_r(true, Reg::SP, Reg::X10);
+        emit_load_off(
+            &mut a,
+            Ty::I32,
+            Some(Reg::X9),
+            None,
+            CTX_REG,
+            OFF_ACTIVE_DEPTH,
+            SGP3,
+        );
+        a.sub_imm(false, Reg::X9, Reg::X9, 1);
+        emit_store_off(
+            &mut a,
+            Ty::I32,
+            Some(Reg::X9),
+            None,
+            CTX_REG,
+            OFF_ACTIVE_DEPTH,
+            SGP3,
+        );
+        emit_a64_pinned_store(&mut a, module, layout);
+        a.ldr_uimm(true, Reg::X20, Reg::SP, 224);
+    }
     a.bind(lbl_trapped);
     a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
     a.b_cond(Cond::Ne, lbl_not_exn);
@@ -1778,12 +1991,18 @@ fn emit_a64_export_active_fixed(
     a.csel(false, Reg::X0, Reg::X9, Reg::X0, Cond::Eq);
 
     a.bind(lbl_ep);
+    if layout.use_guard_pages {
+        a.ldp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+        a.ldp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+        a.ldp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+        a.ldp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+    }
     a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
     a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
     a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
     a.ldp_x(Reg::X25, Reg::X26, Reg::SP, 64);
     a.ldp_x(Reg::X27, Reg::X28, Reg::SP, 80);
-    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, frame_sz);
     a.ret();
 
     a.bind(lbl_fail_host);
@@ -1927,13 +2146,23 @@ pub fn emit_a64_exports(
         let fail_no_ctx = a.new_label();
         let skip_mem = a.new_label();
         let done_ok = a.new_label();
-        // Save callee-saved regs X19..X28, FP, LR (12 regs = 96 B, 16-byte aligned).
-        a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+        let lbl_guard_oob = a.new_label();
+        let lbl_sig_handler = a.new_label();
+        // Save callee-saved regs X19..X28, FP, LR (96 B) + Q8..Q15 & out_trap spill under `--guard-pages` (240 B).
+        let frame_sz: i32 = if layout.use_guard_pages { 240 } else { 96 };
+        a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -frame_sz);
         a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
         a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
         a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
         a.stp_x(Reg::X25, Reg::X26, Reg::SP, 64);
         a.stp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+        if layout.use_guard_pages {
+            a.stp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+            a.stp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+            a.stp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+            a.stp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+            a.str_uimm(true, Reg::X3, Reg::SP, 224); // spill out_trap on host stack
+        }
 
         a.mov_r(true, Reg::X19, Reg::X0); // host_ctx
         a.mov_r(true, Reg::X20, Reg::X1); // host_fn
@@ -2081,9 +2310,17 @@ pub fn emit_a64_exports(
         // Linear memory reservation & initial pages commit.
         a.movz(true, MEM_BASE_REG, 0, 0);
         a.movz(true, MEM_LEN_REG, 0, 0);
-        a.cbz(true, Reg::X23, skip_mem);
-        a.lsl_imm(true, Reg::X1, Reg::X23, 16); // reserve_bytes
-        a.mov_r(true, Reg::X19, Reg::X1);
+        if layout.use_guard_pages {
+            // Opt-in `--guard-pages` (`memory32`): ALWAYS reserve `8 GiB + 64 KiB` PROT_NONE
+            // (even when `max_pages == 0`) so any guest OOB access faults cleanly inside
+            // `[mem_base, mem_base + A64_GUARD_RESERVE_BYTES)`.
+            a.mov_imm64(Reg::X19, A64_GUARD_RESERVE_BYTES);
+            a.mov_r(true, Reg::X1, Reg::X19);
+        } else {
+            a.cbz(true, Reg::X23, skip_mem);
+            a.lsl_imm(true, Reg::X1, Reg::X23, 16); // reserve_bytes
+            a.mov_r(true, Reg::X19, Reg::X1);
+        }
         a.movz(true, Reg::X0, 0, 0);
         a.movz(true, Reg::X2, 0, 0); // PROT_NONE
         a.mov_imm32(Reg::X3, 0x4022);
@@ -2347,6 +2584,59 @@ pub fn emit_a64_exports(
             a.str_uimm(true, Reg::XZR, Reg::X0, 24);
         }
 
+        // Thread-safe one-time chained SIGSEGV handler install (`--guard-pages` only).
+        if layout.use_guard_pages {
+            let lbl_guard_spin = a.new_label();
+            let lbl_guard_clrex = a.new_label();
+            let lbl_guard_yield = a.new_label();
+            let lbl_guard_fail = a.new_label();
+            let lbl_guard_done = a.new_label();
+            a.adr_reloc(Reg::X19, A64RelocTarget::GuardState);
+            a.bind(lbl_guard_spin);
+            a.ldar(Reg::X10, Reg::X19);
+            a.cmp_imm(true, Reg::X10, 2);
+            a.b_cond(Cond::Eq, lbl_guard_done);
+            a.cbnz(true, Reg::X10, lbl_guard_yield);
+            a.ldaxr(Reg::X10, Reg::X19);
+            a.cbnz(true, Reg::X10, lbl_guard_clrex);
+            a.mov_imm32(Reg::X11, 1);
+            a.stlxr(Reg::X12, Reg::X11, Reg::X19);
+            a.cbnz(false, Reg::X12, lbl_guard_spin);
+
+            // Won one-time install lock (`GuardState.install_state == 1`).
+            a.sub_imm(true, Reg::SP, Reg::SP, 32);
+            a.adr(Reg::X4, lbl_sig_handler);
+            a.str_uimm(true, Reg::X4, Reg::SP, 0);
+            a.mov_imm64(Reg::X4, SA_FLAGS_CDYLIB);
+            a.str_uimm(true, Reg::X4, Reg::SP, 8);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 16);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 24);
+            a.mov_imm32(Reg::X0, SIGSEGV);
+            a.mov_r(true, Reg::X1, Reg::SP);
+            a.add_imm(true, Reg::X2, Reg::X19, 8); // oldact -> GuardState.prev_sa
+            a.mov_imm32(Reg::X3, 8);
+            emit_syscall(&mut a, SYS_RT_SIGACTION);
+            a.add_imm(true, Reg::SP, Reg::SP, 32);
+            a.mov_imm64(Reg::X4, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X4);
+            a.b_cond(Cond::Hs, lbl_guard_fail);
+            a.mov_imm32(Reg::X11, 2);
+            a.stlr(Reg::X11, Reg::X19);
+            a.b(lbl_guard_done);
+
+            a.bind(lbl_guard_clrex);
+            a.clrex();
+            a.bind(lbl_guard_yield);
+            a.yield_hint();
+            a.b(lbl_guard_spin);
+
+            a.bind(lbl_guard_fail);
+            a.stlr(Reg::XZR, Reg::X19);
+            a.b(fail_alloc_cleanup);
+
+            a.bind(lbl_guard_done);
+        }
+
         // Switch to dedicated guest stack and run `HELPER_INITIALIZE` (globals, data, start fn).
         a.mov_imm32(Reg::X4, 1);
         a.strb_uimm(Reg::X4, CTX_REG, OFF_IN_CALL as u32);
@@ -2360,6 +2650,27 @@ pub fn emit_a64_exports(
             OFF_HOST_RSP,
             SGP3,
         );
+        if layout.use_guard_pages {
+            a.adr(Reg::X4, lbl_guard_oob);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X4),
+                None,
+                CTX_REG,
+                OFF_GUARD_RESUME_PC,
+                SGP3,
+            );
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_GUARD_RESUME_SP,
+                SGP3,
+            );
+        }
         emit_load_off(
             &mut a,
             Ty::I64,
@@ -2390,10 +2701,37 @@ pub fn emit_a64_exports(
             SGP3,
         );
         a.mov_r(true, Reg::SP, SGP2);
+        if layout.use_guard_pages {
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::XZR),
+                None,
+                CTX_REG,
+                OFF_GUARD_RESUME_PC,
+                SGP3,
+            );
+        }
         a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
         a.cbnz(false, SGP1, fail_trap_cleanup);
         a.mov_r(true, Reg::X0, CTX_REG);
         a.b(done_ok);
+
+        if layout.use_guard_pages {
+            a.bind(lbl_guard_oob);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::XZR),
+                None,
+                CTX_REG,
+                OFF_GUARD_RESUME_PC,
+                SGP3,
+            );
+            a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
+            a.ldr_uimm(true, Reg::X22, Reg::SP, 224);
+            a.b(fail_trap_cleanup);
+        }
 
         // Pre-Ctx allocation failure paths (nothing mapped yet).
         a.bind(fail_mem_limit);
@@ -2428,13 +2766,133 @@ pub fn emit_a64_exports(
         a.movz(true, Reg::X0, 0, 0);
 
         a.bind(done_ok);
+        if layout.use_guard_pages {
+            a.ldp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+            a.ldp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+            a.ldp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+            a.ldp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+        }
         a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
         a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
         a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
         a.ldp_x(Reg::X25, Reg::X26, Reg::SP, 64);
         a.ldp_x(Reg::X27, Reg::X28, Reg::SP, 80);
-        a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+        a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, frame_sz);
         a.ret();
+
+        if layout.use_guard_pages {
+            // Chained Linux AArch64 SA_SIGINFO handler: (X0=sig, X1=siginfo_t*, X2=ucontext_t*).
+            // Exact Linux arm64 ABI offsets:
+            //   siginfo_t.si_addr = +16
+            //   ucontext_t.uc_mcontext.regs[16] (W16/SGP1)    = 184 + 16*8 = 312
+            //   ucontext_t.uc_mcontext.regs[27] (MEM_BASE_REG) = 184 + 27*8 = 400
+            //   ucontext_t.uc_mcontext.regs[28] (CTX_REG)      = 184 + 28*8 = 408
+            //   ucontext_t.uc_mcontext.sp                      = 432
+            //   ucontext_t.uc_mcontext.pc                      = 440
+            // Preserves X0, X1, X2, LR untouched along `.not_ours` for zero-frame tail-chaining!
+            let not_ours = a.new_label();
+            let wait_prev = a.new_label();
+            let have_prev = a.new_label();
+            let dfl_or_ign = a.new_label();
+            let si_code_ready = a.new_label();
+            let restore_dfl = a.new_label();
+            let ret_dfl = a.new_label();
+            a.bind(lbl_sig_handler);
+            // 1. Check faulting PC is strictly inside compiled guest Wasm functions [GuestCodeStart, GuestCodeEnd).
+            a.ldr_uimm(true, Reg::X9, Reg::X2, 440); // ucontext.pc
+            a.adr_reloc(Reg::X10, A64RelocTarget::GuestCodeStart);
+            a.cmp_r(true, Reg::X9, Reg::X10);
+            a.b_cond(Cond::Lo, not_ours);
+            a.adr_reloc(Reg::X10, A64RelocTarget::GuestCodeEnd);
+            a.cmp_r(true, Reg::X9, Reg::X10);
+            a.b_cond(Cond::Hs, not_ours);
+
+            // 2. Check Ctx (X28) != 0 and active per-invocation guard_resume_pc != 0.
+            a.ldr_uimm(true, Reg::X10, Reg::X2, 408); // ucontext.regs[28] (Ctx*)
+            a.cbz(true, Reg::X10, not_ours);
+            a.ldr_uimm(true, Reg::X13, Reg::X10, OFF_GUARD_RESUME_PC as u32);
+            a.cbz(true, Reg::X13, not_ours);
+
+            // 3. Check mem_base (X27) != 0, X27 == ctx->mem_base, and (si_addr - mem_base) <u A64_GUARD_RESERVE_BYTES.
+            a.ldr_uimm(true, Reg::X11, Reg::X2, 400); // ucontext.regs[27] (mem_base)
+            a.cbz(true, Reg::X11, not_ours);
+            a.ldr_uimm(true, Reg::X12, Reg::X10, OFF_MEM_BASE as u32);
+            a.cmp_r(true, Reg::X11, Reg::X12);
+            a.b_cond(Cond::Ne, not_ours);
+            a.ldr_uimm(true, Reg::X9, Reg::X1, 16); // siginfo.si_addr
+            a.sub_r(true, Reg::X9, Reg::X9, Reg::X11);
+            a.mov_imm64(Reg::X12, A64_GUARD_RESERVE_BYTES);
+            a.cmp_r(true, Reg::X9, Reg::X12);
+            a.b_cond(Cond::Hs, not_ours);
+
+            // Confirmed guest guard-page OOB fault: redirect ucontext pc/sp/regs[16] and return.
+            a.str_uimm(true, Reg::X13, Reg::X2, 440); // ucontext.pc = guard_resume_pc
+            a.ldr_uimm(true, Reg::X14, Reg::X10, OFF_GUARD_RESUME_SP as u32);
+            a.str_uimm(true, Reg::X14, Reg::X2, 432); // ucontext.sp = guard_resume_sp
+            a.mov_imm32(Reg::X14, u32::from(TRAP_OOB));
+            a.str_uimm(true, Reg::X14, Reg::X2, 312); // ucontext.regs[16] = TRAP_OOB
+            a.ret();
+
+            a.bind(not_ours);
+            a.adr_reloc(Reg::X9, A64RelocTarget::GuardState);
+            // Bounded spin on install_state == 1 so an async SIGSEGV hitting the installing
+            // thread in the narrow post-syscall window cannot self-deadlock.
+            a.mov_imm32(Reg::X11, 1_000_000);
+            a.bind(wait_prev);
+            a.ldar(Reg::X10, Reg::X9);
+            a.cmp_imm(true, Reg::X10, 1);
+            a.b_cond(Cond::Ne, have_prev);
+            a.sub_imm(false, Reg::X11, Reg::X11, 1);
+            a.cbz(false, Reg::X11, have_prev);
+            a.yield_hint();
+            a.b(wait_prev);
+            a.bind(have_prev);
+            a.ldr_uimm(true, Reg::X10, Reg::X9, 8); // prev_sa.sa_handler
+            a.cmp_imm(true, Reg::X10, 1);
+            a.b_cond(Cond::Ls, dfl_or_ign);
+            a.br(Reg::X10); // tail-chain to previous handler with original (X0, X1, X2, LR)!
+
+            a.bind(dfl_or_ign);
+            // Inspect siginfo_t.si_code (i32 at +8): <= 0 is software-sent (kill/tgkill/raise),
+            // > 0 is a synchronous hardware fault.
+            a.mov_imm32(Reg::X11, 1);
+            a.cbz(true, Reg::X1, si_code_ready);
+            a.ldr_uimm(false, Reg::X11, Reg::X1, 8); // W11 = siginfo.si_code (i32)
+            a.bind(si_code_ready);
+            // Software SIGSEGV with prev_sa == SIG_IGN (1): ignore without disarming guard pages.
+            a.cmp_imm(true, Reg::X10, 1);
+            a.b_cond(Cond::Ne, restore_dfl);
+            a.cmp_imm(false, Reg::X11, 0);
+            a.b_cond(Cond::Gt, restore_dfl);
+            a.ret();
+
+            a.bind(restore_dfl);
+            a.sub_imm(true, Reg::SP, Reg::SP, 32);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 0);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 8);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 16);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 24);
+            a.mov_imm32(Reg::X0, SIGSEGV);
+            a.mov_r(true, Reg::X1, Reg::SP);
+            a.movz(true, Reg::X2, 0, 0);
+            a.mov_imm32(Reg::X3, 8);
+            emit_syscall(&mut a, SYS_RT_SIGACTION);
+            a.add_imm(true, Reg::SP, Reg::SP, 32);
+            // Hardware fault (si_code > 0): return so rt_sigreturn re-executes the faulting insn.
+            // Note: Linux AArch64 `svc #0` preserves X11.
+            a.cmp_imm(false, Reg::X11, 0);
+            a.b_cond(Cond::Gt, ret_dfl);
+            // Software SIGSEGV (si_code <= 0) under SIG_DFL: re-deliver via tgkill(pid, tid, SIGSEGV).
+            emit_syscall(&mut a, SYS_GETPID);
+            a.mov_r(true, Reg::X9, Reg::X0);
+            emit_syscall(&mut a, SYS_GETTID);
+            a.mov_r(true, Reg::X1, Reg::X0);
+            a.mov_r(true, Reg::X0, Reg::X9);
+            a.mov_imm32(Reg::X2, SIGSEGV);
+            emit_syscall(&mut a, SYS_TGKILL);
+            a.bind(ret_dfl);
+            a.ret();
+        }
         a.finish()?;
         out.push(("blot_aot_new", a));
     }
@@ -2512,12 +2970,21 @@ pub fn emit_a64_exports(
         let reentry_skip = a.new_label();
         let name_ok = a.new_label();
         let ret_ep = a.new_label();
-        a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+        let lbl_guard_oob = a.new_label();
+        let frame_sz: i32 = if layout.use_guard_pages { 240 } else { 96 };
+        a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -frame_sz);
         a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
         a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
         a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
         a.stp_x(Reg::X25, Reg::X26, Reg::SP, 64);
         a.stp_x(Reg::X27, Reg::X28, Reg::SP, 80);
+        if layout.use_guard_pages {
+            a.stp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+            a.stp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+            a.stp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+            a.stp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+            a.str_uimm(true, Reg::X5, Reg::SP, 224); // spill out_trap on host stack
+        }
 
         a.cbz(true, Reg::X0, not_found);
         a.mov_r(true, CTX_REG, Reg::X0);
@@ -2603,6 +3070,27 @@ pub fn emit_a64_exports(
                     OFF_HOST_RSP,
                     SGP3,
                 );
+                if layout.use_guard_pages {
+                    a.adr(Reg::X7, lbl_guard_oob);
+                    emit_store_off(
+                        &mut a,
+                        Ty::I64,
+                        Some(Reg::X7),
+                        None,
+                        CTX_REG,
+                        OFF_GUARD_RESUME_PC,
+                        SGP3,
+                    );
+                    emit_store_off(
+                        &mut a,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        OFF_GUARD_RESUME_SP,
+                        SGP3,
+                    );
+                }
                 emit_load_off(
                     &mut a,
                     Ty::I64,
@@ -2633,6 +3121,17 @@ pub fn emit_a64_exports(
                     SGP3,
                 );
                 a.mov_r(true, Reg::SP, SGP2);
+                if layout.use_guard_pages {
+                    emit_store_off(
+                        &mut a,
+                        Ty::I64,
+                        Some(Reg::XZR),
+                        None,
+                        CTX_REG,
+                        OFF_GUARD_RESUME_PC,
+                        SGP3,
+                    );
+                }
                 a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
                 emit_a64_pinned_store(&mut a, module, layout);
                 let got_trap = a.new_label();
@@ -2679,6 +3178,28 @@ pub fn emit_a64_exports(
             a.bind(next_exp);
         }
 
+        if layout.use_guard_pages {
+            a.bind(lbl_guard_oob);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::XZR),
+                None,
+                CTX_REG,
+                OFF_GUARD_RESUME_PC,
+                SGP3,
+            );
+            a.strb_uimm(Reg::XZR, CTX_REG, OFF_IN_CALL as u32);
+            emit_a64_pinned_store(&mut a, module, layout);
+            a.ldr_uimm(true, Reg::X23, Reg::SP, 224);
+            let skip_goob_t = a.new_label();
+            a.cbz(true, Reg::X23, skip_goob_t);
+            a.strb_uimm(SGP1, Reg::X23, 0);
+            a.bind(skip_goob_t);
+            a.mov_imm32(Reg::X0, 1);
+            a.b(ret_ep);
+        }
+
         a.bind(not_found);
         a.mov_imm32(Reg::X0, 3);
         a.b(ret_ep);
@@ -2691,12 +3212,18 @@ pub fn emit_a64_exports(
         a.mov_imm32(Reg::X0, 2);
 
         a.bind(ret_ep);
+        if layout.use_guard_pages {
+            a.ldp_q(VReg::V8, VReg::V9, Reg::SP, 96);
+            a.ldp_q(VReg::V10, VReg::V11, Reg::SP, 128);
+            a.ldp_q(VReg::V12, VReg::V13, Reg::SP, 160);
+            a.ldp_q(VReg::V14, VReg::V15, Reg::SP, 192);
+        }
         a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
         a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
         a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
         a.ldp_x(Reg::X25, Reg::X26, Reg::SP, 64);
         a.ldp_x(Reg::X27, Reg::X28, Reg::SP, 80);
-        a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+        a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, frame_sz);
         a.ret();
         a.finish()?;
         out.push(("blot_aot_call_export", a));

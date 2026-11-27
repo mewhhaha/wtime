@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--guard-pages] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--guard-pages] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -54,6 +54,7 @@ fn main() {
     let mut flat64 = false;
     let mut target = codegen::Target::GooseBin;
     let mut backend = build::Backend::Rust;
+    let mut guard_pages = false;
     let mut spectre_mitigations = false;
     let mut pgo_gen: Option<PathBuf> = None;
     let mut pgo_use: Option<PathBuf> = None;
@@ -80,6 +81,7 @@ fn main() {
                     exit(2);
                 }
             },
+            "--guard-pages" => guard_pages = true,
             "--spectre-mitigations" => spectre_mitigations = true,
             "--pgo-gen" => match args.next() {
                 Some(p) if !p.is_empty() => pgo_gen = Some(PathBuf::from(p)),
@@ -160,6 +162,16 @@ fn main() {
         eprintln!("wtime-aot: {}", build::SPECTRE_RUST_ERROR);
         exit(2);
     }
+    if guard_pages && !matches!(backend, build::Backend::X64 | build::Backend::Aarch64) {
+        eprintln!(
+            "wtime-aot: --guard-pages is only supported with --backend x64 or --backend aarch64"
+        );
+        exit(2);
+    }
+    if guard_pages && spectre_mitigations {
+        eprintln!("wtime-aot: --guard-pages cannot be combined with --spectre-mitigations");
+        exit(2);
+    }
     if pgo_gen.is_some() && pgo_use.is_some() {
         eprintln!("wtime-aot: --pgo-gen and --pgo-use cannot be used together");
         exit(2);
@@ -233,6 +245,7 @@ fn main() {
             isa,
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
+            guard_pages,
             spectre_mitigations,
             pgo_gen_path: pgo_gen,
             pgo_use: loaded_pgo_use,
@@ -292,6 +305,7 @@ fn main() {
             optimize: true,
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
+            guard_pages,
             spectre_mitigations,
             pgo_gen_path: pgo_gen,
             pgo_use: loaded_pgo_use,

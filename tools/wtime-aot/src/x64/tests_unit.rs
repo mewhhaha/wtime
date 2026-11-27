@@ -7458,3 +7458,474 @@ fn x64_audit_dyn_bce_and_wrap_select_zero_flags_and_slp_bcast_xmm0() {
         }
     }
 }
+
+#[test]
+fn x64_hill2_relational_bce_inclusive_dyn_bce_and_unroll_4x() {
+    // Exercises all three Hill 2 Stage 2 optimizer passes:
+    //  1) Dominating relational LtU/LeU predicate propagation & comparison folding (`rel_fold`)
+    //  2) Inclusive `<=u` dynamic counted-loop BCE (`inc_dyn_bce`) with `u32::MAX` wrap safety
+    //  3) 4x counted loop unrolling (`unroll_const_inc`, `unroll_const_dec`, `unroll_dyn`, `unroll_dyn_signed`)
+    // plus `--spectre-mitigations` gating and AArch64 cross-compile cleanly.
+
+    // 0: rel_fold(arg: i32) -> i32
+    //    i = arg & 0xffff, lim = arg >>u 16.
+    //    if i <u lim { if (i <=u lim) && !(lim <=u i) { load(i*4) + 1 } else { 999 } } else { -1 }
+    let f_rel_fold: Vec<u8> = vec![
+        0x20, 0, 0x41, 0xff, 0xff, 0x03, 0x71, 0x21, 1, // local 1 = i = arg & 0xffff
+        0x20, 0, 0x41, 16, 0x76, 0x21, 2, // local 2 = lim = arg >>u 16
+        0x20, 1, 0x20, 2, 0x49, // i <u lim
+        0x04, 0x7f, // if (result i32)
+        0x20, 1, 0x20, 2, 0x4d, // i <=u lim (dominated -> folds to 1!)
+        0x04, 0x7f, // if (result i32)
+        0x20, 2, 0x20, 1, 0x4d, // lim <=u i (dominated -> folds to 0!)
+        0x04, 0x7f, // if (result i32)
+        0x41, 0xe7, 0x07, // 999
+        0x05, // else
+        0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x41, 1, 0x6a, // load(i*4) + 1
+        0x0b, // end
+        0x05, // else
+        0x41, 0xe7, 0x07, // 999
+        0x0b, // end
+        0x05, // else
+        0x41, 0x7f, // -1
+        0x0b, // end
+    ];
+
+    // 1: inc_dyn_bce(n: i32) -> i32
+    //    i = 0; sum = 0; loop { sum += load(i*4); if i == n { break }; i += 1; br_if(i <=u n) }
+    //    Simpler canonical inclusive header:
+    //    block { loop { br_if 1 (i >u n); sum += load(i*4); i += 1; br 0 } }
+    let f_inc_dyn_bce: Vec<u8> = vec![
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 1, 0x20, 0, 0x4b, // i >u n  (negated i <=u n!)
+        0x0d, 1, // br_if 1
+        0x20, 2, // sum
+        0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, // load(i*4)
+        0x6a, 0x21, 2, // sum += ...
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, // i += 1
+        0x0c, 0,    // br 0
+        0x0b, // end loop
+        0x0b, // end block
+        0x20, 2, // return sum
+    ];
+
+    // 2: unroll_const_inc(seed: i32) -> i32  (exact 16 iters, 16 % 4 == 0, inc by 1)
+    let f_unroll_const_inc: Vec<u8> = vec![
+        0x20, 0, 0x21, 2, // acc = seed
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 1, 0x41, 16, 0x4f, // i >=u 16
+        0x0d, 1, // br_if 1
+        0x20, 2, 0x41, 3, 0x6c, // acc * 3
+        0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, // load(i*4)
+        0x6a, // +
+        0x20, 1, 0x6a, // + i
+        0x21, 2, // acc = ...
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, // i += 1
+        0x0c, 0,    // br 0
+        0x0b, // end loop
+        0x0b, // end block
+        0x20, 2, 0x20, 1, 0x6a, // return acc + i (tests escaping IV!)
+    ];
+
+    // 3: unroll_const_dec(seed: i32) -> i32  (exact 12 iters, 12 % 4 == 0, dec by 1)
+    let f_unroll_const_dec: Vec<u8> = vec![
+        0x41, 12, 0x21, 1, // i = 12
+        0x20, 0, 0x21, 2, // acc = seed
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 1, 0x45, // i == 0
+        0x0d, 1, // br_if 1
+        0x20, 1, 0x41, 1, 0x6b, 0x22, 1, // i = i - 1 (tee)
+        0x41, 2, 0x74, 0x28, 0x02, 0x00, // load(i*4)
+        0x20, 2, 0x41, 5, 0x6c, 0x6a, 0x21, 2, // acc = acc * 5 + load(i*4)
+        0x0c, 0,    // br 0
+        0x0b, // end loop
+        0x0b, // end block
+        0x20, 2, 0x20, 1, 0x6a, // return acc + i
+    ];
+
+    // 4: unroll_dyn(n: i32) -> i32  (dynamic unsigned limit `i <u n`, Sub-case 2 4x + rem!)
+    let f_unroll_dyn: Vec<u8> = vec![
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 1, 0x20, 0, 0x4f, // i >=u n
+        0x0d, 1, // br_if 1
+        0x20, 2, 0x41, 5, 0x6c, // acc * 5
+        0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, // load(i*4)
+        0x6a, 0x20, 1, 0x6a, 0x21, 2, // acc = acc*5 + load(i*4) + i
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, // i += 1
+        0x0c, 0,    // br 0
+        0x0b, // end loop
+        0x0b, // end block
+        0x20, 2, 0x20, 1, 0x73, // return acc ^ i
+    ];
+
+    // 5: unroll_dyn_signed(n: i32) -> i32  (dynamic signed limit `i <s n`)
+    let f_unroll_dyn_signed: Vec<u8> = vec![
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 1, 0x20, 0, 0x4e, // i >=s n
+        0x0d, 1, // br_if 1
+        0x20, 2, 0x41, 7, 0x6c, // acc * 7
+        0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, // load(i*4)
+        0x6a, 0x21, 2, // acc = acc*7 + load(i*4)
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, // i += 1
+        0x0c, 0,    // br 0
+        0x0b, // end loop
+        0x0b, // end block
+        0x20, 2,
+    ];
+
+    // 6: unroll_const_swap(x: i32) -> i32 (T=8 cyclic swap [a, b] -> [b, a] escaping to exit!)
+    // Locals: 0=x, 1=a, 2=b, 3=i, 4=acc, 5=tmp
+    let f_unroll_const_swap: Vec<u8> = vec![
+        0x20, 0, 0x21, 1, // a = x
+        0x20, 0, 0x41, 37, 0x73, 0x21, 2, // b = x ^ 37
+        0x03, 0x40, // loop
+        0x20, 4, 0x41, 3, 0x6c, // acc * 3
+        0x20, 1, 0x6a, // + a
+        0x20, 3, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x6a, // + load(i*4)
+        0x21, 4, // acc = ...
+        0x20, 1, 0x21, 5, // tmp = a
+        0x20, 2, 0x21, 1, // a = b
+        0x20, 5, 0x21, 2, // b = tmp
+        0x20, 3, 0x41, 1, 0x6a, 0x22, 3, // i += 1
+        0x41, 8, 0x49, // i <u 8
+        0x0d, 0,    // br_if 0
+        0x0b, // end loop
+        0x20, 1, 0x41, 7, 0x6c, // a * 7
+        0x20, 2, 0x41, 13, 0x6c, 0x73, // ^ (b * 13)
+        0x20, 4, 0x73, // ^ acc
+    ];
+
+    // 7: unroll_const_shift(x: i32) -> i32 (T=8 4-stage shift register [a,b,c,d] -> [new,a,b,c]
+    // with `tmp = d` escaping directly to exit; regresses parallel vs transitive subst!)
+    // Locals: 0=x, 1=a, 2=b, 3=c, 4=d, 5=i, 6=tmp
+    let f_unroll_const_shift: Vec<u8> = vec![
+        0x20, 0, 0x21, 1, // a = x
+        0x20, 0, 0x41, 1, 0x6a, 0x21, 2, // b = x + 1
+        0x20, 0, 0x41, 2, 0x6a, 0x21, 3, // c = x + 2
+        0x20, 0, 0x41, 3, 0x6a, 0x21, 4, // d = x + 3
+        0x03, 0x40, // loop
+        0x20, 4, 0x21, 6, // tmp = d (captures hdr.param[d] for exit!)
+        0x20, 3, 0x21, 4, // d = c
+        0x20, 2, 0x21, 3, // c = b
+        0x20, 1, 0x21, 2, // b = a
+        0x20, 5, 0x41, 2, 0x74, 0x28, 0x02, 0x00, // load(i*4)
+        0x20, 6, 0x41, 3, 0x6c, 0x73, // ^ (tmp * 3)
+        0x21, 1, // a = ...
+        0x20, 5, 0x41, 1, 0x6a, 0x22, 5, // i += 1
+        0x41, 8, 0x49, // i <u 8
+        0x0d, 0,    // br_if 0
+        0x0b, // end loop
+        0x20, 1, 0x41, 3, 0x6c, // a * 3
+        0x20, 2, 0x41, 5, 0x6c, 0x73, // ^ (b * 5)
+        0x20, 3, 0x41, 7, 0x6c, 0x73, // ^ (c * 7)
+        0x20, 4, 0x41, 11, 0x6c, 0x73, // ^ (d * 11)
+        0x20, 6, 0x41, 17, 0x6c, 0x73, // ^ (tmp * 17)
+    ];
+
+    // Seed first 256 i32 words (1024 bytes) with non-trivial values via active data segment.
+    let mut seed_bytes = Vec::with_capacity(1024);
+    for k in 0u32..256 {
+        seed_bytes.extend_from_slice(&(k.wrapping_mul(2654435761) ^ 0x1357_9bdf).to_le_bytes());
+    }
+    let mut data_sec = vec![1, 0, 0x41, 0, 0x0b];
+    leb_u32(&mut data_sec, seed_bytes.len() as u32);
+    data_sec.extend_from_slice(&seed_bytes);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0, 0, 0, 0, 0]),
+        section(5, &[1, 0x00, 1]), // 1 page (65,536 B = 16,384 i32s)
+        export_sec(&[
+            ("rel_fold", 0, 0),
+            ("inc_dyn_bce", 0, 1),
+            ("unroll_const_inc", 0, 2),
+            ("unroll_const_dec", 0, 3),
+            ("unroll_dyn", 0, 4),
+            ("unroll_dyn_signed", 0, 5),
+            ("unroll_const_swap", 0, 6),
+            ("unroll_const_shift", 0, 7),
+        ]),
+        code_sec(&[
+            enc_body(&[(2, 0x7f)], &f_rel_fold),
+            enc_body(&[(2, 0x7f)], &f_inc_dyn_bce),
+            enc_body(&[(2, 0x7f)], &f_unroll_const_inc),
+            enc_body(&[(2, 0x7f)], &f_unroll_const_dec),
+            enc_body(&[(2, 0x7f)], &f_unroll_dyn),
+            enc_body(&[(2, 0x7f)], &f_unroll_dyn_signed),
+            enc_body(&[(5, 0x7f)], &f_unroll_const_swap),
+            enc_body(&[(6, 0x7f)], &f_unroll_const_shift),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    // Check IR-level optimization properties directly:
+    //  - `rel_fold` folds both dominated comparisons (leaving zero I32Cmp/CmpBranch for `999`!).
+    //  - `unroll_const_inc`, `unroll_const_dec`, `unroll_const_swap`, and `unroll_const_shift` unroll 4x.
+    let validated =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits())
+            .expect("valid");
+    let xmod = admit_x64_module(validated.decoded()).unwrap();
+    let mut irs: Vec<IrFunc> = (0..8)
+        .map(|bi| lower_wasm_to_ir(validated.decoded(), &xmod, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &xmod, None).unwrap();
+    let mut scratch = super::opt::Stage2Scratch::default();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2_with_options(ir, &xmod, &eff, false, None, &mut scratch)
+            .unwrap();
+        verify_ir(ir, &xmod).unwrap();
+    }
+    let has_999 = irs[0].blocks.iter().any(|bb| {
+        bb.insts
+            .iter()
+            .any(|ins| matches!(ins.op, Op::ConstI32(999)))
+    });
+    assert!(
+        !has_999,
+        "dominating LtU must fold both dominated LeU branches in rel_fold (eliminating 999)"
+    );
+    let const_inc_loads: usize = irs[2]
+        .blocks
+        .iter()
+        .flat_map(|bb| bb.insts.iter())
+        .filter(|ins| matches!(ins.op, Op::Load { .. } | Op::LoadScaled { .. }))
+        .count();
+    assert!(
+        const_inc_loads >= 4,
+        "unroll_const_inc (T=16) must unroll 4x (got {const_inc_loads} loads)"
+    );
+    let const_dec_loads: usize = irs[3]
+        .blocks
+        .iter()
+        .flat_map(|bb| bb.insts.iter())
+        .filter(|ins| matches!(ins.op, Op::Load { .. } | Op::LoadScaled { .. }))
+        .count();
+    assert!(
+        const_dec_loads >= 4,
+        "unroll_const_dec (T=12) must unroll 4x (got {const_dec_loads} loads)"
+    );
+    let const_swap_loads: usize = irs[6]
+        .blocks
+        .iter()
+        .flat_map(|bb| bb.insts.iter())
+        .filter(|ins| matches!(ins.op, Op::Load { .. } | Op::LoadScaled { .. }))
+        .count();
+    assert!(
+        const_swap_loads >= 4,
+        "unroll_const_swap (T=8) must unroll 4x (got {const_swap_loads} loads)"
+    );
+    let const_shift_loads: usize = irs[7]
+        .blocks
+        .iter()
+        .flat_map(|bb| bb.insts.iter())
+        .filter(|ins| matches!(ins.op, Op::Load { .. } | Op::LoadScaled { .. }))
+        .count();
+    assert!(
+        const_shift_loads >= 4,
+        "unroll_const_shift (T=8) must unroll 4x (got {const_shift_loads} loads)"
+    );
+
+    // Compile for x64-v2, x64-v3, x64-v4, Spectre-mitigated x64, and AArch64!
+    let so_v2 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v3 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+                has_avx2: true,
+                has_avx512: false,
+            },
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v4 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+                has_avx2: true,
+                has_avx512: true,
+            },
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_spectre = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            spectre_mitigations: true,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let _a64 = crate::aarch64::compile_wasm_to_aarch64(&wasm, &Default::default()).unwrap();
+
+    let calls: Vec<(&str, u32)> = vec![
+        ("rel_fold", (10u32 << 16) | 3),
+        ("rel_fold", (3u32 << 16) | 3),
+        ("rel_fold", (3u32 << 16) | 10),
+        ("inc_dyn_bce", 0),
+        ("inc_dyn_bce", 1),
+        ("inc_dyn_bce", 7),
+        ("inc_dyn_bce", 15),
+        ("inc_dyn_bce", 16383),       // exact last valid word in 64 KiB
+        ("inc_dyn_bce", 16384),       // MUST trap OOB!
+        ("inc_dyn_bce", 0xffff_ffff), // u32::MAX wrap boundary -> MUST trap OOB!
+        ("unroll_const_inc", 0),
+        ("unroll_const_inc", 42),
+        ("unroll_const_dec", 0),
+        ("unroll_const_dec", 17),
+        ("unroll_dyn", 0),
+        ("unroll_dyn", 1),
+        ("unroll_dyn", 2),
+        ("unroll_dyn", 3),
+        ("unroll_dyn", 4),
+        ("unroll_dyn", 5),
+        ("unroll_dyn", 7),
+        ("unroll_dyn", 8),
+        ("unroll_dyn", 9),
+        ("unroll_dyn", 15),
+        ("unroll_dyn", 16),
+        ("unroll_dyn", 17),
+        ("unroll_dyn", 100),
+        ("unroll_dyn", 16384),       // exact full page
+        ("unroll_dyn", 16385),       // OOB on remainder iter 16384!
+        ("unroll_dyn", 0xffff_ffff), // u32::MAX wrap cap -> OOB!
+        ("unroll_dyn_signed", (-1i32) as u32),
+        ("unroll_dyn_signed", 0),
+        ("unroll_dyn_signed", 1),
+        ("unroll_dyn_signed", 3),
+        ("unroll_dyn_signed", 4),
+        ("unroll_dyn_signed", 5),
+        ("unroll_dyn_signed", 8),
+        ("unroll_dyn_signed", 9),
+        ("unroll_dyn_signed", i32::MIN as u32),
+        ("unroll_dyn_signed", i32::MAX as u32), // OOB!
+        ("unroll_const_swap", 0),
+        ("unroll_const_swap", 0x1234_5678),
+        ("unroll_const_swap", 0xffff_fffe),
+        ("unroll_const_shift", 0),
+        ("unroll_const_shift", 19),
+        ("unroll_const_shift", 0xdead_beef),
+    ];
+
+    let cfg = wtime_runtime::Config {
+        features: x64_validate_features(),
+        limits: x64_validate_limits(),
+    };
+    let engine = wtime_runtime::Engine::new(cfg).unwrap();
+    let rt_mod = engine.compile(&wasm).unwrap();
+    let mut store = wtime_runtime::Store::new(&engine);
+    let inst = wtime_runtime::Linker::new(&engine)
+        .instantiate(&mut store, &rt_mod)
+        .unwrap();
+    let mut expected: Vec<Result<u32, u8>> = Vec::with_capacity(calls.len());
+    for &(name, arg) in &calls {
+        let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+            panic!()
+        };
+        match store.invoke(f, &[wtime_runtime::Value::I32(arg as i32)]) {
+            Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                wtime_runtime::Value::I32(v) => expected.push(Ok(v as u32)),
+                other => panic!("{other:?}"),
+            },
+            Err(e) if e.trap_code == Some(wtime_types::TrapCode::MemoryOutOfBounds) => {
+                expected.push(Err(2));
+            }
+            other => panic!("{name}({arg:#x}) -> {other:?}"),
+        }
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4, so_spectre, expected);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-hill2-opt");
+        let mut script = String::new();
+        for &(name, arg) in &calls {
+            script.push_str(&format!("call {name} {arg:x}\n"));
+        }
+        for (name, bytes, req_avx2, req_avx512) in [
+            ("v2.so", &so_v2, false, false),
+            ("v3.so", &so_v3, true, false),
+            ("v4.so", &so_v4, true, true),
+            ("spectre.so", &so_spectre, false, false),
+        ] {
+            if req_avx512
+                && !(std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512dq"))
+            {
+                continue;
+            }
+            if req_avx2
+                && !(std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma"))
+            {
+                continue;
+            }
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{name} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"), "{name}: {stdout}");
+            for (idx, (&(cname, arg), &exp)) in calls.iter().zip(&expected).enumerate() {
+                let line = lines.next().expect("missing CALL line");
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                assert_eq!(parts[0], "CALL", "{name} #{idx}: {line}");
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(v) => assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(v)),
+                        "{name} {cname}({arg:#x}) mismatch"
+                    ),
+                    Err(et) => {
+                        assert_ne!(rc, 0, "{name} {cname}({arg:#x}) must trap");
+                        assert_eq!(trap, et, "{name} {cname}({arg:#x}) wrong trap");
+                    }
+                }
+            }
+        }
+    }
+}

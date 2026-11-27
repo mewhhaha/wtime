@@ -2623,3 +2623,514 @@ int main(int argc, char **argv) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn elf64_has_dt_flags_1_nodelete(elf: &[u8]) -> bool {
+    if elf.len() < 64 {
+        return false;
+    }
+    let e_phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
+    let e_phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
+    let e_phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+    for i in 0..e_phnum {
+        let off = e_phoff + i * e_phentsize;
+        if off + 56 > elf.len() {
+            break;
+        }
+        let p_type = u32::from_le_bytes(elf[off..off + 4].try_into().unwrap());
+        if p_type == 2 {
+            // PT_DYNAMIC
+            let d_off = u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
+            let d_sz = u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+            let mut cur = d_off;
+            while cur + 16 <= d_off + d_sz && cur + 16 <= elf.len() {
+                let tag = u64::from_le_bytes(elf[cur..cur + 8].try_into().unwrap());
+                let val = u64::from_le_bytes(elf[cur + 8..cur + 16].try_into().unwrap());
+                if tag == 0 {
+                    break;
+                }
+                if tag == 0x6fff_fffb && (val & 0x8) != 0 {
+                    return true;
+                }
+                cur += 16;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn x64_cdylib_guard_pages_oob_grow_start_reentry_dead_load_and_sigsegv_chaining() {
+    let root = crate::build::create_fresh_test_root("wtime-aot-cdylib-guard-pages");
+    let (_, host_isa) = super::resolve_x64_isa("native").unwrap();
+
+    // Module A: 1..4 pages, pinned mut global g0 = 10, host import `env::cb(i32) -> i32`,
+    // exports: `load32`, `load_max_off`, `store32`, `dead_oob`, `grow1`, `call_cb`,
+    // `blot:allocate` (traps OOB when arg >= 65536, else returns arg + 1), `set_g_then_oob`, `g0`.
+    let mut imp_a = vec![1];
+    enc_str(&mut imp_a, "env");
+    enc_str(&mut imp_a, "cb");
+    imp_a.push(0);
+    leb_u32(&mut imp_a, 0); // (i32) -> i32
+    let mut glob_a = vec![1, 0x7f, 1, 0x41, 10, 0x0b]; // mut i32 = 10
+    let _ = &mut glob_a;
+
+    // 1: load32(addr) -> i32
+    let f_load32 = vec![0x20, 0, 0x28, 0x02, 0x00];
+    // 2: load_max_off(addr) -> i32  (offset = u32::MAX, tests addr=u32::MAX + offset=u32::MAX!)
+    let mut f_load_max = vec![0x20, 0, 0x28, 0x02];
+    leb_u32(&mut f_load_max, u32::MAX);
+    // 3: store32(addr) -> i32  (stores 0x55aa1234 at addr, returns 1)
+    let mut f_store32 = vec![0x20, 0, 0x41];
+    leb_i32(&mut f_store32, 0x55aa1234);
+    f_store32.extend_from_slice(&[0x36, 0x02, 0x00, 0x41, 1]);
+    // 4: dead_oob(addr) -> i32  (load(addr+0); drop(load(addr+100000)); MUST still trap OOB!)
+    let mut f_dead_oob = vec![0x20, 0, 0x28, 0x02, 0x00, 0x20, 0, 0x28, 0x02];
+    leb_u32(&mut f_dead_oob, 100_000);
+    f_dead_oob.push(0x1a);
+    // 5: grow1(delta) -> i32
+    let f_grow = vec![0x20, 0, 0x40, 0x00];
+    // 6: call_cb(x) -> i32  (calls import 0, returns result + 100)
+    let mut f_call_cb = vec![0x20, 0, 0x10, 0, 0x41];
+    leb_i32(&mut f_call_cb, 100);
+    f_call_cb.push(0x6a);
+    // 7: blot:allocate(addr) -> i32  (loads [addr], returns loaded + 7)
+    let f_alloc = vec![0x20, 0, 0x28, 0x02, 0x00, 0x41, 7, 0x6a];
+    // 8: set_g_then_oob(addr) -> i32  (g0 = 777; load(addr))
+    let mut f_set_g_oob = vec![0x41];
+    leb_i32(&mut f_set_g_oob, 777);
+    f_set_g_oob.extend_from_slice(&[0x24, 0, 0x20, 0, 0x28, 0x02, 0x00]);
+
+    let wasm_a = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        section(2, &imp_a),
+        func_sec(&[0, 0, 0, 0, 0, 0, 0, 0]),
+        section(5, &[1, 0x01, 1, 4]), // min 1, max 4
+        section(6, &glob_a),
+        export_sec(&[
+            ("load32", 0, 1),
+            ("load_max_off", 0, 2),
+            ("store32", 0, 3),
+            ("dead_oob", 0, 4),
+            ("grow", 0, 5),
+            ("call_cb", 0, 6),
+            ("blot:allocate", 0, 7),
+            ("set_g_then_oob", 0, 8),
+            ("g0", 3, 0),
+        ]),
+        code_sec(&[
+            enc_body(&[], &f_load32),
+            enc_body(&[], &f_load_max),
+            enc_body(&[], &f_store32),
+            enc_body(&[], &f_dead_oob),
+            enc_body(&[], &f_grow),
+            enc_body(&[], &f_call_cb),
+            enc_body(&[], &f_alloc),
+            enc_body(&[], &f_set_g_oob),
+        ]),
+    ]);
+
+    // Module B: independent 1-page module loaded simultaneously to test multi-DSO SIGSEGV chaining!
+    let wasm_b = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[("b_load", 0, 0)]),
+        code_sec(&[enc_body(&[], &[0x20, 0, 0x28, 0x02, 0x00, 0x41, 3, 0x6a])]),
+    ]);
+
+    // Module Zero: `(memory 0 0)` with `--guard-pages`: MUST still map PROT_NONE guard region!
+    let wasm_zero = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 0, 0]), // min 0, max 0
+        export_sec(&[("z_load", 0, 0)]),
+        code_sec(&[enc_body(&[], &[0x20, 0, 0x28, 0x02, 0x00])]),
+    ]);
+
+    // Module StartOob: `start` function executes OOB load at 100000 -> `blot_aot_new` must return NULL + TRAP_OOB!
+    let mut f_start_oob = vec![0x41];
+    leb_i32(&mut f_start_oob, 100_000);
+    f_start_oob.extend_from_slice(&[0x28, 0x02, 0x00, 0x1a]);
+    let wasm_start_oob = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 1, 1]),
+        section(8, &[0]), // start = func 0
+        code_sec(&[enc_body(&[], &f_start_oob)]),
+    ]);
+
+    let so_a_default = compile_wasm_to_x64_so(
+        &wasm_a,
+        &X64CompileOptions {
+            isa: host_isa,
+            guard_pages: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_a = compile_wasm_to_x64_so(
+        &wasm_a,
+        &X64CompileOptions {
+            isa: host_isa,
+            guard_pages: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_b = compile_wasm_to_x64_so(
+        &wasm_b,
+        &X64CompileOptions {
+            isa: host_isa,
+            guard_pages: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_zero = compile_wasm_to_x64_so(
+        &wasm_zero,
+        &X64CompileOptions {
+            isa: host_isa,
+            guard_pages: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_start_oob = compile_wasm_to_x64_so(
+        &wasm_start_oob,
+        &X64CompileOptions {
+            isa: host_isa,
+            guard_pages: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !elf64_has_dt_flags_1_nodelete(&so_a_default),
+        "default --blot-cdylib must NOT set DF_1_NODELETE"
+    );
+    assert!(
+        elf64_has_dt_flags_1_nodelete(&so_a),
+        "--blot-cdylib --guard-pages MUST set DT_FLAGS_1 = DF_1_NODELETE"
+    );
+
+    let path_a = root.0.join("libA.so");
+    let path_b = root.0.join("libB.so");
+    let path_zero = root.0.join("libZero.so");
+    let path_start = root.0.join("libStartOob.so");
+    fs::write(&path_a, &so_a).unwrap();
+    fs::write(&path_b, &so_b).unwrap();
+    fs::write(&path_zero, &so_zero).unwrap();
+    fs::write(&path_start, &so_start_oob).unwrap();
+
+    // Verify native x86-64 disassembly of `libA.so` contains `lock cmpxchg` and `pause` cleanly.
+    if let Ok(dis) = Command::new("objdump").args(["-d"]).arg(&path_a).output()
+        && dis.status.success()
+    {
+        let txt = String::from_utf8_lossy(&dis.stdout);
+        assert!(
+            txt.contains("lock cmpxchg"),
+            "guard-pages .so must emit lock cmpxchg for thread-safe one-time sigaction install"
+        );
+        assert!(
+            txt.contains("pause"),
+            "guard-pages .so must emit pause in spin-wait"
+        );
+        assert!(
+            !txt.contains("(bad)"),
+            "guard-pages .so disassembly must not contain bad instructions"
+        );
+    }
+
+    const DRIVER_C: &str = r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fenv.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+typedef int (*HostFn)(void *uctx, void *ac, uint32_t idx, uint64_t tok, uint64_t arg, uint64_t *res);
+typedef void *(*NewFn)(void *uctx, HostFn fn, uint64_t mem_lim, uint8_t *trap);
+typedef void (*DropFn)(void *h);
+typedef int (*CallExportFn)(void *h, const char *np, size_t nl, uint64_t arg, uint64_t *res, uint8_t *trap);
+typedef void (*MemDataFn)(void *h, uint8_t **ptr, size_t *len);
+typedef int64_t (*MemGrowFn)(void *h, uint64_t delta);
+typedef int (*GetGlobalFn)(void *h, const char *np, size_t nl, uint64_t *val, uint8_t *kind);
+typedef int (*ActiveAllocFn)(void *ac, uint32_t arg, uint32_t *res, uint8_t *trap);
+
+static volatile uint8_t *g_probe_page = NULL;
+static volatile int g_host_hits = 0;
+
+static void host_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
+    (void)uctx;
+    if (sig == SIGSEGV && g_probe_page != NULL && info->si_addr == (void *)g_probe_page) {
+        g_host_hits++;
+        mprotect((void *)g_probe_page, 4096, PROT_READ | PROT_WRITE);
+        return;
+    }
+    _exit(99);
+}
+
+static void trigger_host_fault(void) {
+    if (mprotect((void *)g_probe_page, 4096, PROT_NONE) != 0) _exit(98);
+    *g_probe_page = 0x42; // faults -> chains to host_sigsegv_handler -> mprotect RW -> retries!
+    if (*g_probe_page != 0x42) _exit(97);
+}
+
+typedef struct {
+    ActiveAllocFn active_alloc;
+    int reenter_oob_ok;
+    int host_fault_in_cb_ok;
+} CbCtx;
+
+static int test_host_cb(void *uctx, void *ac, uint32_t idx, uint64_t tok, uint64_t arg, uint64_t *res) {
+    (void)idx; (void)tok;
+    CbCtx *c = (CbCtx *)uctx;
+    // 1. Trigger a host SIGSEGV while guest is suspended inside callback!
+    int before = g_host_hits;
+    trigger_host_fault();
+    if (g_host_hits == before + 1) c->host_fault_in_cb_ok = 1;
+
+    // 2. Reenter blot_aot_active_allocate with an OOB address -> must trap TRAP_OOB (2)!
+    uint32_t r32 = 0xdeadbeef;
+    uint8_t tr = 0;
+    int rc = c->active_alloc(ac, 65536 * 2, &r32, &tr);
+    if (rc == 1 && tr == 2 && r32 == 0xdeadbeef) {
+        // Also verify valid reentry right after trapping reentry!
+        tr = 0;
+        rc = c->active_alloc(ac, 0, &r32, &tr);
+        if (rc == 0 && tr == 0) c->reenter_oob_ok = 1;
+    }
+    *res = arg + 5;
+    return 0;
+}
+
+static unsigned int read_mxcsr(void) {
+    unsigned int m = 0;
+    __asm__ volatile("stmxcsr %0" : "=m"(m));
+    return m;
+}
+static void write_mxcsr(unsigned int m) {
+    __asm__ volatile("ldmxcsr %0" : : "m"(m));
+}
+
+int main(int argc, char **argv) {
+    if (argc < 5) return 2;
+
+    // 0a. Child process: prev_sa == SIG_IGN + software raise(SIGSEGV) must be ignored
+    // without disarming guard pages (subsequent guest OOB still returns TRAP_OOB).
+    {
+        pid_t pid = fork();
+        if (pid < 0) return 40;
+        if (pid == 0) {
+            signal(SIGSEGV, SIG_IGN);
+            void *dl = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+            if (!dl) _exit(41);
+            NewFn nf = (NewFn)dlsym(dl, "blot_aot_new");
+            CallExportFn cf = (CallExportFn)dlsym(dl, "blot_aot_call_export");
+            uint8_t tr = 0;
+            void *h = nf(NULL, NULL, 0, &tr);
+            if (!h || tr != 0) _exit(42);
+            if (raise(SIGSEGV) != 0) _exit(43);
+            uint64_t r64 = 0;
+            tr = 0;
+            if (cf(h, "load32", 6, 65536, &r64, &tr) != 1 || tr != 2) _exit(44);
+            _exit(0);
+        }
+        int st = 0;
+        if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            fprintf(stderr, "SIG_IGN software SIGSEGV child failed: status=0x%x\n", st);
+            return 45;
+        }
+    }
+
+    // 0b. Child process: prev_sa == SIG_DFL + software raise(SIGSEGV) must re-deliver
+    // SIGSEGV via tgkill and terminate the child with SIGSEGV (not silently return).
+    {
+        pid_t pid = fork();
+        if (pid < 0) return 50;
+        if (pid == 0) {
+            signal(SIGSEGV, SIG_DFL);
+            void *dl = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+            if (!dl) _exit(51);
+            NewFn nf = (NewFn)dlsym(dl, "blot_aot_new");
+            uint8_t tr = 0;
+            void *h = nf(NULL, NULL, 0, &tr);
+            if (!h || tr != 0) _exit(52);
+            raise(SIGSEGV);
+            _exit(53); // must not be reached!
+        }
+        int st = 0;
+        if (waitpid(pid, &st, 0) != pid || !WIFSIGNALED(st) || WTERMSIG(st) != SIGSEGV) {
+            fprintf(stderr, "SIG_DFL software SIGSEGV child failed: status=0x%x\n", st);
+            return 54;
+        }
+    }
+
+    // Allocate probe page and install host SA_SIGINFO SIGSEGV handler BEFORE loading any DSO.
+    g_probe_page = (volatile uint8_t *)mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (g_probe_page == MAP_FAILED) return 3;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = host_sigsegv_handler;
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) return 4;
+
+    void *dl_a = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    void *dl_b = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
+    void *dl_z = dlopen(argv[3], RTLD_NOW | RTLD_LOCAL);
+    void *dl_s = dlopen(argv[4], RTLD_NOW | RTLD_LOCAL);
+    if (!dl_a || !dl_b || !dl_z || !dl_s) {
+        fprintf(stderr, "dlopen failed: %s\n", dlerror());
+        return 5;
+    }
+
+    NewFn a_new = (NewFn)dlsym(dl_a, "blot_aot_new");
+    DropFn a_drop = (DropFn)dlsym(dl_a, "blot_aot_drop");
+    CallExportFn a_call = (CallExportFn)dlsym(dl_a, "blot_aot_call_export");
+    GetGlobalFn a_getg = (GetGlobalFn)dlsym(dl_a, "blot_aot_get_global");
+    ActiveAllocFn a_act_alloc = (ActiveAllocFn)dlsym(dl_a, "blot_aot_active_allocate");
+
+    NewFn b_new = (NewFn)dlsym(dl_b, "blot_aot_new");
+    DropFn b_drop = (DropFn)dlsym(dl_b, "blot_aot_drop");
+    CallExportFn b_call = (CallExportFn)dlsym(dl_b, "blot_aot_call_export");
+
+    NewFn z_new = (NewFn)dlsym(dl_z, "blot_aot_new");
+    DropFn z_drop = (DropFn)dlsym(dl_z, "blot_aot_drop");
+    CallExportFn z_call = (CallExportFn)dlsym(dl_z, "blot_aot_call_export");
+    MemDataFn z_mem = (MemDataFn)dlsym(dl_z, "blot_aot_mem_data");
+    MemGrowFn z_grow = (MemGrowFn)dlsym(dl_z, "blot_aot_mem_grow");
+
+    NewFn s_new = (NewFn)dlsym(dl_s, "blot_aot_new");
+
+    CbCtx cb_ctx = { a_act_alloc, 0, 0 };
+    uint8_t tr = 0;
+    void *ha = a_new(&cb_ctx, test_host_cb, 0, &tr);
+    if (!ha || tr != 0) { fprintf(stderr, "a_new failed tr=%u\n", tr); return 10; }
+    void *hb = b_new(NULL, NULL, 0, &tr);
+    if (!hb || tr != 0) { fprintf(stderr, "b_new failed tr=%u\n", tr); return 11; }
+
+    // Chain is now: libB -> libA -> host_sigsegv_handler.
+    // 1. Host fault chains cleanly through both DSOs!
+    trigger_host_fault();
+    if (g_host_hits != 1) { fprintf(stderr, "host fault #1 missed (%d)\n", g_host_hits); return 12; }
+
+    // 2. Non-default host MXCSR (round-toward-zero = 0x7f80) must survive guard-page OOB trap!
+    unsigned int orig_mxcsr = read_mxcsr();
+    unsigned int custom_mxcsr = (orig_mxcsr & ~0x6000u) | 0x6000u;
+    write_mxcsr(custom_mxcsr);
+
+    uint64_t r64 = 0;
+    // In-bounds store & load at 0
+    if (a_call(ha, "store32", 7, 0, &r64, &tr) != 0 || r64 != 1) return 13;
+    if (a_call(ha, "load32", 6, 0, &r64, &tr) != 0 || r64 != 0x55aa1234ULL) return 14;
+    // OOB load at 65536, u32::MAX, and max_off(u32::MAX) -> all TRAP_OOB (2)!
+    r64 = 0x1111; tr = 0;
+    if (a_call(ha, "load32", 6, 65536, &r64, &tr) != 1 || tr != 2 || r64 != 0x1111) return 15;
+    if ((read_mxcsr() & 0x6000u) != 0x6000u) { fprintf(stderr, "MXCSR clobbered after guard OOB!\n"); return 16; }
+    r64 = 0x2222; tr = 0;
+    if (a_call(ha, "load32", 6, 0xffffffffULL, &r64, &tr) != 1 || tr != 2) return 17;
+    r64 = 0x3333; tr = 0;
+    if (a_call(ha, "load_max_off", 12, 0xffffffffULL, &r64, &tr) != 1 || tr != 2) return 18;
+    // OOB store at 65536 -> TRAP_OOB (2)!
+    tr = 0;
+    if (a_call(ha, "store32", 7, 65536, &r64, &tr) != 1 || tr != 2) return 19;
+    // Dead coalesced OOB load (`load(0); drop(load(100000))`) MUST STILL trap TRAP_OOB (2)!
+    tr = 0;
+    if (a_call(ha, "dead_oob", 8, 0, &r64, &tr) != 1 || tr != 2) { fprintf(stderr, "dead_oob failed tr=%u\n", tr); return 20; }
+    // Pinned global mutation BEFORE OOB trap MUST be synced back to Ctx on guard unwind!
+    tr = 0;
+    if (a_call(ha, "set_g_then_oob", 14, 65536, &r64, &tr) != 1 || tr != 2) return 21;
+    uint64_t gval = 0; uint8_t gkind = 0xff;
+    if (a_getg(ha, "g0", 2, &gval, &gkind) != 0 || gval != 777 || gkind != 0) {
+        fprintf(stderr, "pinned global not synced on guard OOB: gval=%llu kind=%u\n", (unsigned long long)gval, gkind);
+        return 22;
+    }
+    write_mxcsr(orig_mxcsr);
+
+    // 3. memory.grow(1) -> access at 65536 now succeeds, 131072 traps TRAP_OOB!
+    if (a_call(ha, "grow", 4, 1, &r64, &tr) != 0 || r64 != 1) return 23;
+    if (a_call(ha, "store32", 7, 65536, &r64, &tr) != 0) return 24;
+    if (a_call(ha, "load32", 6, 65536, &r64, &tr) != 0 || r64 != 0x55aa1234ULL) return 25;
+    tr = 0;
+    if (a_call(ha, "load32", 6, 131072, &r64, &tr) != 1 || tr != 2) return 26;
+
+    // 4. Callback reentry OOB + host fault inside callback!
+    tr = 0;
+    if (a_call(ha, "call_cb", 7, 10, &r64, &tr) != 0 || r64 != 115) {
+        fprintf(stderr, "call_cb failed r64=%llu tr=%u\n", (unsigned long long)r64, tr);
+        return 27;
+    }
+    if (!cb_ctx.reenter_oob_ok || !cb_ctx.host_fault_in_cb_ok) {
+        fprintf(stderr, "cb flags failed: reenter=%d host_fault=%d\n", cb_ctx.reenter_oob_ok, cb_ctx.host_fault_in_cb_ok);
+        return 28;
+    }
+
+    // 5. libB OOB + libA OOB (verifies libB -> libA chaining!) + host fault!
+    if (b_call(hb, "b_load", 6, 0, &r64, &tr) != 0 || r64 != 3) return 29;
+    tr = 0;
+    if (b_call(hb, "b_load", 6, 65536, &r64, &tr) != 1 || tr != 2) return 30;
+    tr = 0;
+    if (a_call(ha, "load32", 6, 131072, &r64, &tr) != 1 || tr != 2) return 31;
+    trigger_host_fault();
+    if (g_host_hits != 3) { fprintf(stderr, "host fault #3 missed (%d)\n", g_host_hits); return 32; }
+
+    // 6. `(memory 0 0)` module with `--guard-pages`!
+    tr = 0;
+    void *hz = z_new(NULL, NULL, 0, &tr);
+    if (!hz || tr != 0) { fprintf(stderr, "z_new failed tr=%u\n", tr); return 33; }
+    uint8_t *zptr = NULL; size_t zlen = 999;
+    z_mem(hz, &zptr, &zlen);
+    if (zptr == NULL || zlen != 0) { fprintf(stderr, "z_mem bad ptr=%p len=%zu\n", (void *)zptr, zlen); return 34; }
+    if (z_grow(hz, 1) != -1) return 35;
+    tr = 0;
+    if (z_call(hz, "z_load", 6, 0, &r64, &tr) != 1 || tr != 2) { fprintf(stderr, "z_load(0) failed tr=%u\n", tr); return 36; }
+
+    // 7. `start` function OOB during `blot_aot_new`!
+    tr = 0;
+    void *hs = s_new(NULL, NULL, 0, &tr);
+    if (hs != NULL || tr != 2) { fprintf(stderr, "s_new expected NULL+TRAP_OOB, got %p tr=%u\n", hs, tr); return 37; }
+
+    a_drop(ha);
+    b_drop(hb);
+    z_drop(hz);
+
+    // 8. `dlclose` ALL guard-page DSOs (DF_1_NODELETE keeps `.text` mapped) and verify host fault still chains!
+    dlclose(dl_s);
+    dlclose(dl_z);
+    dlclose(dl_b);
+    dlclose(dl_a);
+    trigger_host_fault();
+    if (g_host_hits != 4) { fprintf(stderr, "host fault after dlclose missed (%d)\n", g_host_hits); return 38; }
+
+    munmap((void *)g_probe_page, 4096);
+    return 0;
+}
+"#;
+    let Some(driver) = compile_c_test_bin(&root.0, "guard_pages_driver", DRIVER_C, &["-ldl"])
+    else {
+        return;
+    };
+    let out = Command::new(&driver)
+        .args([
+            path_a.to_str().unwrap(),
+            path_b.to_str().unwrap(),
+            path_zero.to_str().unwrap(),
+            path_start.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cdylib --guard-pages native driver failed ({:?}):\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

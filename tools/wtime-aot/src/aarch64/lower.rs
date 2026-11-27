@@ -1879,7 +1879,12 @@ impl<'a> LowerA64<'a> {
         self.gp_commit(dst_val, d);
     }
 
-    fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
+    fn emit_inst(
+        &mut self,
+        res: Option<Val>,
+        op: Op,
+        bounds_check_guard_covered: bool,
+    ) -> Result<(), String> {
         let prev_flags = self.live_flags.take();
         match op {
             Op::Copy(src) => {
@@ -2503,7 +2508,7 @@ impl<'a> LowerA64<'a> {
                 if !for_bulk
                     && self.layout.use_guard_pages
                     && !self.layout.memory64
-                    && end_off < (1u64 << 32)
+                    && bounds_check_guard_covered
                 {
                     return Ok(());
                 }
@@ -5995,7 +6000,22 @@ pub fn lower_ir_to_aarch64(
                     continue;
                 }
             }
-            l.emit_inst(inst.res, inst.op)?;
+            let bc_guard_covered = match inst.op {
+                Op::BoundsCheck {
+                    addr,
+                    end_off,
+                    for_bulk: false,
+                } if layout.use_guard_pages && !layout.memory64 => {
+                    crate::x64::lower::bounds_check_covered_by_subsequent_mem_op(
+                        &bb.insts,
+                        ii + 1,
+                        addr,
+                        end_off,
+                    )
+                }
+                _ => false,
+            };
+            l.emit_inst(inst.res, inst.op, bc_guard_covered)?;
             ii += 1;
         }
         l.emit_term(bb.term, next_bb)?;

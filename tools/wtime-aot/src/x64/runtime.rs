@@ -8,18 +8,18 @@ use super::ir::TruncOp;
 use super::lower::TargetIsa;
 use super::module::{X64ConstVal, X64Module};
 use super::{
-    CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
-    GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_EXTRA_MEM_COPY,
-    HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_GROW_CORE, HELPER_HOST_CALL,
-    HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT,
-    HELPER_READ_GLOBAL, HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT,
-    HELPER_TRUNC_BASE, INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH, OFF_ACTIVE_DEPTH,
-    OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
-    OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX, OFF_IN_CALL,
-    OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR,
-    RodataConsts, TRAP_ALLOC_FAILED, TRAP_CALL_STACK, TRAP_HOST, TRAP_INT_OVERFLOW,
-    TRAP_INVALID_CONV, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB, TRAP_TABLE_OOB,
-    TRAP_UNREACHABLE, TRAP_UNSUPPORTED_ISA,
+    CtxLayout, EXN_SLAB_BYTES, GUARD_RESERVE_BYTES, GUEST_STACK_FLOOR_HEADROOM,
+    GUEST_STACK_GUARD_BYTES, GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES,
+    HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_GROW_CORE,
+    HELPER_HOST_CALL, HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW,
+    HELPER_MEM_INIT, HELPER_READ_GLOBAL, HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW,
+    HELPER_TABLE_INIT, HELPER_TRUNC_BASE, INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH,
+    OFF_ACTIVE_DEPTH, OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS, OFF_GUARD_RESUME_PC,
+    OFF_GUARD_RESUME_SP, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES,
+    OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN,
+    OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, RodataConsts, TRAP_ALLOC_FAILED,
+    TRAP_CALL_STACK, TRAP_HOST, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_MEM_LIMIT,
+    TRAP_MEM_TOO_LARGE, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE, TRAP_UNSUPPORTED_ISA,
 };
 
 const SYS_WRITE: u32 = 1;
@@ -27,7 +27,15 @@ const SYS_CLOSE: u32 = 3;
 const SYS_MMAP: u32 = 9;
 const SYS_MPROTECT: u32 = 10;
 const SYS_MUNMAP: u32 = 11;
+const SYS_RT_SIGACTION: u32 = 13;
+const SYS_RT_SIGRETURN: u32 = 15;
+const SYS_GETPID: u32 = 39;
+const SYS_GETTID: u32 = 186;
+const SYS_TGKILL: u32 = 234;
 const SYS_OPENAT: u32 = 257;
+const SIGSEGV: u32 = 11;
+/// `SA_SIGINFO (0x4) | SA_RESTORER (0x0400_0000) | SA_ONSTACK (0x0800_0000) | SA_NODEFER (0x4000_0000)`.
+const SA_FLAGS_CDYLIB: u64 = 0x4c00_0004;
 const AT_FDCWD_I32: i32 = -100;
 const O_WRONLY_CREAT_TRUNC: u32 = 0x241;
 
@@ -929,12 +937,15 @@ pub fn emit_helper_host_call(
     a.test_rr(true, Gp::Rax, Gp::Rax);
     a.jcc(Cond::E, lbl_null_host);
 
-    // Guest stack frame: `sub rsp, 120` (`8 + 120 = 128 % 16 == 0`):
+    // Guest stack frame: `sub rsp, frame_sz` (`8 + frame_sz % 16 == 0`):
     //   [rsp + 0..96] = saved callee-saved Xmm8..Xmm13 (Stage 2 internal convention)
     //   [rsp + 96]    = prev_active_guest_rsp
     //   [rsp + 104]   = prev_host_rsp
-    //   [rsp + 112]   = pad
-    a.sub_ri(true, Gp::Rsp, 120);
+    //   [rsp + 112]   = prev_guard_resume_pc (when `layout.use_guard_pages`) / pad
+    //   [rsp + 120]   = prev_guard_resume_sp (when `layout.use_guard_pages`)
+    //   [rsp + 128]   = pad (when `layout.use_guard_pages`)
+    let link_frame: i32 = if layout.use_guard_pages { 136 } else { 120 };
+    a.sub_ri(true, Gp::Rsp, link_frame);
     for (i, xmm) in [
         Xmm::Xmm8,
         Xmm::Xmm9,
@@ -952,6 +963,14 @@ pub fn emit_helper_host_call(
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 96), Gp::R10);
     a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_HOST_RSP));
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 104), Gp::R10);
+    if layout.use_guard_pages {
+        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC));
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 112), Gp::R10);
+        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_SP));
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 120), Gp::R10);
+        a.xor_rr(false, Gp::R10, Gp::R10);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::R10);
+    }
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_ACTIVE_GUEST_RSP), Gp::Rsp);
 
     // Publish pinned global to Ctx before leaving guest.
@@ -1015,7 +1034,13 @@ pub fn emit_helper_host_call(
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_ACTIVE_GUEST_RSP), Gp::R10);
     a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::Rsp, 104));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::R10);
-    a.add_ri(true, Gp::Rsp, 120);
+    if layout.use_guard_pages {
+        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::Rsp, 112));
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::R10);
+        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::Rsp, 120));
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_SP), Gp::R10);
+    }
+    a.add_ri(true, Gp::Rsp, link_frame);
 
     a.test_rr(false, Gp::Rcx, Gp::Rcx);
     a.jcc(Cond::Ne, lbl_fail_host);
@@ -1541,22 +1566,27 @@ fn emit_export_new(
     let lbl_ret_null = a.new_label();
     let lbl_cet_done = a.new_label();
 
-    // SysV entry: rsp % 16 == 8. Push 6 callee-saved regs (48 B) + sub rsp, 56 => rsp % 16 == 0.
+    // SysV entry: rsp % 16 == 8. Push 6 callee-saved regs (48 B) + sub rsp, frame_bytes => rsp % 16 == 0.
     // Strictly disjoint stack slots:
-    //   [rsp + 0]  = host_mxcsr
-    //   [rsp + 8]  = user_ctx
-    //   [rsp + 16] = host_fn
-    //   [rsp + 24] = mem_limit_pages
-    //   [rsp + 32] = trap_out
-    //   [rsp + 40] = saved_trap_byte
-    //   [rsp + 48] = cpu_has_cet_ss
+    //   [rsp + 0]      = host_mxcsr
+    //   [rsp + 8]      = user_ctx
+    //   [rsp + 16]     = host_fn
+    //   [rsp + 24]     = mem_limit_pages
+    //   [rsp + 32]     = trap_out
+    //   [rsp + 40]     = saved_trap_byte
+    //   [rsp + 48]     = cpu_has_cet_ss
+    //   [rsp + 56..88] = struct kernel_sigaction (when `layout.use_guard_pages`)
+    let frame_bytes: i32 = if layout.use_guard_pages { 88 } else { 56 };
+    let lbl_guard_oob = a.new_label();
+    let lbl_sig_handler = a.new_label();
+    let lbl_sig_restorer = a.new_label();
     a.push(Gp::Rbx);
     a.push(Gp::Rbp);
     a.push(Gp::R12);
     a.push(Gp::R13);
     a.push(Gp::R14);
     a.push(Gp::R15);
-    a.sub_ri(true, Gp::Rsp, 56);
+    a.sub_ri(true, Gp::Rsp, frame_bytes);
 
     a.stmxcsr(Mem::base_disp(Gp::Rsp, 0));
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::Rdi);
@@ -1812,46 +1842,84 @@ fn emit_export_new(
     a.xor_rr(false, Gp::R14, Gp::R14);
     a.xor_rr(false, Gp::R13, Gp::R13);
     if let Some((mem_min, _)) = module.memory {
-        let lbl_mem_done = a.new_label();
-        a.test_rr(true, Gp::Rbp, Gp::Rbp);
-        a.jcc(Cond::E, lbl_mem_done);
+        if layout.use_guard_pages {
+            // Opt-in `--guard-pages` (`memory32`): ALWAYS reserve `8 GiB + 64 KiB` PROT_NONE
+            // (even when `max_pages == 0`) so any guest OOB access faults cleanly inside
+            // `[mem_base, mem_base + GUARD_RESERVE_BYTES)`.
+            a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_MAX_PAGES), Gp::Rbp);
+            a.mov_ri64(Gp::Rbx, GUARD_RESERVE_BYTES);
 
-        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_MAX_PAGES), Gp::Rbp);
-        // 64-bit shift so 65_536 << 16 == 4 GiB never truncates!
-        a.mov_rr(true, Gp::Rbx, Gp::Rbp);
-        a.shl_imm(true, Gp::Rbx, 16);
-
-        a.xor_rr(false, Gp::Rdi, Gp::Rdi);
-        a.mov_rr(true, Gp::Rsi, Gp::Rbx);
-        a.mov_ri32(Gp::Rdx, PROT_NONE);
-        a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON_NORESERVE);
-        a.mov_ri64(Gp::R8, u64::MAX);
-        a.xor_rr(false, Gp::R9, Gp::R9);
-        a.mov_ri32(Gp::Rax, SYS_MMAP);
-        a.syscall();
-        a.cmp_ri(true, Gp::Rax, -4095);
-        a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
-
-        a.mov_rr(true, Gp::R14, Gp::Rax);
-        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_BASE), Gp::R14);
-        a.mov_mr(
-            true,
-            Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
-            Gp::Rbx,
-        );
-
-        let mem0_hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
-        if mem_min > 0 && mem_min <= mem0_hard_cap {
-            a.mov_ri64(Gp::R13, mem_min << 16);
-            a.mov_rr(true, Gp::Rdi, Gp::R14);
-            a.mov_rr(true, Gp::Rsi, Gp::R13);
-            a.mov_ri32(Gp::Rdx, PROT_RW);
-            emit_mprotect_syscall(&mut a, hooks, MprotectSiteMarker::initial_memory());
+            a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+            a.mov_rr(true, Gp::Rsi, Gp::Rbx);
+            a.mov_ri32(Gp::Rdx, PROT_NONE);
+            a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON_NORESERVE);
+            a.mov_ri64(Gp::R8, u64::MAX);
+            a.xor_rr(false, Gp::R9, Gp::R9);
+            a.mov_ri32(Gp::Rax, SYS_MMAP);
+            a.syscall();
             a.cmp_ri(true, Gp::Rax, -4095);
             a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
-            a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_LEN), Gp::R13);
+
+            a.mov_rr(true, Gp::R14, Gp::Rax);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_BASE), Gp::R14);
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+                Gp::Rbx,
+            );
+
+            if mem_min > 0 && mem_min <= 65_536 {
+                a.mov_ri64(Gp::R13, mem_min << 16);
+                a.mov_rr(true, Gp::Rdi, Gp::R14);
+                a.mov_rr(true, Gp::Rsi, Gp::R13);
+                a.mov_ri32(Gp::Rdx, PROT_RW);
+                emit_mprotect_syscall(&mut a, hooks, MprotectSiteMarker::initial_memory());
+                a.cmp_ri(true, Gp::Rax, -4095);
+                a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
+                a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_LEN), Gp::R13);
+            }
+        } else {
+            let lbl_mem_done = a.new_label();
+            a.test_rr(true, Gp::Rbp, Gp::Rbp);
+            a.jcc(Cond::E, lbl_mem_done);
+
+            a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_MAX_PAGES), Gp::Rbp);
+            // 64-bit shift so 65_536 << 16 == 4 GiB never truncates!
+            a.mov_rr(true, Gp::Rbx, Gp::Rbp);
+            a.shl_imm(true, Gp::Rbx, 16);
+
+            a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+            a.mov_rr(true, Gp::Rsi, Gp::Rbx);
+            a.mov_ri32(Gp::Rdx, PROT_NONE);
+            a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON_NORESERVE);
+            a.mov_ri64(Gp::R8, u64::MAX);
+            a.xor_rr(false, Gp::R9, Gp::R9);
+            a.mov_ri32(Gp::Rax, SYS_MMAP);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, -4095);
+            a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
+
+            a.mov_rr(true, Gp::R14, Gp::Rax);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_BASE), Gp::R14);
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+                Gp::Rbx,
+            );
+
+            let mem0_hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
+            if mem_min > 0 && mem_min <= mem0_hard_cap {
+                a.mov_ri64(Gp::R13, mem_min << 16);
+                a.mov_rr(true, Gp::Rdi, Gp::R14);
+                a.mov_rr(true, Gp::Rsi, Gp::R13);
+                a.mov_ri32(Gp::Rdx, PROT_RW);
+                emit_mprotect_syscall(&mut a, hooks, MprotectSiteMarker::initial_memory());
+                a.cmp_ri(true, Gp::Rax, -4095);
+                a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
+                a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_LEN), Gp::R13);
+            }
+            a.bind(lbl_mem_done);
         }
-        a.bind(lbl_mem_done);
     }
 
     // ---- Step C3b: Additional linear memories `1..N` (`multi-memory`) ----
@@ -1972,9 +2040,64 @@ fn emit_export_new(
         a.mov_mr(true, Mem::base_disp(Gp::Rax, 24), Gp::Rcx);
     }
 
+    // ---- Step C4: Thread-safe one-time chained SIGSEGV handler install (`--guard-pages` only) ----
+    if layout.use_guard_pages {
+        let lbl_guard_spin = a.new_label();
+        let lbl_guard_try = a.new_label();
+        let lbl_guard_done = a.new_label();
+        let lbl_guard_fail = a.new_label();
+        a.lea_rip(Gp::Rbx, RelocTarget::GuardState);
+        a.bind(lbl_guard_spin);
+        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rbx, 0));
+        a.cmp_ri(true, Gp::Rax, 2);
+        a.jcc(Cond::E, lbl_guard_done);
+        a.test_rr(true, Gp::Rax, Gp::Rax);
+        a.jcc(Cond::E, lbl_guard_try);
+        a.pause();
+        a.jmp(lbl_guard_spin);
+
+        a.bind(lbl_guard_try);
+        a.mov_ri32(Gp::Rcx, 1);
+        a.lock_cmpxchg_mr(true, Mem::base_disp(Gp::Rbx, 0), Gp::Rcx);
+        a.jcc(Cond::Ne, lbl_guard_spin);
+
+        // We hold the one-time install lock (`GuardState.install_state == 1`).
+        a.lea_rip_label(Gp::Rax, lbl_sig_handler);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 56), Gp::Rax);
+        a.mov_ri64(Gp::Rax, SA_FLAGS_CDYLIB);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 64), Gp::Rax);
+        a.lea_rip_label(Gp::Rax, lbl_sig_restorer);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 72), Gp::Rax);
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 80), Gp::Rax);
+        a.mov_ri32(Gp::Rdi, SIGSEGV);
+        a.lea(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 56));
+        a.lea(true, Gp::Rdx, Mem::base_disp(Gp::Rbx, 8)); // oldact -> GuardState.prev_sa
+        a.mov_ri32(Gp::R10, 8);
+        a.mov_ri32(Gp::Rax, SYS_RT_SIGACTION);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_guard_fail);
+        a.mov_ri32(Gp::Rax, 2);
+        a.mov_mr(true, Mem::base_disp(Gp::Rbx, 0), Gp::Rax);
+        a.jmp(lbl_guard_done);
+
+        a.bind(lbl_guard_fail);
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rbx, 0), Gp::Rax);
+        a.jmp(lbl_fail_alloc_cleanup);
+
+        a.bind(lbl_guard_done);
+    }
+
     // ---- Step D: Switch to guest stack and run wt_initialize ----
     a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 1);
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rsp);
+    if layout.use_guard_pages {
+        a.lea_rip_label(Gp::Rax, lbl_guard_oob);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_SP), Gp::Rsp);
+    }
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_mr(true, Mem::base_disp(Gp::Rax, -8), Gp::Rsp);
     a.lea(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -16));
@@ -1984,6 +2107,10 @@ fn emit_export_new(
     // Restore host stack, sync pinned global, clear in_call, restore host MXCSR.
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -8));
+    if layout.use_guard_pages {
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rax);
+    }
     emit_pinned_store(&mut a, module, layout);
     a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
     a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
@@ -1992,7 +2119,7 @@ fn emit_export_new(
     a.jcc(Cond::Ne, lbl_fail_init_cleanup);
 
     a.mov_rr(true, Gp::Rax, Gp::R15);
-    a.add_ri(true, Gp::Rsp, 56);
+    a.add_ri(true, Gp::Rsp, frame_bytes);
     a.pop(Gp::R15);
     a.pop(Gp::R14);
     a.pop(Gp::R13);
@@ -2000,6 +2127,18 @@ fn emit_export_new(
     a.pop(Gp::Rbp);
     a.pop(Gp::Rbx);
     a.ret();
+
+    if layout.use_guard_pages {
+        a.bind(lbl_guard_oob);
+        if isa.has_avx2 || isa.has_avx512 {
+            a.vzeroupper();
+        }
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rax);
+        a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
+        a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
+        a.jmp(lbl_fail_init_cleanup);
+    }
 
     // ---- Step E: Cleanup & error paths (trap byte saved BEFORE munmap syscalls!) ----
     a.bind(lbl_fail_isa);
@@ -2039,7 +2178,7 @@ fn emit_export_new(
     a.mov_mr8(Mem::base(Gp::Rcx), Gp::Rax);
     a.bind(lbl_ret_null);
     a.xor_rr(false, Gp::Rax, Gp::Rax);
-    a.add_ri(true, Gp::Rsp, 56);
+    a.add_ri(true, Gp::Rsp, frame_bytes);
     a.pop(Gp::R15);
     a.pop(Gp::R14);
     a.pop(Gp::R13);
@@ -2047,6 +2186,127 @@ fn emit_export_new(
     a.pop(Gp::Rbp);
     a.pop(Gp::Rbx);
     a.ret();
+
+    if layout.use_guard_pages {
+        // Chained Linux x86-64 SA_SIGINFO handler: (rdi=sig, rsi=siginfo_t*, rdx=ucontext_t*).
+        // Exact Linux x86-64 ABI offsets: si_addr=+16; gregs[R11]=+64, [R14]=+88, [R15]=+96, [RSP]=+160, [RIP]=+168.
+        // Preserves Rdi, Rsi, Rdx untouched along `.not_ours` for zero-frame tail-chaining!
+        let lbl_not_ours = a.new_label();
+        let lbl_wait_prev = a.new_label();
+        let lbl_have_prev = a.new_label();
+        let lbl_dfl_or_ign = a.new_label();
+        let lbl_si_code_ready = a.new_label();
+        let lbl_restore_dfl = a.new_label();
+        let lbl_ret_dfl = a.new_label();
+        a.bind(lbl_sig_handler);
+        // 1. Check faulting RIP is strictly inside compiled guest Wasm functions [GuestCodeStart, GuestCodeEnd).
+        a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rdx, 168)); // ucontext RIP
+        a.lea_rip(Gp::R9, RelocTarget::GuestCodeStart);
+        a.cmp_rr(true, Gp::R8, Gp::R9);
+        a.jcc(Cond::B, lbl_not_ours);
+        a.lea_rip(Gp::R10, RelocTarget::GuestCodeEnd);
+        a.cmp_rr(true, Gp::R8, Gp::R10);
+        a.jcc(Cond::Ae, lbl_not_ours);
+
+        // 2. Check Ctx (R15) != 0 and active per-invocation guard_resume_pc != 0.
+        a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rdx, 96)); // ucontext R15 (Ctx*)
+        a.test_rr(true, Gp::Rcx, Gp::Rcx);
+        a.jcc(Cond::E, lbl_not_ours);
+        a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::Rcx, OFF_GUARD_RESUME_PC));
+        a.test_rr(true, Gp::R11, Gp::R11);
+        a.jcc(Cond::E, lbl_not_ours);
+
+        // 3. Check mem_base (R14) != 0, R14 == ctx->mem_base, and (si_addr - mem_base) <u GUARD_RESERVE_BYTES.
+        a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rdx, 88)); // ucontext R14 (mem_base)
+        a.test_rr(true, Gp::R8, Gp::R8);
+        a.jcc(Cond::E, lbl_not_ours);
+        a.cmp_rm(true, Gp::R8, Mem::base_disp(Gp::Rcx, OFF_MEM_BASE));
+        a.jcc(Cond::Ne, lbl_not_ours);
+        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsi, 16)); // siginfo si_addr
+        a.sub_rr(true, Gp::Rax, Gp::R8);
+        a.mov_ri64(Gp::R10, GUARD_RESERVE_BYTES);
+        a.cmp_rr(true, Gp::Rax, Gp::R10);
+        a.jcc(Cond::Ae, lbl_not_ours);
+
+        // Confirmed guest guard-page OOB fault: redirect ucontext RIP/RSP/R11 and rt_sigreturn.
+        a.mov_mr(true, Mem::base_disp(Gp::Rdx, 168), Gp::R11); // ucontext RIP = guard_resume_pc
+        a.mov_rm(true, Gp::R9, Mem::base_disp(Gp::Rcx, OFF_GUARD_RESUME_SP));
+        a.mov_mr(true, Mem::base_disp(Gp::Rdx, 160), Gp::R9); // ucontext RSP = guard_resume_sp
+        a.mov_ri32(Gp::Rax, u32::from(TRAP_OOB));
+        a.mov_mr(true, Mem::base_disp(Gp::Rdx, 64), Gp::Rax); // ucontext R11 = TRAP_OOB
+        a.ret();
+
+        a.bind(lbl_not_ours);
+        a.lea_rip(Gp::R8, RelocTarget::GuardState);
+        // Bounded spin on install_state == 1 so an async SIGSEGV hitting the installing thread
+        // in the narrow post-syscall window cannot self-deadlock (prev_sa is already written).
+        a.mov_ri32(Gp::Rcx, 1_000_000);
+        a.bind(lbl_wait_prev);
+        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R8, 0));
+        a.cmp_ri(true, Gp::Rax, 1);
+        a.jcc(Cond::Ne, lbl_have_prev);
+        a.sub_ri(false, Gp::Rcx, 1);
+        a.jcc(Cond::E, lbl_have_prev);
+        a.pause();
+        a.jmp(lbl_wait_prev);
+        a.bind(lbl_have_prev);
+        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R8, 8)); // prev_sa.sa_handler
+        a.cmp_ri(true, Gp::Rax, 1);
+        a.jcc(Cond::Be, lbl_dfl_or_ign);
+        a.jmp_reg(Gp::Rax); // tail-chain to previous handler with original (rdi, rsi, rdx)!
+
+        a.bind(lbl_dfl_or_ign);
+        // Inspect siginfo_t.si_code (i32 at +8): <= 0 is software-sent (kill/tgkill/raise),
+        // > 0 is a synchronous hardware fault.
+        a.mov_ri32(Gp::R9, 1);
+        a.test_rr(true, Gp::Rsi, Gp::Rsi);
+        a.jcc(Cond::E, lbl_si_code_ready);
+        a.mov_rm(false, Gp::R9, Mem::base_disp(Gp::Rsi, 8));
+        a.bind(lbl_si_code_ready);
+        // Software SIGSEGV with prev_sa == SIG_IGN (1): ignore without disarming guard pages.
+        a.cmp_ri(true, Gp::Rax, 1);
+        a.jcc(Cond::Ne, lbl_restore_dfl);
+        a.test_rr(false, Gp::R9, Gp::R9);
+        a.jcc(Cond::G, lbl_restore_dfl);
+        a.ret();
+
+        a.bind(lbl_restore_dfl);
+        a.sub_ri(true, Gp::Rsp, 40);
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 24), Gp::Rax);
+        a.mov_ri32(Gp::Rdi, SIGSEGV);
+        a.mov_rr(true, Gp::Rsi, Gp::Rsp);
+        a.xor_rr(false, Gp::Rdx, Gp::Rdx);
+        a.mov_ri32(Gp::R10, 8);
+        a.mov_ri32(Gp::Rax, SYS_RT_SIGACTION);
+        a.syscall();
+        a.add_ri(true, Gp::Rsp, 40);
+        // Hardware fault (si_code > 0): return so rt_sigreturn re-executes the faulting insn.
+        // Note: Linux x86-64 `syscall` preserves R9.
+        a.test_rr(false, Gp::R9, Gp::R9);
+        a.jcc(Cond::G, lbl_ret_dfl);
+        // Software SIGSEGV (si_code <= 0) under SIG_DFL: re-deliver via tgkill(pid, tid, SIGSEGV).
+        a.mov_ri32(Gp::Rax, SYS_GETPID);
+        a.syscall();
+        a.mov_rr(true, Gp::R8, Gp::Rax);
+        a.mov_ri32(Gp::Rax, SYS_GETTID);
+        a.syscall();
+        a.mov_rr(true, Gp::Rdi, Gp::R8);
+        a.mov_rr(true, Gp::Rsi, Gp::Rax);
+        a.mov_ri32(Gp::Rdx, SIGSEGV);
+        a.mov_ri32(Gp::Rax, SYS_TGKILL);
+        a.syscall();
+        a.bind(lbl_ret_dfl);
+        a.ret();
+
+        a.bind(lbl_sig_restorer);
+        a.mov_ri32(Gp::Rax, SYS_RT_SIGRETURN);
+        a.syscall();
+        a.ud2();
+    }
 
     a.finish_labels()?;
     Ok(a)
@@ -2245,6 +2505,7 @@ fn emit_export_call_export(
     layout: &CtxLayout,
     ro: &RodataConsts,
     tables: &RuntimeTables,
+    isa: TargetIsa,
     hooks: RuntimeTestHooks,
 ) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(512);
@@ -2407,7 +2668,13 @@ fn emit_export_call_export(
     a.bind(lbl_arg_f64);
     a.movq_xr(Xmm::Xmm0, Gp::Rcx);
 
+    let lbl_guard_oob = a.new_label();
     a.bind(lbl_arg_done);
+    if layout.use_guard_pages {
+        a.lea_rip_label(Gp::Rdx, lbl_guard_oob);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rdx);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_SP), Gp::Rsp);
+    }
     a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_mr(true, Mem::base_disp(Gp::Rdx, -8), Gp::Rsp);
     a.lea(true, Gp::Rsp, Mem::base_disp(Gp::Rdx, -16));
@@ -2417,6 +2684,10 @@ fn emit_export_call_export(
     // Return to host stack, sync pinned global, clear in_call, restore host MXCSR (preserve Rax, Xmm0, R11d!).
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rcx, -8));
+    if layout.use_guard_pages {
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+    }
     emit_pinned_store(&mut a, module, layout);
     a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
     a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
@@ -2468,6 +2739,17 @@ fn emit_export_call_export(
     a.jmp(lbl_ret_pop);
 
     // Trap path (res_out left untouched!).
+    if layout.use_guard_pages {
+        a.bind(lbl_guard_oob);
+        if isa.has_avx2 || isa.has_avx512 {
+            a.vzeroupper();
+        }
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+        emit_pinned_store(&mut a, module, layout);
+        a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
+        a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
+    }
     let lbl_trap_rc = a.new_label();
     a.bind(lbl_trapped);
     a.mov_ri32(Gp::Rax, u32::from(TRAP_UNREACHABLE));
@@ -2544,6 +2826,7 @@ fn emit_export_call_fixed(
     ro: &RodataConsts,
     export_name: &str,
     has_i32_arg: bool,
+    isa: TargetIsa,
     hooks: RuntimeTestHooks,
 ) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(256);
@@ -2620,8 +2903,14 @@ fn emit_export_call_fixed(
     emit_pinned_load(&mut a, module, layout);
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rsp);
 
+    let lbl_guard_oob = a.new_label();
     if has_i32_arg {
         a.mov_rr(false, Gp::Rdi, Gp::Rsi); // zero-ext 32-bit arg BEFORE switching rsp
+    }
+    if layout.use_guard_pages {
+        a.lea_rip_label(Gp::Rax, lbl_guard_oob);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_SP), Gp::Rsp);
     }
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_mr(true, Mem::base_disp(Gp::Rax, -8), Gp::Rsp);
@@ -2632,6 +2921,10 @@ fn emit_export_call_fixed(
     // Return to host stack, sync pinned global, clear in_call, restore host MXCSR (preserve Rax & R11d!).
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rcx, -8));
+    if layout.use_guard_pages {
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+    }
     emit_pinned_store(&mut a, module, layout);
     a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
     a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
@@ -2647,6 +2940,17 @@ fn emit_export_call_fixed(
     a.xor_rr(false, Gp::Rax, Gp::Rax);
     a.jmp(lbl_ret_pop);
 
+    if layout.use_guard_pages {
+        a.bind(lbl_guard_oob);
+        if isa.has_avx2 || isa.has_avx512 {
+            a.vzeroupper();
+        }
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+        emit_pinned_store(&mut a, module, layout);
+        a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
+        a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
+    }
     a.bind(lbl_trapped);
     a.mov_ri32(Gp::Rax, u32::from(TRAP_UNREACHABLE));
     a.cmp_ri(false, Gp::R11, i32::from(INTERNAL_EXN_SIGNAL));
@@ -2917,6 +3221,7 @@ fn emit_export_active_fixed(
     layout: &CtxLayout,
     ro: &RodataConsts,
     export_name: &str,
+    isa: TargetIsa,
 ) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(256);
     // Precedence (1): missing/incompatible export -> return 3 (outs untouched).
@@ -3006,12 +3311,24 @@ fn emit_export_active_fixed(
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rsp);
 
     // Marshal arg BEFORE switching rsp!
+    let lbl_guard_oob = a.new_label();
+    let lbl_after_call = a.new_label();
+    if layout.use_guard_pages {
+        a.lea_rip_label(Gp::Rax, lbl_guard_oob);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_SP), Gp::Rbx);
+    }
     a.mov_rr(false, Gp::Rdi, Gp::Rsi);
     a.mov_rr(true, Gp::Rsp, Gp::Rbx);
     a.ldmxcsr_rip(RelocTarget::Rodata(ro.mxcsr_wasm));
     a.call_reloc(RelocTarget::Func(target_fn));
 
     // Restore ctx->host_rsp, host rsp, active_depth -= 1, pinned global, host MXCSR (preserve Rax & R11d!).
+    a.bind(lbl_after_call);
+    if layout.use_guard_pages {
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+    }
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rcx);
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rsp, 8));
@@ -3032,6 +3349,13 @@ fn emit_export_active_fixed(
     a.xor_rr(false, Gp::Rax, Gp::Rax);
     a.jmp(lbl_ret_pop);
 
+    if layout.use_guard_pages {
+        a.bind(lbl_guard_oob);
+        if isa.has_avx2 || isa.has_avx512 {
+            a.vzeroupper();
+        }
+        a.jmp(lbl_after_call);
+    }
     a.bind(lbl_trapped);
     a.mov_ri32(Gp::Rax, u32::from(TRAP_UNREACHABLE));
     a.cmp_ri(false, Gp::R11, i32::from(INTERNAL_EXN_SIGNAL));
@@ -3109,17 +3433,25 @@ pub fn emit_all_exports(
         emit_export_import_name(tables)?,
         emit_export_new(module, layout, ro, isa, hooks)?,
         emit_export_drop(layout)?,
-        emit_export_call_export(module, layout, ro, tables, hooks)?,
-        emit_export_call_fixed(module, layout, ro, "blot:allocate", true, hooks)?,
-        emit_export_call_fixed(module, layout, ro, "blot:reset", true, hooks)?,
-        emit_export_call_fixed(module, layout, ro, "blot:finish_invocation", false, hooks)?,
+        emit_export_call_export(module, layout, ro, tables, isa, hooks)?,
+        emit_export_call_fixed(module, layout, ro, "blot:allocate", true, isa, hooks)?,
+        emit_export_call_fixed(module, layout, ro, "blot:reset", true, isa, hooks)?,
+        emit_export_call_fixed(
+            module,
+            layout,
+            ro,
+            "blot:finish_invocation",
+            false,
+            isa,
+            hooks,
+        )?,
         emit_export_mem_data()?,
         emit_export_mem_grow()?,
         emit_export_get_global()?,
         emit_export_set_global(tables)?,
         emit_export_active_mem_data()?,
-        emit_export_active_fixed(module, layout, ro, "blot:allocate")?,
-        emit_export_active_fixed(module, layout, ro, "blot:reset")?,
+        emit_export_active_fixed(module, layout, ro, "blot:allocate", isa)?,
+        emit_export_active_fixed(module, layout, ro, "blot:reset", isa)?,
         emit_export_active_get_global()?,
     ])
 }

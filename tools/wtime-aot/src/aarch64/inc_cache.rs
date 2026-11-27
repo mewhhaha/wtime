@@ -33,7 +33,7 @@ use crate::x64::{CtxLayout, NUM_HELPERS, RodataConsts};
 use super::asm::{A64Asm, A64Reloc, A64RelocKind, A64RelocTarget};
 
 const MAGIC: &[u8; 8] = b"WTA64INC";
-const FORMAT_VERSION: u32 = 12;
+const FORMAT_VERSION: u32 = 13;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20;
 
 static NEXT_A64_INC_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -377,6 +377,9 @@ pub fn load_a64_inc_cache(
                     }
                     A64RelocTarget::LocalRodata(tval)
                 }
+                4 => A64RelocTarget::GuestCodeStart,
+                5 => A64RelocTarget::GuestCodeEnd,
+                6 => A64RelocTarget::GuardState,
                 _ => return None,
             };
             relocs.push(A64Reloc {
@@ -510,6 +513,9 @@ fn save_a64_inc_cache_inner(cache_dir: &Path, data: &A64IncCacheData) -> Option<
                 A64RelocTarget::Helper(v) => (1u8, v),
                 A64RelocTarget::Rodata(v) => (2u8, v),
                 A64RelocTarget::LocalRodata(v) => (3u8, v),
+                A64RelocTarget::GuestCodeStart => (4u8, 0),
+                A64RelocTarget::GuestCodeEnd => (5u8, 0),
+                A64RelocTarget::GuardState => (6u8, 0),
             };
             w.u8(ttag)?;
             w.u32(tval)?;

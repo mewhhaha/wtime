@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 17;
+const FORMAT_VERSION: u32 = 18;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -241,6 +241,7 @@ pub fn compute_abi_hash(
         u8::from(opt),
         u8::from(verify),
         u8::from(spectre_mitigations),
+        u8::from(layout.use_guard_pages),
         u8::from(module.memory64),
         match module.target {
             super::module::X64Target::BlotCdylib => 0,
@@ -803,6 +804,9 @@ fn decode_cached_fn(
                 max_local_rodata_off = Some(max_local_rodata_off.map_or(val, |m| m.max(val)));
                 RelocTarget::LocalRodata(val)
             }
+            4 => RelocTarget::GuestCodeStart,
+            5 => RelocTarget::GuestCodeEnd,
+            6 => RelocTarget::GuardState,
             _ => return None,
         };
         if !is_changed {
@@ -1462,6 +1466,9 @@ fn write_cached_fn(
             RelocTarget::Helper(v) => (1u8, v),
             RelocTarget::Rodata(v) => (2u8, v),
             RelocTarget::LocalRodata(v) => (3u8, v),
+            RelocTarget::GuestCodeStart => (4u8, 0),
+            RelocTarget::GuestCodeEnd => (5u8, 0),
+            RelocTarget::GuardState => (6u8, 0),
         };
         w.write_u8(kind);
         w.write_u32(val);

@@ -49,7 +49,7 @@ static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--guard-pages] [--spectre-mitigations] [--pgo-gen PATH | --pgo-use PATH] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 pub(crate) const SPECTRE_RUST_ERROR: &str = "--spectre-mitigations requires hardware speculation barriers, which safe Rust cannot emit; use --backend x64, --backend aarch64, or --backend c";
 
@@ -93,6 +93,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
     let mut target_cpu = String::from("native");
     let mut target = crate::codegen::Target::GooseBin;
     let mut backend = Backend::Rust;
+    let mut guard_pages = false;
     let mut spectre_mitigations = false;
     let mut pgo_gen: Option<PathBuf> = None;
     let mut pgo_use: Option<PathBuf> = None;
@@ -145,6 +146,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
                     other => return Err(format!("{USAGE}\ninvalid --backend {other:?}").into()),
                 };
             }
+            "--guard-pages" => guard_pages = true,
             "--spectre-mitigations" => spectre_mitigations = true,
             "--pgo-gen" => pgo_gen = Some(PathBuf::from(value()?)),
             "--pgo-use" => pgo_use = Some(PathBuf::from(value()?)),
@@ -164,6 +166,16 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
     }
     if spectre_mitigations && backend == Backend::Rust {
         return Err(BuildError::Usage(SPECTRE_RUST_ERROR.into()));
+    }
+    if guard_pages && !matches!(backend, Backend::X64 | Backend::Aarch64) {
+        return Err(BuildError::Usage(
+            "--guard-pages is only supported with --backend x64 or --backend aarch64".into(),
+        ));
+    }
+    if guard_pages && spectre_mitigations {
+        return Err(BuildError::Usage(
+            "--guard-pages cannot be combined with --spectre-mitigations".into(),
+        ));
     }
     if pgo_gen.is_some() && pgo_use.is_some() {
         return Err(BuildError::Usage(
@@ -218,6 +230,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
             module_path.as_deref(),
             &rt,
             &options,
+            guard_pages,
             spectre_mitigations,
             pgo_gen.as_deref(),
             loaded_pgo_use.as_ref(),
@@ -267,11 +280,20 @@ pub fn build(
     rt: &Path,
     options: &Options,
 ) -> Result<PathBuf, String> {
-    build_classified(module, cache, module_path, rt, options, false, None, None).map_err(
-        |e| match e {
-            BuildError::AdmissionRejected(s) | BuildError::Usage(s) | BuildError::Failed(s) => s,
-        },
+    build_classified(
+        module,
+        cache,
+        module_path,
+        rt,
+        options,
+        false,
+        false,
+        None,
+        None,
     )
+    .map_err(|e| match e {
+        BuildError::AdmissionRejected(s) | BuildError::Usage(s) | BuildError::Failed(s) => s,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -281,6 +303,7 @@ fn build_classified(
     module_path: Option<&str>,
     rt: &Path,
     options: &Options,
+    guard_pages: bool,
     spectre_mitigations: bool,
     pgo_gen: Option<&Path>,
     pgo_use: Option<&crate::pgo::PgoProfile>,
@@ -300,6 +323,7 @@ fn build_classified(
             module,
             cache,
             options,
+            guard_pages,
             spectre_mitigations,
             pgo_gen,
             pgo_use,
@@ -311,6 +335,7 @@ fn build_classified(
             module,
             cache,
             options,
+            guard_pages,
             spectre_mitigations,
             pgo_gen,
             pgo_use,
@@ -1504,10 +1529,12 @@ fn build_c(
 }
 
 /// Pure-Rust Wasm -> Linux AArch64 ELF64 cached build path (`--backend aarch64`).
+#[allow(clippy::too_many_arguments)]
 fn build_aarch64(
     module: &Path,
     cache: &Path,
     options: &Options,
+    guard_pages: bool,
     spectre_mitigations: bool,
     pgo_gen: Option<&Path>,
     pgo_use: Option<&crate::pgo::PgoProfile>,
@@ -1534,7 +1561,8 @@ fn build_aarch64(
         crate::codegen::Target::GooseBin => "program.sha256",
     };
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build aarch64 2", &[]);
+    field(&mut key, "wtime-aot build aarch64 3", &[]);
+    field(&mut key, "guard pages", &[u8::from(guard_pages)]);
     field(
         &mut key,
         "spectre mitigations",
@@ -1572,6 +1600,7 @@ fn build_aarch64(
         optimize: true,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
+        guard_pages,
         spectre_mitigations,
         inc_cache_dir: Some(cache.join("a64-inc")),
         gen_fingerprint: gen_sha,
@@ -1624,10 +1653,12 @@ fn build_aarch64(
 }
 
 /// Pure-Rust Wasm -> Linux x86-64 ELF64 `.so` cached build path (`--backend x64`).
+#[allow(clippy::too_many_arguments)]
 fn build_x64(
     module: &Path,
     cache: &Path,
     options: &Options,
+    guard_pages: bool,
     spectre_mitigations: bool,
     pgo_gen: Option<&Path>,
     pgo_use: Option<&crate::pgo::PgoProfile>,
@@ -1674,7 +1705,8 @@ fn build_x64(
     // In release builds, bind explicit `WTIME_AOT_VERIFY=1` into the cache key so an earlier
     // unverified cache hit can never bypass IR/regalloc verification when verification is requested.
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build x64 4", &[]);
+    field(&mut key, "wtime-aot build x64 5", &[]);
+    field(&mut key, "guard pages", &[u8::from(guard_pages)]);
     field(
         &mut key,
         "spectre mitigations",
@@ -1738,6 +1770,7 @@ fn build_x64(
         isa,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
+        guard_pages,
         spectre_mitigations,
         verify,
         inc_cache_dir: Some(cache.clone()),

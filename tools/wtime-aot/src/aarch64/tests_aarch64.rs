@@ -53,6 +53,10 @@ struct A64Vm {
     stdin_pos: usize,
     /// Installed Linux arm64 `SIGSEGV` (`SA_SIGINFO`) handler address.
     sigsegv_handler: Option<u64>,
+    /// Full 32-byte `struct kernel_sigaction` currently installed for `SIGSEGV` (returned via `oldact`).
+    sigsegv_action: [u8; 32],
+    /// Active `ucontext_t*` when executing inside a `SIGSEGV` handler (`rt_sigreturn` restores from it).
+    sig_ucontext_ptr: Option<u64>,
     /// Pending guard-page fault address to dispatch to `sigsegv_handler`.
     pending_fault_addr: Option<u64>,
     /// Recorded `(base, len)` of every `SYS_MMAP` call (for leak-free cleanup assertions).
@@ -66,6 +70,7 @@ struct A64Vm {
 }
 
 const RET_SENTINEL: u64 = 0xdead_beef_0000_0000;
+const SIGRET_SENTINEL: u64 = 0xdead_beef_1111_0000;
 
 impl A64Vm {
     fn new(img: &A64CompiledImage) -> Self {
@@ -86,6 +91,8 @@ impl A64Vm {
             stdin: Vec::new(),
             stdin_pos: 0,
             sigsegv_handler: None,
+            sigsegv_action: [0u8; 32],
+            sig_ucontext_ptr: None,
             pending_fault_addr: None,
             mmap_log: Vec::new(),
             munmap_log: Vec::new(),
@@ -99,6 +106,37 @@ impl A64Vm {
         ));
         vm.segs
             .push((img.text_vaddr, img.text.len() as u64, img.text.clone()));
+        // Also map any RW `PT_LOAD` segment (`.dynamic` + `GuardState` tail in `ET_DYN`).
+        if img.elf.len() >= 64 {
+            let e_phoff = u64::from_le_bytes(img.elf[32..40].try_into().unwrap()) as usize;
+            let e_phentsize = u16::from_le_bytes(img.elf[54..56].try_into().unwrap()) as usize;
+            let e_phnum = u16::from_le_bytes(img.elf[56..58].try_into().unwrap()) as usize;
+            for i in 0..e_phnum {
+                let off = e_phoff + i * e_phentsize;
+                if off + 56 > img.elf.len() {
+                    break;
+                }
+                let p_type = u32::from_le_bytes(img.elf[off..off + 4].try_into().unwrap());
+                let p_flags = u32::from_le_bytes(img.elf[off + 4..off + 8].try_into().unwrap());
+                if p_type == 1 && (p_flags & 2) != 0 {
+                    let p_offset =
+                        u64::from_le_bytes(img.elf[off + 8..off + 16].try_into().unwrap()) as usize;
+                    let p_vaddr =
+                        u64::from_le_bytes(img.elf[off + 16..off + 24].try_into().unwrap());
+                    let p_filesz =
+                        u64::from_le_bytes(img.elf[off + 32..off + 40].try_into().unwrap())
+                            as usize;
+                    let p_memsz =
+                        u64::from_le_bytes(img.elf[off + 40..off + 48].try_into().unwrap())
+                            as usize;
+                    if p_memsz > 0 && p_offset + p_filesz <= img.elf.len() {
+                        let mut data = vec![0u8; p_memsz.max(p_filesz)];
+                        data[..p_filesz].copy_from_slice(&img.elf[p_offset..p_offset + p_filesz]);
+                        vm.segs.push((p_vaddr, data.len() as u64, data));
+                    }
+                }
+            }
+        }
         // Host stack for calling exports (and `_start` argc/argv = 0).
         let host_stack_base = vm.alloc_seg(256 * 1024);
         vm.sp = host_stack_base + 256 * 1024 - 64;
@@ -231,7 +269,8 @@ impl A64Vm {
         self.x[0] = 11; // SIGSEGV
         self.x[1] = siginfo_ptr;
         self.x[2] = ucontext_ptr;
-        self.x[30] = RET_SENTINEL;
+        self.x[30] = SIGRET_SENTINEL;
+        self.sig_ucontext_ptr = Some(ucontext_ptr);
         self.pc = handler;
         Ok(())
     }
@@ -328,6 +367,18 @@ impl A64Vm {
         self.pc = entry;
         self.x[30] = RET_SENTINEL;
         for step in 0..max_steps {
+            if self.pc == SIGRET_SENTINEL {
+                let uctx = self
+                    .sig_ucontext_ptr
+                    .take()
+                    .ok_or_else(|| "A64Vm: rt_sigreturn without active ucontext".to_string())?;
+                for i in 0..31 {
+                    self.x[i] = self.read_u64(uctx + 184 + (i as u64) * 8)?;
+                }
+                self.sp = self.read_u64(uctx + 432)?;
+                self.pc = self.read_u64(uctx + 440)?;
+                continue;
+            }
             if self.pc == RET_SENTINEL || self.exited.is_some() {
                 return Ok(step);
             }
@@ -349,8 +400,27 @@ impl A64Vm {
         let rm = ((insn >> 16) & 31) as u8;
         let sf = (insn >> 31) != 0;
 
-        if matches!(insn, 0xd503_201f | 0xd503_229f | 0xd503_379f | 0xd503_3fdf) {
-            // NOP and speculation barriers have no functional effect in the VM.
+        if matches!(
+            insn,
+            0xd503_201f | 0xd503_203f | 0xd503_229f | 0xd503_379f | 0xd503_3f5f | 0xd503_3fdf
+        ) {
+            // NOP, YIELD, CLREX, and speculation barriers have no functional effect in the VM.
+        } else if (insn & 0xffff_fc00) == 0xc8df_fc00 || (insn & 0xffff_fc00) == 0xc85f_fc00 {
+            // LDAR / LDAXR Xt, [Xn]
+            let addr = self.get_x(rn, true);
+            let q = self.read_u64(addr)?;
+            self.set_x(rd, q, false);
+        } else if (insn & 0xffff_fc00) == 0xc89f_fc00 {
+            // STLR Xt, [Xn]
+            let addr = self.get_x(rn, true);
+            let q = self.get_x(rd, false);
+            self.write_bytes(addr, &q.to_le_bytes())?;
+        } else if (insn & 0xffe0_fc00) == 0xc800_fc00 {
+            // STLXR Ws, Xt, [Xn]
+            let addr = self.get_x(rn, true);
+            let q = self.get_x(rd, false);
+            self.write_bytes(addr, &q.to_le_bytes())?;
+            self.set_w(rm, 0, false); // single-threaded exclusive store always succeeds
         } else if (insn & 0xffe0_001f) == 0xd400_0001 {
             // SVC #imm16 (Linux AArch64 syscall)
             let nr = self.x[8];
@@ -429,9 +499,18 @@ impl A64Vm {
                     // rt_sigaction(sig, act, oldact, sigsetsize)
                     let sig = self.x[0];
                     let act = self.x[1];
-                    if sig == 11 && act != 0 {
-                        let h = self.read_u64(act)?;
-                        self.sigsegv_handler = (h != 0).then_some(h);
+                    let oldact = self.x[2];
+                    if sig == 11 {
+                        if oldact != 0 {
+                            let prev = self.sigsegv_action;
+                            self.write_bytes(oldact, &prev)?;
+                        }
+                        if act != 0 {
+                            let new_sa: [u8; 32] = self.read_bytes(act, 32)?.try_into().unwrap();
+                            self.sigsegv_action = new_sa;
+                            let h = u64::from_le_bytes(new_sa[0..8].try_into().unwrap());
+                            self.sigsegv_handler = (h != 0).then_some(h);
+                        }
                     }
                     self.x[0] = 0;
                 }
@@ -5400,4 +5479,266 @@ fn aarch64_audit_spectre_dropped_load_preserves_oob_trap() {
         0,
         &img,
     );
+}
+
+#[test]
+fn aarch64_cdylib_guard_pages_oob_grow_zero_mem_dead_load_and_chaining() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, leb_u32, section, type_sec, wasm_module,
+    };
+
+    // 1. Module with 1..3 pages, pinned mut global g0 = 10, SIMD D8..D15 clobber before OOB,
+    //    dead coalesced OOB load, `memory.grow`, and `load_max_off`.
+    let f_load32 = vec![0x20, 0, 0x28, 0x02, 0x00];
+    let mut f_load_max = vec![0x20, 0, 0x28, 0x02];
+    leb_u32(&mut f_load_max, u32::MAX);
+    let mut f_store32 = vec![0x20, 0, 0x41];
+    leb_i32(&mut f_store32, 0x1234_5678);
+    f_store32.extend_from_slice(&[0x36, 0x02, 0x00, 0x41, 1]);
+    let mut f_dead_oob = vec![0x20, 0, 0x28, 0x02, 0x00, 0x20, 0, 0x28, 0x02];
+    leb_u32(&mut f_dead_oob, 100_000);
+    f_dead_oob.push(0x1a);
+    let f_grow = vec![0x20, 0, 0x40, 0x00];
+    // Mutate pinned global g0 = 999 and saturate 10 live f64 locals (forcing V8..V15 use) before OOB!
+    let mut f_simd_oob = vec![0x41];
+    leb_i32(&mut f_simd_oob, 999);
+    f_simd_oob.extend_from_slice(&[0x24, 0]);
+    for k in 0u8..10 {
+        f_simd_oob.push(0x44);
+        f_simd_oob.extend_from_slice(&((k as f64) + 1.5).to_bits().to_le_bytes());
+        f_simd_oob.extend_from_slice(&[0x21, k + 1]);
+    }
+    f_simd_oob.extend_from_slice(&[0x20, 0, 0x28, 0x02, 0x00]); // OOB load!
+    // Use the f64 locals after the load so they stay live across the faulting load (allocated to V8..V15)!
+    f_simd_oob.extend_from_slice(&[0x20, 1]);
+    for k in 1u8..10 {
+        f_simd_oob.extend_from_slice(&[0x20, k + 1, 0xa0]); // f64.add
+    }
+    f_simd_oob.extend_from_slice(&[0xaa, 0x6a]); // i32.trunc_f64_s + load result
+
+    let glob_sec = vec![1, 0x7f, 1, 0x41, 10, 0x0b];
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0, 0, 0]),
+        section(5, &[1, 0x01, 1, 3]), // min 1, max 3
+        section(6, &glob_sec),
+        export_sec(&[
+            ("load32", 0, 0),
+            ("load_max_off", 0, 1),
+            ("store32", 0, 2),
+            ("dead_oob", 0, 3),
+            ("grow", 0, 4),
+            ("simd_oob", 0, 5),
+            ("g0", 3, 0),
+        ]),
+        code_sec(&[
+            enc_body(&[], &f_load32),
+            enc_body(&[], &f_load_max),
+            enc_body(&[], &f_store32),
+            enc_body(&[], &f_dead_oob),
+            enc_body(&[], &f_grow),
+            enc_body(&[(10, 0x7c)], &f_simd_oob),
+        ]),
+    ]);
+
+    let img_def = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            guard_pages: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let img_gp = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            guard_pages: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_cdylib_guard_pages", &img_gp.elf);
+
+    // Check DT_FLAGS_1 = DF_1_NODELETE presence only when `--guard-pages` is enabled.
+    let has_nodelete = |elf: &[u8]| -> bool {
+        let e_phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
+        let e_phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
+        let e_phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+        for i in 0..e_phnum {
+            let off = e_phoff + i * e_phentsize;
+            let p_type = u32::from_le_bytes(elf[off..off + 4].try_into().unwrap());
+            if p_type == 2 {
+                let d_off = u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
+                let d_sz = u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+                let mut cur = d_off;
+                while cur + 16 <= d_off + d_sz {
+                    let tag = u64::from_le_bytes(elf[cur..cur + 8].try_into().unwrap());
+                    let val = u64::from_le_bytes(elf[cur + 8..cur + 16].try_into().unwrap());
+                    if tag == 0 {
+                        break;
+                    }
+                    if tag == 0x6fff_fffb && (val & 0x8) != 0 {
+                        return true;
+                    }
+                    cur += 16;
+                }
+            }
+        }
+        false
+    };
+    assert!(!has_nodelete(&img_def.elf));
+    assert!(has_nodelete(&img_gp.elf));
+
+    // Execute in A64Vm with a pre-installed host handler sentinel to verify oldact capture & recovery!
+    let mut vm = A64Vm::new(&img_gp);
+    let mock_host_handler: u64 = 0x7777_8888_1234_5678;
+    vm.sigsegv_action[0..8].copy_from_slice(&mock_host_handler.to_le_bytes());
+    vm.sigsegv_handler = Some(mock_host_handler);
+    let exp: std::collections::HashMap<&str, u64> = img_gp
+        .export_vaddrs
+        .iter()
+        .map(|(n, a)| (n.as_str(), *a))
+        .collect();
+    let scratch = vm.alloc_seg(4096);
+    let trap_ptr = scratch;
+    let res_ptr = scratch + 16;
+    let name_buf = scratch + 64;
+
+    // blot_aot_new(0, 0, 0, trap_ptr)
+    vm.x[0] = 0;
+    vm.x[1] = 0;
+    vm.x[2] = 0;
+    vm.x[3] = trap_ptr;
+    vm.run_until_ret(exp["blot_aot_new"], 200_000).unwrap();
+    let ctx = vm.x[0];
+    assert_ne!(ctx, 0, "aarch64 guard-pages blot_aot_new must succeed");
+    assert_ne!(
+        vm.sigsegv_handler,
+        Some(mock_host_handler),
+        "blot_aot_new must install its SIGSEGV handler"
+    );
+    // Verify GuardState saved `mock_host_handler` at `guard_state_vaddr + 8` and state == 2!
+    let gs_seg = vm
+        .segs
+        .iter()
+        .find(|(va, len, _)| *va > img_gp.text_vaddr && *len >= 176)
+        .expect("RW PT_LOAD 2 GuardState segment mapped");
+    let gs_state = u64::from_le_bytes(gs_seg.2[112..120].try_into().unwrap());
+    let gs_prev = u64::from_le_bytes(gs_seg.2[120..128].try_into().unwrap());
+    assert_eq!(gs_state, 2, "GuardState.install_state must be 2");
+    assert_eq!(
+        gs_prev, mock_host_handler,
+        "GuardState.prev_sa.sa_handler must capture prior host handler"
+    );
+
+    let call = |vm: &mut A64Vm, name: &str, arg: u64| -> (u32, u64, u8) {
+        vm.write_bytes(name_buf, name.as_bytes()).unwrap();
+        vm.write_bytes(res_ptr, &0xdead_beef_cafe_babeu64.to_le_bytes())
+            .unwrap();
+        vm.write_bytes(trap_ptr, &[0u8]).unwrap();
+        vm.x[0] = ctx;
+        vm.x[1] = name_buf;
+        vm.x[2] = name.len() as u64;
+        vm.x[3] = arg;
+        vm.x[4] = res_ptr;
+        vm.x[5] = trap_ptr;
+        vm.run_until_ret(exp["blot_aot_call_export"], 500_000)
+            .unwrap();
+        let rc = vm.x[0] as u32;
+        let res = vm.read_u64(res_ptr).unwrap();
+        let tr = vm.read_bytes(trap_ptr, 1).unwrap()[0];
+        (rc, res, tr)
+    };
+
+    // In-bounds store & load
+    assert_eq!(call(&mut vm, "store32", 0), (0, 1, 0));
+    assert_eq!(call(&mut vm, "load32", 0), (0, 0x1234_5678, 0));
+
+    // Guard-page OOB at 65536, u32::MAX, load_max_off(u32::MAX), dead_oob(0) -> TRAP_OOB (2)!
+    assert_eq!(call(&mut vm, "load32", 65536).2, 2);
+    assert_eq!(call(&mut vm, "load32", u64::from(u32::MAX)).2, 2);
+    assert_eq!(call(&mut vm, "load_max_off", u64::from(u32::MAX)).2, 2);
+    assert_eq!(call(&mut vm, "dead_oob", 0).2, 2);
+
+    // Seed AAPCS64 callee-saved D8..D15 sentinels and verify guard-page OOB preserves EVERY bit + syncs pinned global!
+    let mut d_sentinels = [[0u8; 16]; 8];
+    for (i, slot) in d_sentinels.iter_mut().enumerate() {
+        let pat = 0x1122_3344_5566_7700u64 + (i as u64);
+        slot[0..8].copy_from_slice(&pat.to_le_bytes());
+        vm.v[8 + i] = *slot;
+    }
+    let (rc, _, tr) = call(&mut vm, "simd_oob", 65536);
+    assert_eq!((rc, tr), (1, 2), "simd_oob(65536) must trap TRAP_OOB");
+    for (i, sentinel) in d_sentinels.iter().enumerate() {
+        assert_eq!(
+            vm.v[8 + i][0..8],
+            sentinel[0..8],
+            "AAPCS64 callee-saved D{} clobbered across guard-page OOB unwind!",
+            8 + i
+        );
+    }
+    // Check pinned global g0 synced to 999!
+    vm.write_bytes(name_buf, b"g0").unwrap();
+    vm.x[0] = ctx;
+    vm.x[1] = name_buf;
+    vm.x[2] = 2;
+    vm.x[3] = res_ptr;
+    vm.x[4] = trap_ptr;
+    vm.run_until_ret(exp["blot_aot_get_global"], 100_000)
+        .unwrap();
+    assert_eq!(vm.x[0] as u32, 0);
+    assert_eq!(vm.read_u64(res_ptr).unwrap(), 999);
+
+    // memory.grow(1) -> 65536 succeeds, 131072 traps!
+    assert_eq!(call(&mut vm, "grow", 1), (0, 1, 0));
+    assert_eq!(call(&mut vm, "store32", 65536), (0, 1, 0));
+    assert_eq!(call(&mut vm, "load32", 65536), (0, 0x1234_5678, 0));
+    assert_eq!(call(&mut vm, "load32", 131072).2, 2);
+
+    // blot_aot_drop
+    vm.x[0] = ctx;
+    vm.run_until_ret(exp["blot_aot_drop"], 200_000).unwrap();
+
+    // 2. `(memory 0 0)` with `--guard-pages` on AArch64!
+    let wasm_zero = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 0, 0]),
+        export_sec(&[("z_load", 0, 0)]),
+        code_sec(&[enc_body(&[], &[0x20, 0, 0x28, 0x02, 0x00])]),
+    ]);
+    let img_z = compile_wasm_to_aarch64_for_test(
+        &wasm_zero,
+        &A64CompileOptions {
+            guard_pages: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_cdylib_guard_pages_zero_mem", &img_z.elf);
+    let mut vmz = A64Vm::new(&img_z);
+    let expz: std::collections::HashMap<&str, u64> = img_z
+        .export_vaddrs
+        .iter()
+        .map(|(n, a)| (n.as_str(), *a))
+        .collect();
+    let sz = vmz.alloc_seg(4096);
+    vmz.x[0] = 0;
+    vmz.x[1] = 0;
+    vmz.x[2] = 0;
+    vmz.x[3] = sz;
+    vmz.run_until_ret(expz["blot_aot_new"], 200_000).unwrap();
+    let ctxz = vmz.x[0];
+    assert_ne!(ctxz, 0);
+    vmz.write_bytes(sz + 64, b"z_load").unwrap();
+    vmz.x[0] = ctxz;
+    vmz.x[1] = sz + 64;
+    vmz.x[2] = 6;
+    vmz.x[3] = 0;
+    vmz.x[4] = sz + 16;
+    vmz.x[5] = sz;
+    vmz.run_until_ret(expz["blot_aot_call_export"], 200_000)
+        .unwrap();
+    assert_eq!(vmz.x[0] as u32, 1);
+    assert_eq!(vmz.read_bytes(sz, 1).unwrap()[0], 2);
 }

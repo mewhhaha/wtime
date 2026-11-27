@@ -84,9 +84,17 @@ pub const OFF_CPU_HAS_CET_SS: i32 = 113;
 pub const OFF_ACTIVE_DEPTH: i32 = 116;
 /// 16-byte aligned intra-instruction SIMD scratch slot inside `Ctx`.
 pub const OFF_SCRATCH_V128: i32 = 128;
+/// `8 GiB + 64 KiB` virtual `PROT_NONE` guard reservation for `memory32` guard-page BCE
+/// (covers every `u32::MAX + u32::MAX + 16` static+dynamic address with `64 KiB` to spare).
+pub const GUARD_RESERVE_BYTES: u64 = (1u64 << 33) + 65_536;
+
 /// Standalone executable runtime fields inside `Ctx` (unused by Blot cdylib).
 pub const OFF_EXEC_ARGC: i32 = 144;
 pub const OFF_EXEC_ARGV: i32 = 152;
+/// Opt-in `--blot-cdylib --guard-pages` per-invocation SIGSEGV recovery slots inside `Ctx`
+/// (reusing `OFF_EXEC_ARGC` / `OFF_EXEC_ARGV`, which are unused by Blot cdylib).
+pub const OFF_GUARD_RESUME_PC: i32 = 144;
+pub const OFF_GUARD_RESUME_SP: i32 = 152;
 pub const OFF_EXEC_CLOCK_ORIGIN: i32 = 160;
 pub const OFF_EXEC_EXIT_CODE: i32 = 168;
 pub const OFF_EXEC_TIMING_PATH: i32 = 176;
@@ -199,8 +207,9 @@ pub struct CtxLayout {
     pub mem_min_bytes: u64,
     /// `true` iff linear memory 0 uses 64-bit (`memory64`) addressing.
     pub memory64: bool,
-    /// `true` iff standalone `ET_EXEC` reserves an `8 GiB + 64 KiB` `PROT_NONE` guard region with
-    /// a `SIGSEGV` handler for `memory32` (NEVER enabled for `--blot-cdylib` `.so`).
+    /// `true` iff linear memory 0 reserves an `8 GiB + 64 KiB` `PROT_NONE` guard region with
+    /// a `SIGSEGV` handler for `memory32` (default on standalone `ET_EXEC`; opt-in via
+    /// `--guard-pages` on `--blot-cdylib`).
     pub use_guard_pages: bool,
     /// Emit hardware speculation barriers after guest bounds and dispatch checks.
     pub spectre_mitigations: bool,
@@ -240,6 +249,13 @@ impl CtxLayout {
     pub(crate) fn with_spectre_mitigations(mut self, enabled: bool) -> Self {
         self.spectre_mitigations = enabled;
         self.use_guard_pages &= !enabled;
+        self
+    }
+
+    pub(crate) fn with_guard_pages(mut self, enabled: bool, has_memory: bool) -> Self {
+        if enabled && !self.memory64 && has_memory && !self.spectre_mitigations {
+            self.use_guard_pages = true;
+        }
         self
     }
 
@@ -527,6 +543,9 @@ pub struct X64CompileOptions {
     /// Worker count: `0` = auto (`available_parallelism().min(64)`), explicit clamped `1..=64`.
     pub jobs: usize,
     pub deadline: Option<Instant>,
+    /// Opt-in `8 GiB + 64 KiB` `PROT_NONE` guard pages + chained `SIGSEGV` handler for
+    /// `--blot-cdylib` `memory32` modules (mutually exclusive with `spectre_mitigations`).
+    pub guard_pages: bool,
     /// Emit speculation barriers and keep software bounds checks through lowering.
     pub spectre_mitigations: bool,
     /// Enable SSA IR optimizations (`false` exercises `lower_wasm_to_ir_unopt` for differential tests).
@@ -556,6 +575,7 @@ impl Default for X64CompileOptions {
             },
             jobs: 0,
             deadline: None,
+            guard_pages: false,
             spectre_mitigations: false,
             opt: true,
             verify: true,
@@ -1172,6 +1192,9 @@ fn build_shared_rodata(
 struct LinkContext<'a> {
     tx_vaddr: u64,
     ro_vaddr: u64,
+    guest_code_start_vaddr: u64,
+    guest_code_end_vaddr: u64,
+    guard_state_vaddr: Option<u64>,
     func_text_offs: &'a [u64],
     helper_text_offs: &'a [u64],
 }
@@ -1223,6 +1246,11 @@ fn patch_relocs_in_slice(
                     .and_then(|v| v.checked_add(u64::from(off)))
                     .ok_or("x64: LocalRodata target vaddr overflow")?
             }
+            RelocTarget::GuestCodeStart => ctx.guest_code_start_vaddr,
+            RelocTarget::GuestCodeEnd => ctx.guest_code_end_vaddr,
+            RelocTarget::GuardState => ctx
+                .guard_state_vaddr
+                .ok_or("x64: GuardState reloc without guard-pages ET_DYN layout")?,
         };
         let next_ip_vaddr = item_vaddr
             .checked_add(u64::from(r.next_ip_off))
@@ -1501,6 +1529,11 @@ fn compile_wasm_to_x64_so_inner(
     let budget = CompileBudget::new(opts.deadline);
     let check_dl = || budget.check_deadline().map_err(X64CompileError::Failed);
     check_dl()?;
+    if opts.guard_pages && opts.spectre_mitigations {
+        return Err(X64CompileError::Failed(
+            "x64: --guard-pages cannot be combined with --spectre-mitigations".into(),
+        ));
+    }
 
     let default_hooks = matches!(opts.hooks.cpuid, runtime::CpuidSource::Real)
         && matches!(opts.hooks.rdssp, runtime::RdsspSource::Real)
@@ -1714,7 +1747,8 @@ fn compile_wasm_to_x64_so_inner(
     //    then finalize `CtxLayout` with `ci_tables`.
     let preliminary_layout = CtxLayout::compute(&module, Vec::new())
         .map_err(X64CompileError::AdmissionRejected)?
-        .with_spectre_mitigations(opts.spectre_mitigations);
+        .with_spectre_mitigations(opts.spectre_mitigations)
+        .with_guard_pages(opts.guard_pages, module.memory.is_some());
     let SharedRodata {
         mut rodata,
         consts: ro,
@@ -3284,9 +3318,25 @@ fn compile_wasm_to_x64_so_inner(
         // 6g. Fused single-pass `.text` copy + INT3 (0xcc) inter-function padding + relocation
         //     patching (L1-hot and parallel across disjoint `&mut [u8]` slices for defined fns!).
         let mut text: Vec<u8> = vec![0u8; planned_text_len];
+        let guest_code_start_vaddr = tx_vaddr
+            .checked_add(defs_start_off as u64)
+            .ok_or_else(|| X64CompileError::Failed("x64: guest_code_start overflow".into()))?;
+        let guest_code_end_vaddr = tx_vaddr
+            .checked_add(planned_text_len as u64)
+            .ok_or_else(|| X64CompileError::Failed("x64: guest_code_end overflow".into()))?;
+        let guard_state_vaddr = match &planned_elf {
+            PlannedElf::So(lay) if layout.use_guard_pages => Some(
+                lay.guard_state_vaddr_for(planned_text_len)
+                    .map_err(X64CompileError::Failed)? as u64,
+            ),
+            _ => None,
+        };
         let link_ctx = LinkContext {
             tx_vaddr,
             ro_vaddr,
+            guest_code_start_vaddr,
+            guest_code_end_vaddr,
+            guard_state_vaddr,
             func_text_offs: &func_text_offs,
             helper_text_offs: &helper_text_offs,
         };
@@ -3530,7 +3580,9 @@ fn compile_wasm_to_x64_so_inner(
         let text_len = text.len();
         let rodata_len = rodata.len();
         let img = match planned_elf {
-            PlannedElf::So(lay) => lay.emit(&rodata, &text, &export_defs),
+            PlannedElf::So(lay) => {
+                lay.emit_with_guard_pages(&rodata, &text, &export_defs, layout.use_guard_pages)
+            }
             PlannedElf::Exec(lay) => lay.emit(&rodata, &text, export_text_offs[0]),
         }
         .map_err(X64CompileError::Failed)?;

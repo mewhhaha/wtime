@@ -75,6 +75,9 @@ pub struct A64CompileOptions {
     /// Worker thread count (`0` = automatic up to available CPU cores).
     pub jobs: usize,
     pub deadline: Option<Instant>,
+    /// Opt-in `8 GiB + 64 KiB` `PROT_NONE` guard pages + chained `SIGSEGV` handler for
+    /// `--blot-cdylib` `memory32` modules (mutually exclusive with `spectre_mitigations`).
+    pub guard_pages: bool,
     /// Emit speculation barriers and keep software bounds checks through lowering.
     pub spectre_mitigations: bool,
     /// Optional per-function incremental cache directory (`<cache>/a64-inc`).
@@ -94,6 +97,7 @@ impl Default for A64CompileOptions {
             optimize: true,
             jobs: 0,
             deadline: None,
+            guard_pages: false,
             spectre_mitigations: false,
             inc_cache_dir: None,
             gen_fingerprint: [0u8; 32],
@@ -685,6 +689,11 @@ fn compile_wasm_to_aarch64_detailed(
     let budget = CompileBudget::new(opts.deadline);
     budget.check_deadline().map_err(X64CompileError::Failed)?;
 
+    if opts.guard_pages && opts.spectre_mitigations {
+        return Err(X64CompileError::Failed(
+            "aarch64: --guard-pages cannot be combined with --spectre-mitigations".into(),
+        ));
+    }
     if opts.pgo_gen_path.is_some() && opts.pgo_use.is_some() {
         return Err(X64CompileError::Failed(
             "aarch64: --pgo-gen and --pgo-use cannot be used together".into(),
@@ -965,7 +974,8 @@ fn compile_wasm_to_aarch64_detailed(
 
     let mut layout = CtxLayout::compute(&module, ci_tables)
         .map_err(X64CompileError::AdmissionRejected)?
-        .with_spectre_mitigations(opts.spectre_mitigations);
+        .with_spectre_mitigations(opts.spectre_mitigations)
+        .with_guard_pages(opts.guard_pages, module.memory.is_some());
     layout.func_sig_ro_off = func_sig_ro_off;
     layout.func_addr_ro_off = func_addr_ro_off;
     if let Some(ref path_nul) = pgo_gen_path_nul {
@@ -1859,11 +1869,18 @@ fn compile_wasm_to_aarch64_detailed(
         .pgo_use
         .as_ref()
         .map_or_else(|| (0..n_defs).collect(), |p| p.text_layout_order());
-    for di in a64_text_order {
+    let mut defs_start_off = text.len();
+    for (pos, di) in a64_text_order.into_iter().enumerate() {
         pad_text(&mut text);
         let off = text.len();
+        if pos == 0 {
+            defs_start_off = off;
+        }
         func_offs[n_imports + di] = off;
         text.extend_from_slice(&fn_asms[di].code);
+    }
+    if n_defs == 0 {
+        defs_start_off = text.len();
     }
     if text.len() > MAX_TOTAL_CODE_BYTES {
         return Err(X64CompileError::AdmissionRejected(
@@ -1911,6 +1928,15 @@ fn compile_wasm_to_aarch64_detailed(
     }
 
     // 8. Patch all link-time AArch64 relocations (`bl`, `b`, `adrp+add`).
+    let guest_code_start_va = text_vaddr + defs_start_off as u64;
+    let guest_code_end_va = text_vaddr + text.len() as u64;
+    let guard_state_va = match &planned {
+        PlannedElf::So(p) if layout.use_guard_pages => Some(
+            p.guard_state_vaddr_for(text.len())
+                .map_err(X64CompileError::Failed)? as u64,
+        ),
+        _ => None,
+    };
     let resolve_reloc = |target: A64RelocTarget, local_ro_off: u32| -> Result<u64, String> {
         match target {
             A64RelocTarget::Func(f) => {
@@ -1931,6 +1957,10 @@ fn compile_wasm_to_aarch64_detailed(
             A64RelocTarget::LocalRodata(off) => {
                 Ok(rodata_vaddr + u64::from(local_ro_off) + u64::from(off))
             }
+            A64RelocTarget::GuestCodeStart => Ok(guest_code_start_va),
+            A64RelocTarget::GuestCodeEnd => Ok(guest_code_end_va),
+            A64RelocTarget::GuardState => guard_state_va
+                .ok_or_else(|| "aarch64: GuardState reloc without guard-pages ET_DYN".into()),
         }
     };
 
@@ -1985,7 +2015,7 @@ fn compile_wasm_to_aarch64_detailed(
                     size: *s,
                 })
                 .collect();
-            p.emit(&rodata, &text, &defs)
+            p.emit_with_guard_pages(&rodata, &text, &defs, layout.use_guard_pages)
                 .map_err(X64CompileError::Failed)?
         }
         PlannedElf::Exec(p) => p

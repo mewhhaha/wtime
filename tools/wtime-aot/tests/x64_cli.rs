@@ -1707,3 +1707,147 @@ fn cli_pgo_gen_and_pgo_use_end_to_end_and_cache_keys() {
     let run_use = Command::new(&use_exe).output().unwrap();
     assert!(run_use.status.success());
 }
+
+#[test]
+fn cli_guard_pages_validation_and_cache_keys() {
+    let root = TempRoot::new("guard-pages-cli");
+    let cache = root.path("cache");
+    let wasm_path = root.path("mem.wasm");
+    let body = enc_body(&[], &[0x20, 0, 0x28, 0x02, 0x00]);
+    let mut code = vec![1];
+    code.extend_from_slice(&body);
+    let wasm = wasm_module(&[
+        section(1, &[1, 0x60, 1, 0x7f, 1, 0x7f]),
+        section(3, &[1, 0]),
+        section(5, &[1, 0x01, 1, 2]),
+        section(7, &[1, 6, b'l', b'o', b'a', b'd', b'3', b'2', 0, 0]),
+        section(10, &code),
+    ]);
+    fs::write(&wasm_path, &wasm).unwrap();
+    let bin = env!("CARGO_BIN_EXE_wtime-aot");
+
+    // 1. Invalid combinations MUST exit with code 2 (both direct & `build`):
+    for extra in [
+        vec!["--blot-cdylib", "--backend", "rust", "--guard-pages"],
+        vec!["--blot-cdylib", "--backend", "c", "--guard-pages"],
+        vec![
+            "--blot-cdylib",
+            "--backend",
+            "x64",
+            "--guard-pages",
+            "--spectre-mitigations",
+        ],
+        vec![
+            "--blot-cdylib",
+            "--backend",
+            "aarch64",
+            "--guard-pages",
+            "--spectre-mitigations",
+        ],
+    ] {
+        let out_direct = Command::new(bin)
+            .arg(&wasm_path)
+            .args(["-o"])
+            .arg(root.path("bad.so"))
+            .args(&extra)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out_direct.status.code(),
+            Some(2),
+            "direct {extra:?} must exit 2, got {:?}: {}",
+            out_direct.status.code(),
+            String::from_utf8_lossy(&out_direct.stderr)
+        );
+        let out_build = Command::new(bin)
+            .arg("build")
+            .arg(&wasm_path)
+            .args(["--cache"])
+            .arg(&cache)
+            .args(&extra)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out_build.status.code(),
+            Some(2),
+            "build {extra:?} must exit 2, got {:?}: {}",
+            out_build.status.code(),
+            String::from_utf8_lossy(&out_build.stderr)
+        );
+    }
+
+    // 2. `wtime-aot build` MUST assign distinct cache keys for default vs `--guard-pages`
+    //    on BOTH `--backend x64` (on x86-64 hosts) and `--backend aarch64` (all hosts)!
+    let a64_def = Command::new(bin)
+        .arg("build")
+        .arg(&wasm_path)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--blot-cdylib", "--backend", "aarch64"])
+        .output()
+        .unwrap();
+    assert!(
+        a64_def.status.success(),
+        "aarch64 default build failed: {}",
+        String::from_utf8_lossy(&a64_def.stderr)
+    );
+    let a64_gp = Command::new(bin)
+        .arg("build")
+        .arg(&wasm_path)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--blot-cdylib", "--backend", "aarch64", "--guard-pages"])
+        .output()
+        .unwrap();
+    assert!(
+        a64_gp.status.success(),
+        "aarch64 --guard-pages build failed: {}",
+        String::from_utf8_lossy(&a64_gp.stderr)
+    );
+    assert_ne!(
+        String::from_utf8_lossy(&a64_def.stdout).trim(),
+        String::from_utf8_lossy(&a64_gp.stdout).trim(),
+        "aarch64 --guard-pages must use a distinct cache key"
+    );
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let x64_def = Command::new(bin)
+            .arg("build")
+            .arg(&wasm_path)
+            .args(["--cache"])
+            .arg(&cache)
+            .args(["--blot-cdylib", "--backend", "x64"])
+            .output()
+            .unwrap();
+        assert!(
+            x64_def.status.success(),
+            "x64 default build failed: {}",
+            String::from_utf8_lossy(&x64_def.stderr)
+        );
+        let x64_gp = Command::new(bin)
+            .arg("build")
+            .arg(&wasm_path)
+            .args(["--cache"])
+            .arg(&cache)
+            .args(["--blot-cdylib", "--backend", "x64", "--guard-pages"])
+            .output()
+            .unwrap();
+        assert!(
+            x64_gp.status.success(),
+            "x64 --guard-pages build failed: {}",
+            String::from_utf8_lossy(&x64_gp.stderr)
+        );
+        let p_def = PathBuf::from(String::from_utf8_lossy(&x64_def.stdout).trim());
+        let p_gp = PathBuf::from(String::from_utf8_lossy(&x64_gp.stdout).trim());
+        assert_ne!(
+            p_def, p_gp,
+            "x64 --guard-pages must use a distinct cache key"
+        );
+        assert_ne!(
+            fs::read(&p_def).unwrap(),
+            fs::read(&p_gp).unwrap(),
+            "x64 --guard-pages artifact must differ from default"
+        );
+    }
+}

@@ -177,13 +177,27 @@ the cached CLI default or setting `verify: false`). - Cached `build --cache` inv
   (`<= 16 KiB` kernel xstate + `<= 32 KiB` handler frame each). Embedders with
   deeper/larger async signal handlers or CPUs where `AT_MINSIGSTKSZ > 16 KiB`
   must configure `SA_ONSTACK` + `sigaltstack`.
-- **Zero signal handlers in `--blot-cdylib`; guard-page BCE strictly in standalone `ET_EXEC`**:
-  - `--blot-cdylib` `.so` shared libraries NEVER install process-wide signal
-    handlers and always enforce explicit software memory bounds checks.
+- **Zero signal handlers in `--blot-cdylib` by default; opt-in `--guard-pages` (`--backend x64` / `--backend aarch64`)**:
+  - Default `--blot-cdylib` `.so` shared libraries NEVER install process-wide
+    signal handlers and always enforce explicit software memory bounds checks.
+  - Passing `--guard-pages` with `--blot-cdylib` on `--backend x64` or
+    `--backend aarch64` (mutually exclusive with `--spectre-mitigations`,
+    rejected with exit code `2` on `--backend rust`/`--backend c`, and bound
+    into build and incremental cache keys) enables `8 GiB + 64 KiB` `PROT_NONE`
+    virtual guard reservations around `memory32` linear memory 0 (even when
+    `max_pages == 0`), emits `DT_FLAGS_1 = DF_1_NODELETE` in `.dynamic` so
+    `dlclose` never unmaps `.text`, and installs a thread-safe one-time chained
+    `rt_sigaction(SIGSEGV, SA_SIGINFO | SA_ONSTACK | SA_NODEFER)` handler on
+    first `blot_aot_new`. The handler checks that the faulting PC lies strictly
+    within compiled guest Wasm code, `Ctx` has an active per-invocation
+    recovery target (cleared around `host_fn` callbacks), and `si_addr` lies
+    within `[mem_base, mem_base + 8 GiB + 64 KiB)`, unwinding cleanly to
+    `TRAP_OOB (2)` while preserving all host callee-saved registers and MXCSR;
+    non-guest faults tail-chain directly to the previously installed handler
+    (or restore `SIG_DFL` and re-fault).
   - Standalone static `ET_EXEC` binaries targeting `memory32` (on both
-    `--backend x64` and `--backend aarch64`) reserve an `8 GiB + 64 KiB`
-    `PROT_NONE` virtual guard region around linear memory 0 (enabling
-    zero-branch hardware bounds checks for constant offsets `< 4 GiB`), backed
+    `--backend x64` and `--backend aarch64`) enable `8 GiB + 64 KiB` `PROT_NONE`
+    guard-page BCE by default (unless `--spectre-mitigations` is set), backed
     by a scoped `rt_sigaction(SIGSEGV, SA_SIGINFO)` handler that redirects
     faults inside `[mem_base, mem_base + 8 GiB + 64 KiB)` to the standard
     out-of-bounds exit-1 landing pad and re-raises any fault outside that window

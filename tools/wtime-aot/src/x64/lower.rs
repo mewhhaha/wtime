@@ -2680,7 +2680,12 @@ impl<'a> Lower<'a> {
         self.fp_commit(dst_val, d);
     }
 
-    fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
+    fn emit_inst(
+        &mut self,
+        res: Option<Val>,
+        op: Op,
+        bounds_check_guard_covered: bool,
+    ) -> Result<(), String> {
         let prev_flags = self.live_flags.take();
         match op {
             Op::Copy(src) => {
@@ -4304,7 +4309,7 @@ impl<'a> Lower<'a> {
                 let guard_covers = !for_bulk
                     && self.layout.use_guard_pages
                     && !self.layout.memory64
-                    && end_off <= (u32::MAX as u64) + 16;
+                    && bounds_check_guard_covered;
                 if !guard_covers {
                     let ar = self.gp_read(addr, SCRATCH_GP2);
                     self.emit_bounds_check_maybe_barrier(ar, end_off, for_bulk);
@@ -9285,7 +9290,17 @@ pub fn lower_ir_to_x64_with_budget(
                     break;
                 }
             }
-            l.emit_inst(inst.res, inst.op)?;
+            let bc_guard_covered = match inst.op {
+                Op::BoundsCheck {
+                    addr,
+                    end_off,
+                    for_bulk: false,
+                } if layout.use_guard_pages && !layout.memory64 => {
+                    bounds_check_covered_by_subsequent_mem_op(&bb.insts, ii + 1, addr, end_off)
+                }
+                _ => false,
+            };
+            l.emit_inst(inst.res, inst.op, bc_guard_covered)?;
             if (ii & 255) == 255 {
                 if let Some(b) = budget {
                     b.check_deadline()?;
@@ -9390,4 +9405,80 @@ pub fn lower_ir_to_x64_with_budget(
     l.asm.finish_labels()?;
     check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     Ok(l.asm)
+}
+
+/// Returns `true` iff a non-bulk `Op::BoundsCheck { addr, end_off, for_bulk: false }` at `next_idx - 1`
+/// is guaranteed to be enforced by a subsequent hardware-trapping memory access on the same `addr`
+/// with `offset + bytes >= end_off` before any observable side effect (preserving exact OOB trap
+/// semantics even when Pass 3 DCE deletes a dead coalesced load).
+pub(crate) fn bounds_check_covered_by_subsequent_mem_op(
+    insts: &[crate::x64::ir::Inst],
+    next_idx: usize,
+    addr: Val,
+    end_off: u64,
+) -> bool {
+    if end_off == 0 || end_off > (u32::MAX as u64) + 16 {
+        return false;
+    }
+    for inst in &insts[next_idx..] {
+        match inst.op {
+            Op::Load {
+                kind,
+                addr: a,
+                offset,
+                ..
+            } if a == addr => {
+                if offset <= u32::MAX as u64 && offset.saturating_add(kind.bytes()) >= end_off {
+                    return true;
+                }
+            }
+            Op::V128LoadLane {
+                width,
+                addr: a,
+                offset,
+                ..
+            } if a == addr => {
+                if offset <= u32::MAX as u64 && offset.saturating_add(u64::from(width)) >= end_off {
+                    return true;
+                }
+            }
+            Op::Store {
+                kind,
+                addr: a,
+                offset,
+                ..
+            } if a == addr => {
+                return offset <= u32::MAX as u64 && offset.saturating_add(kind.bytes()) >= end_off;
+            }
+            Op::V128StoreLane {
+                width,
+                addr: a,
+                offset,
+                ..
+            } if a == addr => {
+                return offset <= u32::MAX as u64
+                    && offset.saturating_add(u64::from(width)) >= end_off;
+            }
+            Op::F64x4BinMem {
+                lhs,
+                lhs_off,
+                rhs,
+                rhs_off,
+                rhs_is_splat,
+                ..
+            } => {
+                let lhs_ok = lhs == addr
+                    && lhs_off <= u32::MAX as u64
+                    && lhs_off.saturating_add(32) >= end_off;
+                let rhs_ok = !rhs_is_splat
+                    && rhs == addr
+                    && rhs_off <= u32::MAX as u64
+                    && rhs_off.saturating_add(32) >= end_off;
+                return lhs_ok || rhs_ok;
+            }
+            ref other if other.has_side_effect() => return false,
+            _ => {}
+        }
+    }
+    false
 }

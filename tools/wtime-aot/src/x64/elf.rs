@@ -132,13 +132,55 @@ impl ElfLayout {
         })
     }
 
+    /// Virtual address of the 64-byte writable `GuardState` tail inside `PT_LOAD 2`
+    /// when emitting a `--guard-pages` `ET_DYN` image for a `.text` section of `text_len` bytes.
+    pub fn guard_state_vaddr_for(&self, text_len: usize) -> Result<usize, String> {
+        let seg1_end = self
+            .text_vaddr
+            .checked_add(text_len)
+            .ok_or("text size overflow")?;
+        if seg1_end > i32::MAX as usize {
+            return Err(format!(
+                "ELF image ({seg1_end} B) exceeds rel32 addressable 2 GiB range"
+            ));
+        }
+        let dyn_vaddr = checked_align_up(seg1_end, PAGE)?;
+        // 7 dynamic entries (including DT_FLAGS_1 = DF_1_NODELETE) * 16 bytes = 112 bytes.
+        let guard_vaddr = dyn_vaddr
+            .checked_add(7 * 16)
+            .ok_or("ELF guard state overflow")?;
+        let rw_end = guard_vaddr
+            .checked_add(64)
+            .ok_or("ELF guard state overflow")?;
+        if rw_end > i32::MAX as usize {
+            return Err(format!(
+                "ELF guard state ({rw_end} B) exceeds rel32 addressable 2 GiB range"
+            ));
+        }
+        Ok(guard_vaddr)
+    }
+
     /// Emits the complete ELF64 `.so` image with conforming section headers.
     /// Every `ExportDef` must match `plan`'s export names and have a non-empty extent within `.text`.
+    #[allow(dead_code)]
     pub fn emit(
+        self,
+        rodata: &[u8],
+        text: &[u8],
+        exports: &[ExportDef<'_>],
+    ) -> Result<Vec<u8>, String> {
+        self.emit_with_guard_pages(rodata, text, exports, false)
+    }
+
+    /// Emits the complete ELF64 `.so` image, optionally embedding `DT_FLAGS_1 = DF_1_NODELETE`
+    /// and a zero-initialized 64-byte writable `GuardState` tail inside `PT_LOAD 2` when
+    /// `use_guard_pages` is `true`.
+    pub fn emit_with_guard_pages(
         mut self,
         rodata: &[u8],
         text: &[u8],
         exports: &[ExportDef<'_>],
+        use_guard_pages: bool,
     ) -> Result<Vec<u8>, String> {
         if rodata.len() != self.planned_rodata_len {
             return Err(format!(
@@ -196,8 +238,14 @@ impl ElfLayout {
         let dyn_vaddr = checked_align_up(seg1_end, PAGE)?;
         self.dyn_vaddr = dyn_vaddr;
 
-        // 6 dynamic entries * 16 bytes = 96 bytes.
-        let dyn_size: usize = 6 * 16;
+        // 6 dynamic entries (96 B) by default; 7 entries (112 B, adding DT_FLAGS_1 = DF_1_NODELETE)
+        // plus a 64-byte zero-initialized writable `GuardState` tail in `PT_LOAD 2` under `--guard-pages`.
+        let dyn_size: usize = if use_guard_pages { 7 * 16 } else { 6 * 16 };
+        let rw_size: usize = if use_guard_pages {
+            dyn_size + 64
+        } else {
+            dyn_size
+        };
 
         // Non-allocated `.shstrtab` and 8-entry Section Header Table appended after `.dynamic`.
         // Section indices:
@@ -228,7 +276,7 @@ impl ElfLayout {
             shstrtab.push(0);
         }
         let shstrtab_off = dyn_vaddr
-            .checked_add(dyn_size)
+            .checked_add(rw_size)
             .ok_or("ELF section table overflow")?;
         let shoff = checked_align_up(
             shstrtab_off
@@ -305,7 +353,7 @@ impl ElfLayout {
             PF_R | PF_W,
             dyn_vaddr,
             dyn_vaddr,
-            dyn_size,
+            rw_size,
             PAGE,
         );
         ph(
@@ -373,6 +421,9 @@ impl ElfLayout {
         put_dyn(6, self.dynsym_off as u64); // DT_SYMTAB
         put_dyn(10, self.dynstr.len() as u64); // DT_STRSZ
         put_dyn(11, 24); // DT_SYMENT
+        if use_guard_pages {
+            put_dyn(0x6fff_fffb, 0x8); // DT_FLAGS_1 = DF_1_NODELETE
+        }
         put_dyn(0, 0); // DT_NULL
 
         // ---- .shstrtab ----

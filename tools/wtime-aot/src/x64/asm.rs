@@ -264,6 +264,12 @@ pub enum RelocTarget {
     Rodata(u32),
     /// Byte offset inside local per-function `.rodata` blob (rebased when merging `.rodata`).
     LocalRodata(u32),
+    /// Start virtual address of compiled guest Wasm functions inside `.text`.
+    GuestCodeStart,
+    /// End virtual address of compiled guest Wasm functions inside `.text`.
+    GuestCodeEnd,
+    /// Virtual address of the 64-byte writable `GuardState` tail in `PT_LOAD 2` (`--guard-pages`).
+    GuardState,
 }
 
 /// A PC-relative 32-bit displacement inside emitted code:
@@ -1390,6 +1396,22 @@ impl Asm {
         self.rex_mem(is64, src.hi(), mem, false);
         self.emit_u8(0x89);
         self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `lock cmpxchg [mem], src`: compares `RAX/EAX` with `[mem]`; if equal, stores `src` into
+    /// `[mem]` and sets `ZF=1`; otherwise loads `[mem]` into `RAX/EAX` and clears `ZF`.
+    pub fn lock_cmpxchg_mr(&mut self, is64: bool, mem: Mem, src: Gp) {
+        self.emit_u8(0xf0); // LOCK prefix
+        self.rex_mem(is64, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xb1);
+        self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `pause` (`F3 90`): spin-wait hint.
+    pub fn pause(&mut self) {
+        self.emit_u8(0xf3);
+        self.emit_u8(0x90);
     }
 
     pub fn mov_mr8(&mut self, mem: Mem, src: Gp) {

@@ -150,6 +150,12 @@ pub enum A64RelocTarget {
     Helper(u32),
     Rodata(u32),
     LocalRodata(u32),
+    /// Start virtual address of compiled guest Wasm functions inside `.text`.
+    GuestCodeStart,
+    /// End virtual address of compiled guest Wasm functions inside `.text`.
+    GuestCodeEnd,
+    /// Virtual address of the 64-byte writable `GuardState` tail in `PT_LOAD 2` (`--guard-pages`).
+    GuardState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1139,6 +1145,34 @@ impl A64Asm {
 
     pub fn nop(&mut self) {
         self.emit(0xd503_201f);
+    }
+
+    pub fn yield_hint(&mut self) {
+        self.emit(0xd503_203f);
+    }
+
+    pub fn clrex(&mut self) {
+        self.emit(0xd503_3f5f);
+    }
+
+    /// 64-bit load-acquire: `ldar rt, [rn]`.
+    pub fn ldar(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0xc8df_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit store-release: `stlr rt, [rn]`.
+    pub fn stlr(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0xc89f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit load-acquire exclusive: `ldaxr rt, [rn]`.
+    pub fn ldaxr(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0xc85f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit store-release exclusive: `stlxr ws, rt, [rn]`.
+    pub fn stlxr(&mut self, rs: Reg, rt: Reg, rn: Reg) {
+        self.emit(0xc800_fc00 | ((rs.0 as u32) << 16) | ((rn.0 as u32) << 5) | rt.0 as u32);
     }
 
     pub fn brk(&mut self, imm16: u16) {

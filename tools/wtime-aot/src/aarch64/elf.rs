@@ -129,11 +129,36 @@ impl A64ElfSoLayout {
         })
     }
 
+    /// Virtual address of the 64-byte writable `GuardState` tail inside `PT_LOAD 2`
+    /// when emitting a `--guard-pages` `ET_DYN` image for a `.text` section of `text_len` bytes.
+    pub fn guard_state_vaddr_for(&self, text_len: usize) -> Result<usize, String> {
+        let seg1_end = self
+            .text_vaddr
+            .checked_add(text_len)
+            .ok_or("aarch64 ELF: text size overflow")?;
+        let dyn_vaddr = checked_align_up(seg1_end, SEG_ALIGN)?;
+        // 7 dynamic entries (including DT_FLAGS_1 = DF_1_NODELETE) * 16 bytes = 112 bytes.
+        dyn_vaddr
+            .checked_add(7 * 16)
+            .ok_or_else(|| "aarch64 ELF: guard state overflow".to_string())
+    }
+
+    #[allow(dead_code)]
     pub fn emit(
         self,
         rodata: &[u8],
         text: &[u8],
         exports: &[ExportDef<'_>],
+    ) -> Result<Vec<u8>, String> {
+        self.emit_with_guard_pages(rodata, text, exports, false)
+    }
+
+    pub fn emit_with_guard_pages(
+        self,
+        rodata: &[u8],
+        text: &[u8],
+        exports: &[ExportDef<'_>],
+        use_guard_pages: bool,
     ) -> Result<Vec<u8>, String> {
         if rodata.len() != self.planned_rodata_len {
             return Err("aarch64 ELF: rodata length mismatch".into());
@@ -154,7 +179,12 @@ impl A64ElfSoLayout {
         let seg0_end = self.rodata_vaddr + rodata.len();
         let seg1_end = self.text_vaddr + text.len();
         let dyn_vaddr = checked_align_up(seg1_end, SEG_ALIGN)?;
-        let dyn_size = 6 * 16;
+        let dyn_size = if use_guard_pages { 7 * 16 } else { 6 * 16 };
+        let rw_size = if use_guard_pages {
+            dyn_size + 64
+        } else {
+            dyn_size
+        };
 
         let sh_names = [
             "",
@@ -173,7 +203,7 @@ impl A64ElfSoLayout {
             shstrtab.extend_from_slice(name.as_bytes());
             shstrtab.push(0);
         }
-        let shstrtab_off = dyn_vaddr + dyn_size;
+        let shstrtab_off = dyn_vaddr + rw_size;
         let shoff = checked_align_up(shstrtab_off + shstrtab.len(), 8)?;
         let total_size = shoff + 8 * 64;
         let mut img = vec![0u8; total_size];
@@ -224,7 +254,7 @@ impl A64ElfSoLayout {
             text.len(),
             SEG_ALIGN,
         );
-        ph(&mut img, 2, 1, 6, dyn_vaddr, dyn_vaddr, dyn_size, SEG_ALIGN);
+        ph(&mut img, 2, 1, 6, dyn_vaddr, dyn_vaddr, rw_size, SEG_ALIGN);
         ph(&mut img, 3, 2, 6, dyn_vaddr, dyn_vaddr, dyn_size, 8);
         ph(&mut img, 4, 0x6474_e551, 6, 0, 0, 0, 16); // PT_GNU_STACK (RW, non-exec)
 
@@ -258,14 +288,17 @@ impl A64ElfSoLayout {
         img[self.text_vaddr..self.text_vaddr + text.len()].copy_from_slice(text);
 
         // .dynamic
-        let dyn_entries: [(u64, u64); 6] = [
+        let mut dyn_entries: Vec<(u64, u64)> = vec![
             (4, self.hash_off as u64),
             (5, self.dynstr_off as u64),
             (6, self.dynsym_off as u64),
             (10, self.dynstr.len() as u64),
             (11, 24),
-            (0, 0),
         ];
+        if use_guard_pages {
+            dyn_entries.push((0x6fff_fffb, 0x8)); // DT_FLAGS_1 = DF_1_NODELETE
+        }
+        dyn_entries.push((0, 0)); // DT_NULL
         for (i, &(tag, val)) in dyn_entries.iter().enumerate() {
             put_u64(&mut img, dyn_vaddr + i * 16, tag);
             put_u64(&mut img, dyn_vaddr + i * 16 + 8, val);
