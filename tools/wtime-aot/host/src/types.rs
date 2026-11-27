@@ -745,13 +745,18 @@ impl FuncType {
     ) -> Self {
         let wparams: Vec<WValType> = params.into_iter().map(|v| v.to_wasm()).collect();
         let wresults: Vec<WValType> = results.into_iter().map(|v| v.to_wasm()).collect();
-        let mut reg = engine.inner.types.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reg = engine
+            .inner
+            .types
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let cid = reg
             .register_single_final(CompositeType::Func(WFuncType {
                 params: wparams,
                 results: wresults,
             }))
             .expect("FuncType::new canonical registration");
+        engine.inner.publish_types_snapshot(&reg);
         Self {
             engine: Arc::clone(&engine.inner),
             canon_id: cid,
@@ -775,12 +780,12 @@ impl FuncType {
         if self.engine.id != other.engine.id {
             return false;
         }
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         reg.is_subtype(self.canon_id, other.canon_id)
     }
 
     pub fn params(&self) -> std::vec::IntoIter<ValType> {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         let vts = match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Func { params, .. } => params.clone(),
             _ => Vec::new(),
@@ -793,7 +798,7 @@ impl FuncType {
     }
 
     pub fn results(&self) -> std::vec::IntoIter<ValType> {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         let vts = match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Func { results, .. } => results.clone(),
             _ => Vec::new(),
@@ -806,7 +811,7 @@ impl FuncType {
     }
 
     pub(crate) fn wasm_params_results(&self) -> (Vec<WValType>, Vec<WValType>) {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Func { params, results } => (params.clone(), results.clone()),
             _ => (Vec::new(), Vec::new()),
@@ -836,10 +841,15 @@ impl StructType {
                 mutable: f.mutability == Mutability::Var,
             })
             .collect();
-        let mut reg = engine.inner.types.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reg = engine
+            .inner
+            .types
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let cid = reg.register_single_final(CompositeType::Struct(wtime_types::StructType {
             fields: wfields,
         }))?;
+        engine.inner.publish_types_snapshot(&reg);
         Ok(Self {
             engine: Arc::clone(&engine.inner),
             canon_id: cid,
@@ -863,12 +873,12 @@ impl StructType {
         if self.engine.id != other.engine.id {
             return false;
         }
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         reg.is_subtype(self.canon_id, other.canon_id)
     }
 
     pub fn fields(&self) -> std::vec::IntoIter<FieldType> {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         let raw: Vec<(bool, WStorageType)> = match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Struct { fields, .. } => {
                 fields.iter().map(|f| (f.mutable, f.wasm_storage)).collect()
@@ -892,7 +902,7 @@ impl StructType {
     }
 
     pub fn field(&self, index: usize) -> Option<FieldType> {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         let entry = match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Struct { fields, .. } => {
                 fields.get(index).map(|f| (f.mutable, f.wasm_storage))
@@ -932,10 +942,15 @@ impl ArrayType {
             storage: field.element_type.to_wasm(),
             mutable: field.mutability == Mutability::Var,
         };
-        let mut reg = engine.inner.types.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reg = engine
+            .inner
+            .types
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let cid = reg
             .register_single_final(CompositeType::Array(wtime_types::ArrayType { field: wf }))
             .expect("ArrayType::new canonical registration");
+        engine.inner.publish_types_snapshot(&reg);
         Self {
             engine: Arc::clone(&engine.inner),
             canon_id: cid,
@@ -959,12 +974,12 @@ impl ArrayType {
         if self.engine.id != other.engine.id {
             return false;
         }
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         reg.is_subtype(self.canon_id, other.canon_id)
     }
 
     pub fn mutability(&self) -> Mutability {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Array { mutable, .. } => {
                 if *mutable {
@@ -978,7 +993,7 @@ impl ArrayType {
     }
 
     pub fn element_type(&self) -> StorageType {
-        let reg = self.engine.types.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = self.engine.types.read().unwrap_or_else(|e| e.into_inner());
         let st = match &reg.infos[self.canon_id as usize].composite {
             CanonComposite::Array { wasm_storage, .. } => *wasm_storage,
             _ => WStorageType::I8,
@@ -1112,7 +1127,7 @@ impl HeapType {
             WHeapType::NoExn => Self::NoExn,
             WHeapType::Cont | WHeapType::NoCont => Self::Func,
             WHeapType::Defined(idx) | WHeapType::ExactDefined(idx) => {
-                let reg = engine.types.lock().unwrap_or_else(|e| e.into_inner());
+                let reg = engine.types.read().unwrap_or_else(|e| e.into_inner());
                 let kind = match &reg.infos[idx.0 as usize].composite {
                     CanonComposite::Func { .. } => 0,
                     CanonComposite::Struct { .. } => 1,

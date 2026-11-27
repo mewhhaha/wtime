@@ -1,10 +1,15 @@
 //! `Module`: compiles Wasm to `StoreCdylib` ELF64 `.so` (or deserializes precompiled `.so` bytes),
-//! loads it via `memfd_create` + `dlopen`, decodes `WTST0001` metadata, and registers canonical types.
+//! maps it zero-copy via `mmap` (or `dlopen` fallback), decodes `WTST0001` metadata, and registers
+//! canonical types.
 
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,18 +34,43 @@ use crate::types::{
 
 static NEXT_MODULE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Precompiled artifact envelope magic (`"WTMS0001"`) wrapping a `StoreCdylib` ELF64 `.so` + version tag.
-const SERIALIZED_MAGIC: [u8; 8] = *b"WTMS0001";
+/// Legacy precompiled artifact envelope magic (`"WTMS0001"`, leading header before ELF `.so`).
+const SERIALIZED_MAGIC_V1: [u8; 8] = *b"WTMS0001";
+/// Page-aligned precompiled artifact envelope magic (`"WTMS0002"`, raw ELF64 `.so` at offset `0`
+/// followed by a compact trailer so embedded/file-backed images map zero-copy via `mmap`).
+const SERIALIZED_MAGIC_V2: [u8; 8] = *b"WTMS0002";
+
+pub(crate) enum SoMapping {
+    Mmap {
+        base: *mut u8,
+        map_len: usize,
+        /// Optional file range holding the raw ELF64 `.so` bytes (`(file, so_file_offset, so_len)`)
+        /// so `Module::serialize()` works without retaining a duplicate heap `Vec<u8>`.
+        backing: Option<(Arc<File>, u64, usize)>,
+    },
+    Dlopen {
+        dl_handle: *mut libc::c_void,
+        /// Optional temp file path if `memfd_create` was unavailable.
+        temp_path: Option<std::path::PathBuf>,
+        backing: Option<(Arc<File>, u64, usize)>,
+    },
+}
 
 pub(crate) struct LoadedSo {
-    dl_handle: *mut libc::c_void,
-    /// Optional temp file path if `memfd_create` was unavailable.
-    temp_path: Option<std::path::PathBuf>,
+    mapping: SoMapping,
     pub(crate) desc: StoreModuleDesc,
     pub(crate) engine: Engine,
 }
 
-// SAFETY: Loaded ELF `.so` code and `.rodata` are immutable once mapped; `dlclose` runs on final drop.
+impl LoadedSo {
+    fn backing(&self) -> Option<&(Arc<File>, u64, usize)> {
+        match &self.mapping {
+            SoMapping::Mmap { backing, .. } | SoMapping::Dlopen { backing, .. } => backing.as_ref(),
+        }
+    }
+}
+
+// SAFETY: Loaded ELF `.so` code and `.rodata` are immutable once mapped; unmap/`dlclose` runs on final drop.
 unsafe impl Send for LoadedSo {}
 unsafe impl Sync for LoadedSo {}
 
@@ -48,15 +78,32 @@ impl Drop for LoadedSo {
     fn drop(&mut self) {
         self.engine
             .unregister_code_range(self.desc.code_start, self.desc.code_end);
-        if !self.dl_handle.is_null() {
-            // SAFETY: `dl_handle` was opened by `libc::dlopen` and no live `Store` retains a reference
-            // because every `Instance` holds an `Arc<ModuleInner>`.
-            unsafe {
-                let _ = libc::dlclose(self.dl_handle);
+        match &mut self.mapping {
+            SoMapping::Mmap { base, map_len, .. } => {
+                if !base.is_null() && *map_len > 0 {
+                    // SAFETY: `[base, base + map_len)` was reserved by `libc::mmap` and no live
+                    // `Store` retains a reference because every `Instance` holds an `Arc<ModuleInner>`.
+                    unsafe {
+                        let _ = libc::munmap((*base).cast(), *map_len);
+                    }
+                }
             }
-        }
-        if let Some(ref path) = self.temp_path {
-            let _ = std::fs::remove_file(path);
+            SoMapping::Dlopen {
+                dl_handle,
+                temp_path,
+                ..
+            } => {
+                if !dl_handle.is_null() {
+                    // SAFETY: `dl_handle` was opened by `libc::dlopen` and no live `Store` retains a
+                    // reference because every `Instance` holds an `Arc<ModuleInner>`.
+                    unsafe {
+                        let _ = libc::dlclose(*dl_handle);
+                    }
+                }
+                if let Some(path) = temp_path {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
         }
     }
 }
@@ -65,8 +112,9 @@ pub(crate) struct ModuleInner {
     pub(crate) id: u64,
     pub(crate) engine: Engine,
     pub(crate) so: LoadedSo,
-    /// Retained raw ELF64 `.so` image so `Module::serialize()` works in O(1) without recompiling.
-    pub(crate) so_bytes: Vec<u8>,
+    /// Retained raw ELF64 `.so` image for in-memory compiled modules (`None` for file-backed
+    /// deserialized modules, which read from `LoadedSo::backing` on demand in `Module::serialize`).
+    pub(crate) so_bytes: Option<Vec<u8>>,
     pub(crate) meta: StoreModuleMeta,
     /// Maps module-local `type_idx` -> global `Engine` canonical type ID.
     pub(crate) local_type_to_global_canon: Box<[u32]>,
@@ -147,7 +195,11 @@ impl Module {
 
     /// Loads a raw `StoreCdylib` ELF64 `.so` image into `engine`.
     pub fn from_so_bytes(engine: &Engine, so_bytes: Vec<u8>) -> Result<Self> {
-        let so = load_so_image(engine, &so_bytes)?;
+        let so = load_so_from_slice(engine, &so_bytes, None)?;
+        Self::from_loaded_so(engine, so, Some(so_bytes))
+    }
+
+    fn from_loaded_so(engine: &Engine, so: LoadedSo, so_bytes: Option<Vec<u8>>) -> Result<Self> {
         // SAFETY: `metadata_ptr..metadata_ptr + metadata_len` lives inside the loaded ELF `.rodata`.
         let meta_slice =
             unsafe { std::slice::from_raw_parts(so.desc.metadata_ptr, so.desc.metadata_len) };
@@ -162,9 +214,16 @@ impl Module {
 
         // Register module's iso-recursive type groups into the Engine's global `CanonicalTypeRegistry`.
         let local_type_to_global_canon: Box<[u32]> = {
-            let mut reg = engine.inner.types.lock().unwrap_or_else(|e| e.into_inner());
-            reg.register_groups(&meta.raw_type_groups)?
-                .into_boxed_slice()
+            let mut reg = engine
+                .inner
+                .types
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let out = reg
+                .register_groups(&meta.raw_type_groups)?
+                .into_boxed_slice();
+            engine.inner.publish_types_snapshot(&reg);
+            out
         };
 
         let mut local_canon_to_global = vec![0u32; meta.n_local_canon as usize];
@@ -318,7 +377,18 @@ impl Module {
 
     /// Serializes this compiled module into a self-contained precompiled binary artifact.
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        Ok(serialize_so_bytes(&self.inner.engine, &self.inner.so_bytes))
+        if let Some(ref bytes) = self.inner.so_bytes {
+            return Ok(serialize_so_bytes(&self.inner.engine, bytes));
+        }
+        #[cfg(unix)]
+        if let Some((file, offset, len)) = self.inner.so.backing() {
+            let mut buf = vec![0u8; *len];
+            file.read_exact_at(&mut buf, *offset)?;
+            return Ok(serialize_so_bytes(&self.inner.engine, &buf));
+        }
+        Err(Error::msg(
+            "cannot serialize module: backing image unavailable",
+        ))
     }
 
     /// Deserializes a precompiled artifact produced by `Module::serialize`.
@@ -329,27 +399,18 @@ impl Module {
     /// a compatible version of `wtime-aot-host`.
     pub unsafe fn deserialize(engine: &Engine, bytes: impl AsRef<[u8]>) -> Result<Self> {
         let bytes = bytes.as_ref();
-        if bytes.len() < 20 || bytes[..8] != SERIALIZED_MAGIC {
-            return Err(Error::msg("invalid serialized wtime-aot-host module magic"));
+        // Fast path: if `bytes` is a page-aligned static slice mapped read-only from `/proc/self/exe`
+        // (e.g. `include_bytes!` embedded precompiled modules), map directly from the executable file
+        // with zero heap copy and zero `/dev/shm` tmpfs duplication.
+        #[cfg(target_os = "linux")]
+        if let Some((exe_file, file_offset)) = locate_in_proc_self_exe(bytes) {
+            return unsafe {
+                Self::deserialize_open_file_range(engine, exe_file, file_offset, bytes.len())
+            };
         }
-        let ver_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let hdr_end = 12usize
-            .checked_add(ver_len)
-            .and_then(|v| v.checked_add(8))
-            .ok_or_else(|| Error::msg("corrupt serialized module header"))?;
-        if bytes.len() < hdr_end {
-            return Err(Error::msg("truncated serialized module header"));
-        }
-        let expected_ver = engine_version_bytes(engine);
-        if &bytes[12..12 + ver_len] != expected_ver.as_slice() {
-            return Err(Error::msg("serialized module version mismatch with Engine"));
-        }
-        let so_len =
-            u64::from_le_bytes(bytes[12 + ver_len..12 + ver_len + 8].try_into().unwrap()) as usize;
-        if bytes.len() != hdr_end + so_len {
-            return Err(Error::msg("serialized module payload length mismatch"));
-        }
-        Self::from_so_bytes(engine, bytes[hdr_end..].to_vec())
+        let (so_rel_off, so_len) = parse_serialized_envelope_slice(engine, bytes)?;
+        let so_slice = &bytes[so_rel_off..so_rel_off + so_len];
+        Self::from_so_bytes(engine, so_slice.to_vec())
     }
 
     /// Deserializes a precompiled artifact from an open file.
@@ -358,6 +419,18 @@ impl Module {
     ///
     /// Same trust contract as `Module::deserialize`.
     pub unsafe fn deserialize_open_file(engine: &Engine, mut file: File) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            let file_len = file.metadata()?.len();
+            if file_len == 0 {
+                return Err(Error::msg("invalid serialized wtime-aot-host module magic"));
+            }
+            if let Ok(len) = usize::try_from(file_len) {
+                return unsafe {
+                    Self::deserialize_open_file_range(engine, Arc::new(file), 0, len)
+                };
+            }
+        }
         file.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
@@ -375,10 +448,9 @@ impl Module {
         offset: u64,
         len: usize,
     ) -> Result<Self> {
-        use std::os::unix::fs::FileExt;
         let file: Arc<File> = file.into();
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
-        if !offset.is_multiple_of(page_size) {
+        let page_size = host_page_size();
+        if !offset.is_multiple_of(page_size as u64) {
             return Err(Error::msg(
                 "deserialize_open_file_range offset is not page-aligned",
             ));
@@ -395,9 +467,24 @@ impl Module {
                 "deserialize_open_file_range range exceeds file size",
             ));
         }
-        let mut buf = vec![0u8; len];
-        file.read_exact_at(&mut buf, offset)?;
-        unsafe { Self::deserialize(engine, buf) }
+        let (so_rel_off, so_len) = parse_serialized_envelope_file(engine, &file, offset, len)?;
+        let so_file_offset = offset
+            .checked_add(so_rel_off as u64)
+            .ok_or_else(|| Error::msg("serialized module payload offset overflow"))?;
+        // Zero-copy direct `mmap` path when the ELF payload starts on a host page boundary
+        // (always true for `WTMS0002`, where `so_rel_off == 0`).
+        #[cfg(target_os = "linux")]
+        if so_file_offset.is_multiple_of(page_size as u64)
+            && let Some(so) = load_so_mmap_file(engine, Arc::clone(&file), so_file_offset, so_len)?
+        {
+            return Self::from_loaded_so(engine, so, None);
+        }
+        // Fallback (e.g. legacy `WTMS0001` whose payload starts after a variable-length header):
+        // map via temporary buffer without retaining `so_bytes` because `file` backs `serialize()`.
+        let mut buf = vec![0u8; so_len];
+        file.read_exact_at(&mut buf, so_file_offset)?;
+        let so = load_so_from_slice(engine, &buf, Some((file, so_file_offset, so_len)))?;
+        Self::from_loaded_so(engine, so, None)
     }
 
     pub fn engine(&self) -> &Engine {
@@ -596,13 +683,703 @@ pub(crate) fn compile_wasm_so(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<
 
 pub(crate) fn serialize_so_bytes(engine: &Engine, so_bytes: &[u8]) -> Vec<u8> {
     let ver = engine_version_bytes(engine);
-    let mut out = Vec::with_capacity(8 + 4 + ver.len() + 8 + so_bytes.len());
-    out.extend_from_slice(&SERIALIZED_MAGIC);
-    out.extend_from_slice(&(ver.len() as u32).to_le_bytes());
-    out.extend_from_slice(&ver);
-    out.extend_from_slice(&(so_bytes.len() as u64).to_le_bytes());
+    let mut out = Vec::with_capacity(so_bytes.len() + ver.len() + 20);
     out.extend_from_slice(so_bytes);
+    out.extend_from_slice(&ver);
+    out.extend_from_slice(&(ver.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(so_bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(&SERIALIZED_MAGIC_V2);
     out
+}
+
+fn parse_serialized_envelope_slice(engine: &Engine, bytes: &[u8]) -> Result<(usize, usize)> {
+    const MAX_VER_LEN: usize = 1024;
+    if bytes.len() < 20 {
+        return Err(Error::msg("invalid serialized wtime-aot-host module magic"));
+    }
+    let expected_ver = engine_version_bytes(engine);
+    let tail = &bytes[bytes.len() - 20..];
+    if tail[12..20] == SERIALIZED_MAGIC_V2 {
+        let ver_len = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+        let so_len = u64::from_le_bytes(tail[4..12].try_into().unwrap()) as usize;
+        if ver_len > MAX_VER_LEN {
+            return Err(Error::msg("corrupt serialized module version length"));
+        }
+        let total = so_len
+            .checked_add(ver_len)
+            .and_then(|v| v.checked_add(20))
+            .ok_or_else(|| Error::msg("corrupt serialized module trailer"))?;
+        if total != bytes.len() {
+            return Err(Error::msg("serialized module payload length mismatch"));
+        }
+        if &bytes[so_len..so_len + ver_len] != expected_ver.as_slice() {
+            return Err(Error::msg("serialized module version mismatch with Engine"));
+        }
+        return Ok((0, so_len));
+    }
+    if bytes[..8] == SERIALIZED_MAGIC_V1 {
+        let ver_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        if ver_len > MAX_VER_LEN {
+            return Err(Error::msg("corrupt serialized module version length"));
+        }
+        let hdr_end = 12usize
+            .checked_add(ver_len)
+            .and_then(|v| v.checked_add(8))
+            .ok_or_else(|| Error::msg("corrupt serialized module header"))?;
+        if bytes.len() < hdr_end {
+            return Err(Error::msg("truncated serialized module header"));
+        }
+        if &bytes[12..12 + ver_len] != expected_ver.as_slice() {
+            return Err(Error::msg("serialized module version mismatch with Engine"));
+        }
+        let so_len =
+            u64::from_le_bytes(bytes[12 + ver_len..12 + ver_len + 8].try_into().unwrap()) as usize;
+        if bytes.len() != hdr_end.saturating_add(so_len) {
+            return Err(Error::msg("serialized module payload length mismatch"));
+        }
+        return Ok((hdr_end, so_len));
+    }
+    Err(Error::msg("invalid serialized wtime-aot-host module magic"))
+}
+
+#[cfg(unix)]
+fn parse_serialized_envelope_file(
+    engine: &Engine,
+    file: &File,
+    offset: u64,
+    len: usize,
+) -> Result<(usize, usize)> {
+    const MAX_VER_LEN: usize = 1024;
+    if len < 20 {
+        return Err(Error::msg("invalid serialized wtime-aot-host module magic"));
+    }
+    let expected_ver = engine_version_bytes(engine);
+    let mut tail = [0u8; 20];
+    file.read_exact_at(&mut tail, offset + (len - 20) as u64)?;
+    if tail[12..20] == SERIALIZED_MAGIC_V2 {
+        let ver_len = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+        let so_len = u64::from_le_bytes(tail[4..12].try_into().unwrap()) as usize;
+        if ver_len > MAX_VER_LEN {
+            return Err(Error::msg("corrupt serialized module version length"));
+        }
+        let total = so_len
+            .checked_add(ver_len)
+            .and_then(|v| v.checked_add(20))
+            .ok_or_else(|| Error::msg("corrupt serialized module trailer"))?;
+        if total != len {
+            return Err(Error::msg("serialized module payload length mismatch"));
+        }
+        let mut ver = vec![0u8; ver_len];
+        file.read_exact_at(&mut ver, offset + so_len as u64)?;
+        if ver.as_slice() != expected_ver.as_slice() {
+            return Err(Error::msg("serialized module version mismatch with Engine"));
+        }
+        return Ok((0, so_len));
+    }
+    let mut head = [0u8; 12];
+    file.read_exact_at(&mut head, offset)?;
+    if head[..8] == SERIALIZED_MAGIC_V1 {
+        let ver_len = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+        if ver_len > MAX_VER_LEN {
+            return Err(Error::msg("corrupt serialized module version length"));
+        }
+        let hdr_end = 12usize
+            .checked_add(ver_len)
+            .and_then(|v| v.checked_add(8))
+            .ok_or_else(|| Error::msg("corrupt serialized module header"))?;
+        if len < hdr_end {
+            return Err(Error::msg("truncated serialized module header"));
+        }
+        let mut ver_and_len = vec![0u8; ver_len + 8];
+        file.read_exact_at(&mut ver_and_len, offset + 12)?;
+        if &ver_and_len[..ver_len] != expected_ver.as_slice() {
+            return Err(Error::msg("serialized module version mismatch with Engine"));
+        }
+        let so_len =
+            u64::from_le_bytes(ver_and_len[ver_len..ver_len + 8].try_into().unwrap()) as usize;
+        if len != hdr_end.saturating_add(so_len) {
+            return Err(Error::msg("serialized module payload length mismatch"));
+        }
+        return Ok((hdr_end, so_len));
+    }
+    Err(Error::msg("invalid serialized wtime-aot-host module magic"))
+}
+
+#[inline]
+fn host_page_size() -> usize {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as usize
+}
+
+#[inline]
+fn align_up(n: usize, align: usize) -> Option<usize> {
+    let mask = align - 1;
+    n.checked_add(mask).map(|v| v & !mask)
+}
+
+#[inline]
+fn read_u16_le(buf: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(buf.get(off..off + 2)?.try_into().ok()?))
+}
+
+#[inline]
+fn read_u32_le(buf: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(buf.get(off..off + 4)?.try_into().ok()?))
+}
+
+#[inline]
+fn read_u64_le(buf: &[u8], off: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(buf.get(off..off + 8)?.try_into().ok()?))
+}
+
+#[cfg(target_os = "linux")]
+fn locate_in_proc_self_exe(bytes: &[u8]) -> Option<(Arc<File>, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    const MIN_STATIC_BYTES: usize = 64 * 1024;
+    const MAX_MAPS_BYTES: u64 = 2 * 1024 * 1024;
+
+    let page_size = host_page_size();
+    let addr = bytes.as_ptr() as usize;
+    let len = bytes.len();
+    if len < MIN_STATIC_BYTES || !addr.is_multiple_of(page_size) {
+        return None;
+    }
+    let file = File::open("/proc/self/exe").ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let exe_dev = meta.dev();
+    let exe_ino = meta.ino();
+    let exe_len = meta.len();
+    let expected_major = (exe_dev >> 8 & 0xfff) | (exe_dev >> 32 & 0xffff_f000);
+    let expected_minor = (exe_dev & 0xff) | (exe_dev >> 12 & 0xffff_ff00);
+
+    let mut maps = String::new();
+    File::open("/proc/self/maps")
+        .ok()?
+        .take(MAX_MAPS_BYTES + 1)
+        .read_to_string(&mut maps)
+        .ok()?;
+    if maps.len() as u64 > MAX_MAPS_BYTES {
+        return None;
+    }
+    let addr_end = addr.checked_add(len)?;
+    let mut found: Option<(u64, bool)> = None;
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let (start_s, end_s) = fields.next()?.split_once('-')?;
+        let start = usize::from_str_radix(start_s, 16).ok()?;
+        let end = usize::from_str_radix(end_s, 16).ok()?;
+        if addr < start || addr_end > end {
+            continue;
+        }
+        if fields.next()? != "r--p" {
+            return None;
+        }
+        let map_off = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let (maj_s, min_s) = fields.next()?.split_once(':')?;
+        let major = u64::from_str_radix(maj_s, 16).ok()?;
+        let minor = u64::from_str_radix(min_s, 16).ok()?;
+        let ino: u64 = fields.next()?.parse().ok()?;
+        if ino == 0 || ino != exe_ino {
+            return None;
+        }
+        let file_off = map_off.checked_add((addr - start) as u64)?;
+        if !file_off.is_multiple_of(page_size as u64) || file_off.checked_add(len as u64)? > exe_len
+        {
+            return None;
+        }
+        let dev_matches = major == expected_major && minor == expected_minor;
+        if found.replace((file_off, dev_matches)).is_some() {
+            return None;
+        }
+    }
+    let (file_off, dev_matches) = found?;
+    if !dev_matches {
+        // Container/overlayfs/btrfs filesystems can report different device numbers in stat vs maps.
+        // Confirm identity by comparing the boundary 64-byte header and trailer (zero bulk fault).
+        let mut hdr = [0u8; 64];
+        let mut trl = [0u8; 64];
+        file.read_exact_at(&mut hdr, file_off).ok()?;
+        file.read_exact_at(&mut trl, file_off + (len - 64) as u64)
+            .ok()?;
+        if hdr != bytes[..64] || trl != bytes[len - 64..] {
+            return None;
+        }
+    }
+    Some((Arc::new(file), file_off))
+}
+
+#[derive(Clone, Copy)]
+struct ElfLoadSeg {
+    flags: u32,
+    offset: usize,
+    vaddr: usize,
+    filesz: usize,
+}
+
+struct ParsedElfSo {
+    loads: Vec<ElfLoadSeg>,
+    dyn_seg: Option<(usize, usize)>,
+    map_len: usize,
+}
+
+fn host_elf_machine() -> Option<u16> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        Some(62)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        Some(183)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        None
+    }
+}
+
+fn parse_store_elf_headers(header_and_phdrs: &[u8], so_len: usize) -> Option<ParsedElfSo> {
+    const PT_LOAD: u32 = 1;
+    const PT_DYNAMIC: u32 = 2;
+
+    if header_and_phdrs.len() < 64 || &header_and_phdrs[0..4] != b"\x7fELF" {
+        return None;
+    }
+    if header_and_phdrs[4] != 2 || header_and_phdrs[5] != 1 || header_and_phdrs[6] != 1 {
+        return None;
+    }
+    if read_u16_le(header_and_phdrs, 16)? != 3 // ET_DYN
+        || read_u16_le(header_and_phdrs, 18)? != host_elf_machine()?
+        || read_u16_le(header_and_phdrs, 54)? != 56
+    {
+        return None;
+    }
+    let e_phoff = usize::try_from(read_u64_le(header_and_phdrs, 32)?).ok()?;
+    let e_phnum = usize::from(read_u16_le(header_and_phdrs, 56)?);
+    if !(2..=16).contains(&e_phnum) {
+        return None;
+    }
+    let ph_end = e_phoff.checked_add(e_phnum.checked_mul(56)?)?;
+    if ph_end > header_and_phdrs.len() || ph_end > so_len {
+        return None;
+    }
+
+    let page_size = host_page_size();
+    let mut loads = Vec::with_capacity(e_phnum);
+    let mut dyn_seg = None;
+    let mut max_end = 0usize;
+    for i in 0..e_phnum {
+        let base = e_phoff + i * 56;
+        let p_type = read_u32_le(header_and_phdrs, base)?;
+        let p_flags = read_u32_le(header_and_phdrs, base + 4)?;
+        let p_offset = usize::try_from(read_u64_le(header_and_phdrs, base + 8)?).ok()?;
+        let p_vaddr = usize::try_from(read_u64_le(header_and_phdrs, base + 16)?).ok()?;
+        let p_filesz = usize::try_from(read_u64_le(header_and_phdrs, base + 32)?).ok()?;
+        let p_memsz = usize::try_from(read_u64_le(header_and_phdrs, base + 40)?).ok()?;
+        if p_type == PT_LOAD {
+            if p_filesz != p_memsz
+                || p_offset != p_vaddr
+                || !p_vaddr.is_multiple_of(page_size)
+                || p_offset.checked_add(p_filesz)? > so_len
+            {
+                return None;
+            }
+            let seg_end = p_vaddr.checked_add(p_memsz)?;
+            max_end = max_end.max(seg_end);
+            loads.push(ElfLoadSeg {
+                flags: p_flags,
+                offset: p_offset,
+                vaddr: p_vaddr,
+                filesz: p_filesz,
+            });
+        } else if p_type == PT_DYNAMIC {
+            dyn_seg = Some((p_vaddr, p_filesz));
+        }
+    }
+    if loads.len() < 2 || max_end == 0 {
+        return None;
+    }
+    // Verify `PT_LOAD` segments are strictly ordered and page-disjoint, and segment 0 starts at 0.
+    loads.sort_by_key(|s| s.vaddr);
+    if loads[0].vaddr != 0 {
+        return None;
+    }
+    for pair in loads.windows(2) {
+        let prev_end = align_up(pair[0].vaddr.checked_add(pair[0].filesz)?, page_size)?;
+        if prev_end > pair[1].vaddr {
+            return None;
+        }
+    }
+    let map_len = align_up(max_end, page_size)?;
+    Some(ParsedElfSo {
+        loads,
+        dyn_seg,
+        map_len,
+    })
+}
+
+struct MmapGuard {
+    base: *mut u8,
+    len: usize,
+}
+
+impl MmapGuard {
+    fn disarm(mut self) -> *mut u8 {
+        let ptr = self.base;
+        self.base = std::ptr::null_mut();
+        ptr
+    }
+}
+
+impl Drop for MmapGuard {
+    fn drop(&mut self) {
+        if !self.base.is_null() && self.len > 0 {
+            unsafe {
+                let _ = libc::munmap(self.base.cast(), self.len);
+            }
+        }
+    }
+}
+
+#[inline]
+fn elf_flags_to_prot(flags: u32) -> libc::c_int {
+    let mut prot = 0;
+    if (flags & 4) != 0 {
+        prot |= libc::PROT_READ;
+    }
+    if (flags & 2) != 0 {
+        prot |= libc::PROT_WRITE;
+    }
+    if (flags & 1) != 0 {
+        prot |= libc::PROT_EXEC;
+    }
+    prot
+}
+
+/// Resolves `wt_store_get_desc` from an already-mapped zero-relocation `StoreCdylib` ELF64 image.
+/// Returns `Ok(None)` if the image uses dynamic relocations or external dependencies (caller falls
+/// back to `dlopen`), or `Ok(Some(ptr))` pointing into an executable `PT_LOAD` segment.
+unsafe fn resolve_mapped_get_desc(
+    base: *const u8,
+    parsed: &ParsedElfSo,
+) -> Option<WtStoreGetDescFn> {
+    const DT_NULL: u64 = 0;
+    const DT_NEEDED: u64 = 1;
+    const DT_PLTRELSZ: u64 = 2;
+    const DT_HASH: u64 = 4;
+    const DT_STRTAB: u64 = 5;
+    const DT_SYMTAB: u64 = 6;
+    const DT_RELA: u64 = 7;
+    const DT_STRSZ: u64 = 10;
+    const DT_SYMENT: u64 = 11;
+    const DT_INIT: u64 = 12;
+    const DT_REL: u64 = 17;
+    const DT_JMPREL: u64 = 23;
+    const DT_INIT_ARRAY: u64 = 25;
+    const DT_RELR: u64 = 36;
+
+    let (dyn_vaddr, dyn_len) = parsed.dyn_seg?;
+    // Ensure `.dynamic` lies completely inside a readable mapped `PT_LOAD` segment.
+    let dyn_in_load = parsed.loads.iter().any(|s| {
+        (s.flags & 4) != 0
+            && dyn_vaddr >= s.vaddr
+            && dyn_vaddr
+                .checked_add(dyn_len)
+                .is_some_and(|e| e <= s.vaddr + s.filesz)
+    });
+    if !dyn_in_load || dyn_len < 16 {
+        return None;
+    }
+    let dyn_slice = unsafe { std::slice::from_raw_parts(base.add(dyn_vaddr), dyn_len) };
+
+    let mut hash_off = None;
+    let mut strtab_off = None;
+    let mut symtab_off = None;
+    let mut strsz = None;
+    let mut syment = None;
+    for chunk in dyn_slice.as_chunks::<16>().0 {
+        let tag = u64::from_le_bytes(chunk[0..8].try_into().ok()?);
+        let val = u64::from_le_bytes(chunk[8..16].try_into().ok()?);
+        match tag {
+            DT_NULL => break,
+            DT_NEEDED | DT_PLTRELSZ | DT_RELA | DT_REL | DT_JMPREL | DT_RELR | DT_INIT
+            | DT_INIT_ARRAY => return None,
+            DT_HASH => hash_off = usize::try_from(val).ok(),
+            DT_STRTAB => strtab_off = usize::try_from(val).ok(),
+            DT_SYMTAB => symtab_off = usize::try_from(val).ok(),
+            DT_STRSZ => strsz = usize::try_from(val).ok(),
+            DT_SYMENT => syment = usize::try_from(val).ok(),
+            _ => {}
+        }
+    }
+    if syment? != 24 {
+        return None;
+    }
+    let seg0_end = parsed.loads[0].filesz;
+    let hash_off = hash_off?;
+    let strtab_off = strtab_off?;
+    let symtab_off = symtab_off?;
+    let strsz = strsz?;
+    if hash_off.checked_add(8)? > seg0_end || strtab_off.checked_add(strsz)? > seg0_end {
+        return None;
+    }
+    let seg0 = unsafe { std::slice::from_raw_parts(base, seg0_end) };
+    let nsyms = read_u32_le(seg0, hash_off + 4)? as usize;
+    let symtab_end = symtab_off.checked_add(nsyms.checked_mul(24)?)?;
+    if symtab_end > seg0_end {
+        return None;
+    }
+    let strtab = &seg0[strtab_off..strtab_off + strsz];
+    for sym_idx in 1..nsyms {
+        let off = symtab_off + sym_idx * 24;
+        let st_name = read_u32_le(seg0, off)? as usize;
+        if st_name >= strtab.len() {
+            continue;
+        }
+        let rest = &strtab[st_name..];
+        let nul = rest.iter().position(|&b| b == 0)?;
+        if &rest[..nul] == b"wt_store_get_desc" {
+            let st_value = usize::try_from(read_u64_le(seg0, off + 8)?).ok()?;
+            let in_exec = parsed.loads.iter().any(|s| {
+                (s.flags & 1) != 0 && st_value >= s.vaddr && st_value < s.vaddr + s.filesz
+            });
+            if !in_exec {
+                return None;
+            }
+            let fn_ptr = unsafe { base.add(st_value) };
+            return Some(unsafe { std::mem::transmute::<*const u8, WtStoreGetDescFn>(fn_ptr) });
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn flush_icache_range(start: *const u8, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let ctr: u64;
+    unsafe {
+        std::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+    }
+    let dmin = 4usize << ((ctr >> 16) & 0xf);
+    let imin = 4usize << (ctr & 0xf);
+    let beg = start as usize;
+    let end = beg.saturating_add(len);
+    let mut p = beg & !(dmin - 1);
+    while p < end {
+        unsafe {
+            std::arch::asm!("dc cvau, {}", in(reg) p, options(nostack, preserves_flags));
+        }
+        p += dmin;
+    }
+    unsafe {
+        std::arch::asm!("dsb ish", options(nostack, preserves_flags));
+    }
+    let mut p = beg & !(imin - 1);
+    while p < end {
+        unsafe {
+            std::arch::asm!("ic ivau, {}", in(reg) p, options(nostack, preserves_flags));
+        }
+        p += imin;
+    }
+    unsafe {
+        std::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+    }
+}
+
+/// Zero-copy `mmap` loader for a page-aligned `StoreCdylib` ELF64 `.so` inside an open file.
+/// Returns `Ok(None)` if the ELF layout is ineligible (caller falls back to `load_so_from_slice`).
+#[cfg(target_os = "linux")]
+fn load_so_mmap_file(
+    engine: &Engine,
+    file: Arc<File>,
+    so_file_offset: u64,
+    so_len: usize,
+) -> Result<Option<LoadedSo>> {
+    if so_len < 64 {
+        return Ok(None);
+    }
+    let probe_len = so_len.min(64 + 16 * 56);
+    let mut probe = vec![0u8; probe_len];
+    file.read_exact_at(&mut probe, so_file_offset)?;
+    let Some(parsed) = parse_store_elf_headers(&probe, so_len) else {
+        return Ok(None);
+    };
+
+    let raw_base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            parsed.map_len,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if raw_base == libc::MAP_FAILED {
+        return Err(Error::msg("mmap reserve for StoreCdylib failed"));
+    }
+    let guard = MmapGuard {
+        base: raw_base.cast::<u8>(),
+        len: parsed.map_len,
+    };
+
+    let fd = file.as_raw_fd();
+    for seg in &parsed.loads {
+        if seg.filesz == 0 {
+            continue;
+        }
+        let dst = unsafe { guard.base.add(seg.vaddr) };
+        let foff = libc::off_t::try_from(so_file_offset + seg.offset as u64)
+            .map_err(|_| Error::msg("StoreCdylib mmap file offset overflow"))?;
+        let ptr = unsafe {
+            libc::mmap(
+                dst.cast(),
+                seg.filesz,
+                elf_flags_to_prot(seg.flags),
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                fd,
+                foff,
+            )
+        };
+        if ptr == libc::MAP_FAILED || ptr != dst.cast() {
+            return Err(Error::msg("mmap PT_LOAD segment for StoreCdylib failed"));
+        }
+    }
+
+    let Some(get_desc) = (unsafe { resolve_mapped_get_desc(guard.base, &parsed) }) else {
+        return Ok(None);
+    };
+    let mut desc = StoreModuleDesc::default();
+    unsafe {
+        get_desc(&mut desc);
+    }
+    if desc.abi_version != STORE_ABI_VERSION {
+        return Err(Error::msg(format!(
+            "StoreCdylib descriptor ABI mismatch: got {}, expected {STORE_ABI_VERSION}",
+            desc.abi_version
+        )));
+    }
+
+    engine.register_code_range(RegisteredCodeRange {
+        code_start: desc.code_start,
+        code_end: desc.code_end,
+        safepoint_header: desc.safepoint_header,
+    });
+    let base = guard.disarm();
+    Ok(Some(LoadedSo {
+        mapping: SoMapping::Mmap {
+            base,
+            map_len: parsed.map_len,
+            backing: Some((file, so_file_offset, so_len)),
+        },
+        desc,
+        engine: engine.clone(),
+    }))
+}
+
+/// Direct anonymous `mmap` loader for an in-memory `StoreCdylib` ELF64 `.so` slice (avoids
+/// `/dev/shm` tmpfs copies and glibc `dlopen` global lock contention).
+#[cfg(target_os = "linux")]
+fn load_so_mmap_slice(
+    engine: &Engine,
+    so_bytes: &[u8],
+    backing: Option<(Arc<File>, u64, usize)>,
+) -> Result<Option<LoadedSo>> {
+    let Some(parsed) = parse_store_elf_headers(so_bytes, so_bytes.len()) else {
+        return Ok(None);
+    };
+    let page_size = host_page_size();
+    let raw_base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            parsed.map_len,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if raw_base == libc::MAP_FAILED {
+        return Err(Error::msg("mmap reserve for StoreCdylib slice failed"));
+    }
+    let guard = MmapGuard {
+        base: raw_base.cast::<u8>(),
+        len: parsed.map_len,
+    };
+
+    for seg in &parsed.loads {
+        if seg.filesz == 0 {
+            continue;
+        }
+        let seg_map_len = align_up(seg.filesz, page_size)
+            .ok_or_else(|| Error::msg("StoreCdylib segment size overflow"))?;
+        let dst = unsafe { guard.base.add(seg.vaddr) };
+        let rc =
+            unsafe { libc::mprotect(dst.cast(), seg_map_len, libc::PROT_READ | libc::PROT_WRITE) };
+        if rc != 0 {
+            return Err(Error::msg("mprotect RW for StoreCdylib segment failed"));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(so_bytes.as_ptr().add(seg.offset), dst, seg.filesz);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if (seg.flags & 1) != 0 {
+            unsafe { flush_icache_range(dst, seg.filesz) };
+        }
+        let rc = unsafe { libc::mprotect(dst.cast(), seg_map_len, elf_flags_to_prot(seg.flags)) };
+        if rc != 0 {
+            return Err(Error::msg("mprotect final prot for StoreCdylib failed"));
+        }
+    }
+
+    let Some(get_desc) = (unsafe { resolve_mapped_get_desc(guard.base, &parsed) }) else {
+        return Ok(None);
+    };
+    let mut desc = StoreModuleDesc::default();
+    unsafe {
+        get_desc(&mut desc);
+    }
+    if desc.abi_version != STORE_ABI_VERSION {
+        return Err(Error::msg(format!(
+            "StoreCdylib descriptor ABI mismatch: got {}, expected {STORE_ABI_VERSION}",
+            desc.abi_version
+        )));
+    }
+
+    engine.register_code_range(RegisteredCodeRange {
+        code_start: desc.code_start,
+        code_end: desc.code_end,
+        safepoint_header: desc.safepoint_header,
+    });
+    let base = guard.disarm();
+    Ok(Some(LoadedSo {
+        mapping: SoMapping::Mmap {
+            base,
+            map_len: parsed.map_len,
+            backing,
+        },
+        desc,
+        engine: engine.clone(),
+    }))
+}
+
+fn load_so_from_slice(
+    engine: &Engine,
+    so_bytes: &[u8],
+    backing: Option<(Arc<File>, u64, usize)>,
+) -> Result<LoadedSo> {
+    #[cfg(target_os = "linux")]
+    {
+        let backing_clone = backing.clone();
+        if let Some(loaded) = load_so_mmap_slice(engine, so_bytes, backing_clone)? {
+            return Ok(loaded);
+        }
+    }
+    load_so_dlopen(engine, so_bytes, backing)
 }
 
 fn engine_version_bytes(engine: &Engine) -> Vec<u8> {
@@ -626,10 +1403,13 @@ fn engine_version_bytes(engine: &Engine) -> Vec<u8> {
     out
 }
 
-/// Loads an ELF64 `.so` image using a globally unique tmpfs (`/dev/shm`, fallback `temp_dir`)
-/// path so glibc's `dlopen` filename cache NEVER aliases two distinct modules, then immediately
-/// unlinks the path once mapped.
-fn load_so_image(engine: &Engine, so_bytes: &[u8]) -> Result<LoadedSo> {
+/// Fallback ELF64 `.so` loader using a globally unique tmpfs (`/dev/shm`, fallback `temp_dir`)
+/// path + `dlopen`, then immediately unlinking the path once mapped.
+fn load_so_dlopen(
+    engine: &Engine,
+    so_bytes: &[u8],
+    backing: Option<(Arc<File>, u64, usize)>,
+) -> Result<LoadedSo> {
     static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -698,8 +1478,11 @@ fn load_so_image(engine: &Engine, so_bytes: &[u8]) -> Result<LoadedSo> {
     });
 
     Ok(LoadedSo {
-        dl_handle,
-        temp_path,
+        mapping: SoMapping::Dlopen {
+            dl_handle,
+            temp_path,
+            backing,
+        },
         desc,
         engine: engine.clone(),
     })

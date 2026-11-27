@@ -13,13 +13,13 @@ use crate::abi::{
     HostFuncCtx, StoreFuncRef, StoreMemDesc, StoreState, StoreTableDesc, TRAP_HOST_PANIC,
     TRAP_HOST_STORED_ERROR,
 };
-use crate::config::{Engine, PoolStoreGuard};
+use crate::config::{Engine, PoolStoreGuard, RegisteredCodeRange};
 use crate::error::{Error, Result};
 use crate::gc::{ExnRef, GcHeap, Rooted, StoreExnBox, collect_store_gc};
 use crate::memory::{PrivateMemoryData, SharedMemory, SharedMemoryInner};
 use crate::module::Module;
 use crate::signal::InterruptHandle;
-use crate::types::{FuncType, GlobalType, TableType, TagType, ValType};
+use crate::types::{CanonTypeInfo, FuncType, GlobalType, TableType, TagType, ValType};
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -265,6 +265,10 @@ pub struct StoreInner {
     pub(crate) fuel: Option<u64>,
     pub(crate) active_entry_instance: Option<usize>,
     pub(crate) active_caller_instance: Option<usize>,
+    pub(crate) types_snapshot: Arc<[CanonTypeInfo]>,
+    pub(crate) synced_types_version: u64,
+    pub(crate) code_ranges_snapshot: Arc<[RegisteredCodeRange]>,
+    pub(crate) synced_code_ranges_version: u64,
     pub(crate) _pool_guard: Option<PoolStoreGuard>,
 }
 
@@ -281,9 +285,28 @@ impl StoreInner {
         let init_gc = cfg.gc_heap_initial_size.min(heap_cap as u64) as usize;
         let gc = GcHeap::new(init_gc, heap_cap, interrupt.clone())?;
 
-        let (descs_ptr, descs_len) = {
-            let reg = engine.inner.types.lock().unwrap_or_else(|e| e.into_inner());
-            (reg.descs_ptr(), reg.len() as u64)
+        let (descs_ptr, descs_len, types_snapshot, synced_types_version) = {
+            let reg = engine.inner.types.read().unwrap_or_else(|e| e.into_inner());
+            let snap = Arc::clone(
+                &*engine
+                    .inner
+                    .types_snapshot
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            let ver = engine.inner.types_version.load(Ordering::Acquire);
+            (reg.descs_ptr(), reg.len() as u64, snap, ver)
+        };
+        let (code_ranges_snapshot, synced_code_ranges_version) = {
+            let snap = Arc::clone(
+                &*engine
+                    .inner
+                    .code_ranges_snapshot
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            let ver = engine.inner.code_ranges_version.load(Ordering::Acquire);
+            (snap, ver)
         };
 
         let from_base = gc.active_from_base();
@@ -345,6 +368,10 @@ impl StoreInner {
             fuel: if cfg.consume_fuel { Some(0) } else { None },
             active_entry_instance: None,
             active_caller_instance: None,
+            types_snapshot,
+            synced_types_version,
+            code_ranges_snapshot,
+            synced_code_ranges_version,
             _pool_guard: None,
         }))
     }
@@ -362,14 +389,64 @@ impl StoreInner {
     }
 
     pub(crate) fn sync_type_descs(&mut self) {
+        let cur_ver = self.engine.inner.types_version.load(Ordering::Acquire);
+        if cur_ver == self.synced_types_version {
+            return;
+        }
         let reg = self
             .engine
             .inner
             .types
-            .lock()
+            .read()
             .unwrap_or_else(|e| e.into_inner());
+        let snap = Arc::clone(
+            &*self
+                .engine
+                .inner
+                .types_snapshot
+                .read()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        let final_ver = self.engine.inner.types_version.load(Ordering::Acquire);
         self.state.type_descs_ptr = reg.descs_ptr();
         self.state.type_descs_len = reg.len() as u64;
+        self.types_snapshot = snap;
+        self.synced_types_version = final_ver;
+    }
+
+    #[inline]
+    pub(crate) fn ensure_type_info(&mut self, cid: u32) -> &CanonTypeInfo {
+        if (cid as usize) >= self.types_snapshot.len() {
+            self.sync_type_descs();
+        }
+        &self.types_snapshot[cid as usize]
+    }
+
+    #[inline]
+    pub(crate) fn sync_code_ranges(&mut self) -> Arc<[RegisteredCodeRange]> {
+        let cur_ver = self
+            .engine
+            .inner
+            .code_ranges_version
+            .load(Ordering::Acquire);
+        if cur_ver != self.synced_code_ranges_version {
+            let snap = Arc::clone(
+                &*self
+                    .engine
+                    .inner
+                    .code_ranges_snapshot
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            let final_ver = self
+                .engine
+                .inner
+                .code_ranges_version
+                .load(Ordering::Acquire);
+            self.code_ranges_snapshot = snap;
+            self.synced_code_ranges_version = final_ver;
+        }
+        Arc::clone(&self.code_ranges_snapshot)
     }
 
     pub(crate) fn drain_dropped_owned_roots(&mut self) {
@@ -405,6 +482,7 @@ impl StoreInner {
             .clamp(64 * 1024, crate::gc::SEMI_SPACE_RESERVE_BYTES - 4096);
         let cap_aligned = ((cap + 4095) & !4095).min(crate::gc::SEMI_SPACE_RESERVE_BYTES - 4096);
         self.gc.heap_cap = cap_aligned;
+        self.gc.init_cap = self.gc.init_cap.min(cap_aligned);
         self.state.gc_heap_cap = cap_aligned as u64;
         if self.gc.from_cap > cap_aligned {
             let used = (self.state.gc_alloc_ptr - self.state.gc_from_base) as usize;
@@ -428,7 +506,7 @@ impl StoreInner {
             .engine
             .inner
             .types
-            .lock()
+            .read()
             .unwrap_or_else(|e| e.into_inner());
         for &vt in &wparams {
             let mty = wtime_aot::x64::store_rt::val_type_to_machine_ty(vt);
@@ -532,23 +610,42 @@ fn current_thread_stack_floor(max_wasm_stack: usize) -> u64 {
     let sp_approx = (&max_wasm_stack as *const usize) as usize;
     let max_span = max_wasm_stack.clamp(64 * 1024, 32 << 20);
     #[cfg(target_os = "linux")]
-    unsafe {
-        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
-            let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
-            let mut stack_size: usize = 0;
-            let rc = libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size);
-            libc::pthread_attr_destroy(&mut attr);
-            if rc == 0 && !stack_addr.is_null() && stack_size > 256 * 1024 {
-                let lo = stack_addr as usize;
-                let hi = lo.saturating_add(stack_size);
-                if sp_approx >= lo && sp_approx <= hi {
-                    // Running on the OS thread stack: keep 128 KiB headroom above the guard page.
-                    let os_floor = lo.saturating_add(128 * 1024);
-                    let cfg_floor = sp_approx.saturating_sub(max_span);
-                    return os_floor.max(cfg_floor) as u64;
-                }
+    {
+        thread_local! {
+            static OS_STACK_BOUNDS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+        }
+        let bounds = OS_STACK_BOUNDS.with(|cell| {
+            if let Some(b) = cell.get() {
+                return Some(b);
             }
+            let queried = unsafe {
+                let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+                if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+                    let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+                    let mut stack_size: usize = 0;
+                    let rc = libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size);
+                    libc::pthread_attr_destroy(&mut attr);
+                    if rc == 0 && !stack_addr.is_null() && stack_size > 256 * 1024 {
+                        let lo = stack_addr as usize;
+                        Some((lo, lo.saturating_add(stack_size)))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            cell.set(queried);
+            queried
+        });
+        if let Some((lo, hi)) = bounds
+            && sp_approx >= lo
+            && sp_approx <= hi
+        {
+            // Running on the OS thread stack: keep 128 KiB headroom above the guard page.
+            let os_floor = lo.saturating_add(128 * 1024);
+            let cfg_floor = sp_approx.saturating_sub(max_span);
+            return os_floor.max(cfg_floor) as u64;
         }
     }
     // Running on a custom fiber stack (e.g. Scriptw's 64 MiB fiber): bound below current RSP.
@@ -565,7 +662,7 @@ extern "C" fn store_gc_collect_cb(
     gc_call_ret_rsp: u64,
 ) -> u32 {
     let store = unsafe { &mut *(store_ptr as *mut StoreInner) };
-    match unsafe { collect_store_gc(store, req_bytes, gc_call_ret_rsp) } {
+    match unsafe { collect_store_gc(store, req_bytes, gc_call_ret_rsp, false) } {
         Ok(()) => 0,
         Err(_) => u32::from(TRAP_ALLOC_FAILED),
     }
@@ -799,6 +896,14 @@ impl<T> Store<T> {
         *self.data
     }
 
+    pub fn gc_count(&self) -> u64 {
+        self.inner.state.gc_count
+    }
+
+    pub fn gc_weak_retire_count(&self) -> u64 {
+        self.inner.gc.weak_retire_count
+    }
+
     pub fn limiter(&mut self, mut limiter: impl FnMut(&mut T) -> &mut StoreLimits) {
         let limits = limiter(&mut self.data).clone();
         self.inner.apply_limits(&limits);
@@ -821,7 +926,7 @@ impl<T> Store<T> {
     }
 
     pub fn gc(&mut self, _why: Option<&str>) -> Result<()> {
-        unsafe { collect_store_gc(&mut self.inner, 0, 0).map_err(Error::from) }
+        unsafe { collect_store_gc(&mut self.inner, 0, 0, true).map_err(Error::from) }
     }
 
     pub fn gc_heap_capacity(&self) -> usize {
@@ -906,7 +1011,7 @@ impl<'a, T> StoreContextMut<'a, T> {
     }
 
     pub fn gc(&mut self, _why: Option<&str>) -> Result<()> {
-        unsafe { collect_store_gc(self.inner, 0, 0).map_err(Error::from) }
+        unsafe { collect_store_gc(self.inner, 0, 0, true).map_err(Error::from) }
     }
 
     pub fn gc_heap_capacity(&self) -> usize {

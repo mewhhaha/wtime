@@ -941,3 +941,170 @@ fn large_byte_array_2gib_plus_16_survives_gc() {
     assert_eq!(arr.get(&mut store, 1u32 << 30).unwrap().i32(), Some(0));
     assert_eq!(arr.get(&mut store, len - 2).unwrap().i32(), Some(0));
 }
+
+#[test]
+fn serialized_wtms0002_starts_with_elf_and_zero_copy_file_range_roundtrips() {
+    use std::io::Write;
+
+    let engine = default_engine();
+    let wasm = parse_wat(
+        r#"
+        (module
+          (func (export "add") (param i32 i32) (result i32)
+            (i32.add (local.get 0) (local.get 1)))
+        )
+        "#,
+    );
+    let orig = Module::new(&engine, &wasm).expect("compile");
+    let serialized = orig.serialize().expect("serialize");
+    assert_eq!(
+        &serialized[..4],
+        b"\x7fELF",
+        "WTMS0002 must place raw ELF64 .so at offset 0 for zero-copy page-aligned mmap"
+    );
+    assert_eq!(&serialized[serialized.len() - 8..], b"WTMS0002");
+
+    // Write serialized module at a 64 KiB-aligned file offset with non-zero prefix/suffix.
+    let dir = std::env::temp_dir().join(format!(
+        "wtime-wtms0002-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bundle.bin");
+    let offset = 64 * 1024u64;
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&vec![0xAAu8; offset as usize]).unwrap();
+        f.write_all(&serialized).unwrap();
+        f.write_all(&[0x55u8; 4099]).unwrap();
+    }
+
+    let f = std::fs::File::open(&path).unwrap();
+    let loaded =
+        unsafe { Module::deserialize_open_file_range(&engine, f, offset, serialized.len()) }
+            .expect("deserialize_open_file_range");
+    // Unlink file immediately: kernel keeps the open backing fd valid for both mapping & re-serialize.
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut store = Store::new(&engine, ());
+    let inst = Instance::new(&mut store, &loaded, &[]).expect("instantiate");
+    let add = inst
+        .get_typed_func::<(i32, i32), i32>(&mut store, "add")
+        .expect("add export");
+    assert_eq!(add.call(&mut store, (19, 23)).unwrap(), 42);
+
+    // Re-serializing a zero-copy file-backed Module must produce byte-identical output.
+    let reserialized = loaded.serialize().expect("re-serialize file-backed module");
+    assert_eq!(reserialized, serialized);
+
+    // Verify backwards compatibility with legacy WTMS0001 leading-header format.
+    let tail = &serialized[serialized.len() - 20..];
+    let ver_len = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+    let so_len = u64::from_le_bytes(tail[4..12].try_into().unwrap()) as usize;
+    let ver = &serialized[so_len..so_len + ver_len];
+    let so = &serialized[..so_len];
+    let mut v1 = Vec::with_capacity(serialized.len());
+    v1.extend_from_slice(b"WTMS0001");
+    v1.extend_from_slice(&(ver_len as u32).to_le_bytes());
+    v1.extend_from_slice(ver);
+    v1.extend_from_slice(&(so_len as u64).to_le_bytes());
+    v1.extend_from_slice(so);
+    let legacy = unsafe { Module::deserialize(&engine, &v1) }.expect("deserialize legacy WTMS0001");
+    let legacy_inst = Instance::new(&mut store, &legacy, &[]).expect("instantiate legacy");
+    let legacy_add = legacy_inst
+        .get_typed_func::<(i32, i32), i32>(&mut store, "add")
+        .expect("legacy add");
+    assert_eq!(legacy_add.call(&mut store, (100, 23)).unwrap(), 123);
+}
+
+#[test]
+fn gc_semispace_stays_bounded_under_garbage_and_shrinks_after_burst() {
+    let mut cfg = Config::new();
+    cfg.collector(Collector::Copying)
+        .wasm_gc(true)
+        .gc_heap_initial_size(256 * 1024);
+    let engine = Engine::new(&cfg).expect("engine");
+    let mut store = Store::new(&engine, ());
+    store.limiter(|_| {
+        Box::leak(Box::new(
+            StoreLimitsBuilder::new()
+                .memory_size(16 * 1024 * 1024)
+                .build(),
+        ))
+    });
+    let arr_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, StorageType::I8));
+    let pre = ArrayRefPre::new(&mut store, arr_ty);
+
+    // Steady-state garbage allocation: 200 * 32 KiB = 6.4 MiB with 0 live objects.
+    // Because the semi-space must not double on pre-GC garbage, GC triggers regularly and
+    // stays near `init_cap` (256 KiB) instead of growing to 16 MiB.
+    for _ in 0..200 {
+        let mut scope = RootScope::new(&mut store);
+        let arr = ArrayRef::new(&mut scope, &pre, &Val::I32(7), 32 * 1024).expect("alloc 32KiB");
+        assert_eq!(arr.len(&scope).unwrap(), 32 * 1024);
+    }
+    assert!(
+        store.gc_count() >= 10,
+        "expected >= 10 collections at bounded 256 KiB semi-space, got {}",
+        store.gc_count()
+    );
+
+    // Transient 4 MiB burst grows the semi-space, then drops and shrinks cleanly on subsequent GCs.
+    {
+        let mut scope = RootScope::new(&mut store);
+        let big = ArrayRef::new(&mut scope, &pre, &Val::I32(9), 4 * 1024 * 1024).expect("burst");
+        assert_eq!(
+            big.get(&mut scope, 4 * 1024 * 1024 - 1).unwrap().i32(),
+            Some(9)
+        );
+    }
+    store.gc(None).unwrap();
+    store.gc(None).unwrap();
+    let gc_before = store.gc_count();
+    for _ in 0..40 {
+        let mut scope = RootScope::new(&mut store);
+        let _ = ArrayRef::new(&mut scope, &pre, &Val::I32(1), 32 * 1024).expect("post-burst alloc");
+    }
+    assert!(
+        store.gc_count() > gc_before,
+        "semi-space must shrink after burst so 40*32KiB triggers GC again (before={gc_before}, after={})",
+        store.gc_count()
+    );
+}
+
+#[test]
+fn warm_semispace_reuse_zero_initializes_large_arrays() {
+    let mut cfg = Config::new();
+    cfg.collector(Collector::Copying)
+        .wasm_gc(true)
+        .gc_heap_initial_size(2 * 1024 * 1024);
+    let engine = Engine::new(&cfg).expect("engine");
+    let mut store = Store::new(&engine, ());
+    let arr_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, StorageType::I8));
+    let pre = ArrayRefPre::new(&mut store, arr_ty);
+
+    // Dirty both warm semi-spaces with non-zero bytes across several automatic bump-alloc GCs.
+    for _ in 0..40 {
+        let mut scope = RootScope::new(&mut store);
+        let arr = ArrayRef::new(&mut scope, &pre, &Val::I32(0x5A), 256 * 1024).expect("dirty");
+        assert_eq!(arr.get(&mut scope, 123_456).unwrap().i32(), Some(0x5A));
+    }
+    assert!(store.gc_count() >= 3);
+
+    // Now allocate > 1 MiB zero-initialized arrays inside the reused warm semi-space AND
+    // spanning past the warm watermark; every byte must read back as 0.
+    for &len in &[1_500_000u32, 3_000_000u32] {
+        let mut scope = RootScope::new(&mut store);
+        let z = ArrayRef::new(&mut scope, &pre, &Val::I32(0), len).expect("zero alloc");
+        let mut buf = vec![0xFFu8; len as usize];
+        z.copy_to_i8_slice(&mut scope, &mut buf).unwrap();
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "warm semi-space reuse leaked non-zero bytes into {len}-byte zero array"
+        );
+    }
+}

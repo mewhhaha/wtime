@@ -189,6 +189,10 @@ fn free_interrupt_slot(idx: usize) {
 pub(crate) struct InterruptState {
     mu: Mutex<Vec<InterruptRegion>>,
     interrupted: AtomicBool,
+    /// `true` whenever `interrupt()` has `PROT_NONE`'d one or more regions and they have not yet
+    /// been restored via `cancel()` or `restore_all_rw()`. Lets `restore_all_rw()` skip locking
+    /// and `mprotect` completely on the hot GC path when no interrupt has fired.
+    any_protected: AtomicBool,
 }
 
 struct InterruptRegion {
@@ -222,6 +226,7 @@ impl InterruptHandle {
             state: Arc::new(InterruptState {
                 mu: Mutex::new(Vec::new()),
                 interrupted: AtomicBool::new(false),
+                any_protected: AtomicBool::new(false),
             }),
         }
     }
@@ -262,6 +267,7 @@ impl InterruptHandle {
     pub fn interrupt(&self) {
         self.state.interrupted.store(true, Ordering::Release);
         let regions = self.state.mu.lock().unwrap_or_else(|e| e.into_inner());
+        self.state.any_protected.store(true, Ordering::Release);
         for r in regions.iter() {
             if r.base == 0 || r.rw_len == 0 {
                 continue;
@@ -282,6 +288,10 @@ impl InterruptHandle {
     pub fn cancel(&self) {
         self.state.interrupted.store(false, Ordering::Release);
         let regions = self.state.mu.lock().unwrap_or_else(|e| e.into_inner());
+        self.state.interrupted.store(false, Ordering::Release);
+        if !self.state.any_protected.load(Ordering::Acquire) {
+            return;
+        }
         for r in regions.iter() {
             if r.base == 0 || r.rw_len == 0 {
                 continue;
@@ -298,11 +308,21 @@ impl InterruptHandle {
                 );
             }
         }
+        self.state.any_protected.store(false, Ordering::Release);
     }
 
     /// Restores RW permissions on all regions after trapping or before host GC/memory operations.
+    #[inline]
     pub(crate) fn restore_all_rw(&self) {
+        if !self.state.any_protected.load(Ordering::Acquire)
+            && !self.state.interrupted.load(Ordering::Acquire)
+        {
+            return;
+        }
         let regions = self.state.mu.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.state.any_protected.load(Ordering::Acquire) {
+            return;
+        }
         for r in regions.iter() {
             if r.base == 0 || r.rw_len == 0 {
                 continue;
@@ -318,6 +338,7 @@ impl InterruptHandle {
                 );
             }
         }
+        self.state.any_protected.store(false, Ordering::Release);
     }
 
     #[inline]
