@@ -36,7 +36,7 @@ pub struct StoreLimits {
 impl Default for StoreLimits {
     fn default() -> Self {
         Self {
-            memory_size: 1 << 30,
+            memory_size: usize::MAX,
             table_elements: 10_000_000,
             instances: 10_000,
             tables: 10_000,
@@ -275,7 +275,9 @@ impl StoreInner {
     pub(crate) fn new(engine: &Engine, user_data_ptr: *mut ()) -> Result<Box<Self>> {
         let cfg = engine.config();
         let interrupt = InterruptHandle::new();
-        let heap_cap = cfg.gc_heap_reservation.min(1 << 30) as usize;
+        let heap_cap =
+            cfg.gc_heap_reservation
+                .min((crate::gc::SEMI_SPACE_RESERVE_BYTES - 4096) as u64) as usize;
         let init_gc = cfg.gc_heap_initial_size.min(heap_cap as u64) as usize;
         let gc = GcHeap::new(init_gc, heap_cap, interrupt.clone())?;
 
@@ -325,7 +327,7 @@ impl StoreInner {
             user_data_ptr,
             interrupt,
             gc,
-            memory_limit_bytes: 1 << 30,
+            memory_limit_bytes: usize::MAX,
             table_elements_limit: 10_000_000,
             instances: Vec::new(),
             memories: Vec::new(),

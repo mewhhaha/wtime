@@ -8,11 +8,15 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_arch = "aarch64")]
+use wtime_aot::aarch64::{A64CompileOptions, compile_wasm_to_aarch64_so};
+#[cfg(target_arch = "x86_64")]
 use wtime_aot::x64::lower::TargetIsa;
 use wtime_aot::x64::module::X64Target;
 use wtime_aot::x64::store_rt::{
     STORE_ABI_VERSION, StoreModuleMeta, decode_store_metadata, ty_to_code, val_type_to_machine_ty,
 };
+#[cfg(target_arch = "x86_64")]
 use wtime_aot::x64::{X64CompileOptions, compile_wasm_to_x64_so};
 
 use crate::abi::{StoreModuleDesc, WtStoreExportTrampFn, WtStoreGetDescFn, WtStoreInitInstanceFn};
@@ -542,28 +546,52 @@ impl Module {
 
 pub(crate) fn compile_wasm_so(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<u8>> {
     let cfg = engine.config();
+    let max_gc_bytes = cfg
+        .gc_heap_reservation
+        .min(crate::gc::SEMI_SPACE_RESERVE_BYTES as u64);
     #[cfg(target_arch = "x86_64")]
-    let isa = TargetIsa {
-        has_abm_bmi1: std::is_x86_feature_detected!("lzcnt")
-            && std::is_x86_feature_detected!("bmi1"),
-        has_bmi2: std::is_x86_feature_detected!("bmi2"),
-        has_avx2: std::is_x86_feature_detected!("avx2"),
-        has_avx512: false,
-    };
-    #[cfg(not(target_arch = "x86_64"))]
-    let isa = TargetIsa::default();
-    let opts = X64CompileOptions {
-        target: X64Target::StoreCdylib,
-        isa,
-        opt: cfg.opt_level != OptLevel::None,
-        verify: false,
-        jobs: if cfg.parallel_compilation { 0 } else { 1 },
-        gc_initial_heap_bytes: cfg.gc_heap_initial_size,
-        gc_max_heap_bytes: cfg.gc_heap_reservation.min(1 << 30),
-        ..X64CompileOptions::default()
-    };
-    compile_wasm_to_x64_so(wasm_bytes, &opts)
-        .map_err(|e| Error::msg(format!("wtime-aot x64 compile failed: {e}")))
+    {
+        let isa = TargetIsa {
+            has_abm_bmi1: std::is_x86_feature_detected!("lzcnt")
+                && std::is_x86_feature_detected!("bmi1"),
+            has_bmi2: std::is_x86_feature_detected!("bmi2"),
+            has_avx2: std::is_x86_feature_detected!("avx2"),
+            has_avx512: false,
+        };
+        let opts = X64CompileOptions {
+            target: X64Target::StoreCdylib,
+            isa,
+            opt: cfg.opt_level != OptLevel::None,
+            verify: false,
+            jobs: if cfg.parallel_compilation { 0 } else { 1 },
+            gc_initial_heap_bytes: cfg.gc_heap_initial_size,
+            gc_max_heap_bytes: max_gc_bytes,
+            ..X64CompileOptions::default()
+        };
+        compile_wasm_to_x64_so(wasm_bytes, &opts)
+            .map_err(|e| Error::msg(format!("wtime-aot x64 compile failed: {e}")))
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let opts = A64CompileOptions {
+            target: X64Target::StoreCdylib,
+            optimize: cfg.opt_level != OptLevel::None,
+            jobs: if cfg.parallel_compilation { 0 } else { 1 },
+            gc_initial_heap_bytes: cfg.gc_heap_initial_size,
+            gc_max_heap_bytes: max_gc_bytes,
+            ..A64CompileOptions::default()
+        };
+        compile_wasm_to_aarch64_so(wasm_bytes, &opts)
+            .map_err(|e| Error::msg(format!("wtime-aot aarch64 compile failed: {e}")))
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (wasm_bytes, max_gc_bytes);
+        Err(Error::msg(format!(
+            "wtime-aot-host: unsupported target architecture `{}`",
+            std::env::consts::ARCH
+        )))
+    }
 }
 
 pub(crate) fn serialize_so_bytes(engine: &Engine, so_bytes: &[u8]) -> Vec<u8> {
@@ -582,7 +610,13 @@ fn engine_version_bytes(engine: &Engine) -> Vec<u8> {
     out.extend_from_slice(&engine.precompile_compatibility_hash().to_le_bytes());
     match &engine.config().module_version {
         crate::config::ModuleVersionStrategy::WasmtimeVersion => {
-            out.extend_from_slice(format!("wtime-store-v{STORE_ABI_VERSION}").as_bytes());
+            out.extend_from_slice(
+                format!(
+                    "wtime-store-{}-v{STORE_ABI_VERSION}",
+                    std::env::consts::ARCH
+                )
+                .as_bytes(),
+            );
         }
         crate::config::ModuleVersionStrategy::Custom(s) => {
             out.extend_from_slice(s.as_bytes());

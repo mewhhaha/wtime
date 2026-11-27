@@ -1606,6 +1606,7 @@ fn build_aarch64(
         gen_fingerprint: gen_sha,
         pgo_gen_path: pgo_gen.map(Path::to_path_buf),
         pgo_use: pgo_use.cloned(),
+        ..Default::default()
     };
     let elf_bytes =
         crate::aarch64::compile_wasm_to_aarch64(&wasm, &compile_opts).map_err(|e| match e {

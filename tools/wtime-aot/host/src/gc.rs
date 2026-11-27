@@ -24,16 +24,18 @@ use crate::types::{
     ArrayType, CanonComposite, CanonicalTypeRegistry, ExnType, StructType, ValType,
 };
 
-/// Each semi-space reserves 1 GiB of virtual address space inside a single contiguous 2 GiB arena:
-/// - Space A: `[arena_base + 64, arena_base + 1 GiB)`
-/// - Space B: `[arena_base + 1 GiB + 64, arena_base + 2 GiB)`
+/// Each semi-space reserves 8 GiB of virtual address space inside a single contiguous 16 GiB arena:
+/// - Space A: `[arena_base + 64, arena_base + 8 GiB)`
+/// - Space B: `[arena_base + 8 GiB + 64, arena_base + 16 GiB)`
 ///
-/// Skipping the first 64 bytes of each space guarantees every live GC object pointer `p` has
-/// a nonzero, 8-byte-aligned 32-bit raw handle `raw = (p - arena_base) as u32` with `bit 0 == 0`
-/// (distinct from null `0` and `i31` `bit 0 == 1`), and moving between Space A and Space B flips
-/// bit 30 so every surviving object changes its raw handle across collection!
-pub const SEMI_SPACE_RESERVE_BYTES: usize = 1usize << 30; // 1 GiB
-const ARENA_TOTAL_BYTES: usize = SEMI_SPACE_RESERVE_BYTES * 2; // 2 GiB
+/// Skipping the first 64 bytes of each space guarantees every live 8-byte-aligned GC object pointer
+/// `p` has an offset `off = p - arena_base` in `[64, 16 GiB)` with `off & 7 == 0`. Encoding its
+/// 32-bit raw handle as `raw = (off >> 2) as u32` (decoded as `arena_base + ((raw as u64) << 2)`)
+/// guarantees `raw != 0`, `raw & 1 == 0` (distinct from null `0` and `i31` `bit 0 == 1`), and
+/// moving between Space A (`off < 8 GiB`) and Space B (`off >= 8 GiB`) flips bit 31 so every
+/// surviving object changes its raw handle across collection!
+pub const SEMI_SPACE_RESERVE_BYTES: usize = 8usize << 30; // 8 GiB
+const ARENA_TOTAL_BYTES: usize = SEMI_SPACE_RESERVE_BYTES * 2; // 16 GiB
 const SPACE_START_PAD: usize = 64;
 
 /// A 31-bit signed integer stored unboxed in Wasm GC `i31ref` slots (`(val << 1) | 1`).
@@ -207,7 +209,7 @@ impl Drop for StoreExnBox {
 /// Per-`Store` dual-semi-space Cheney GC heap + root tables + Weak/Ephemeron/Extern arenas.
 pub(crate) struct GcHeap {
     pub(crate) arena_base: usize,
-    /// Which half is currently active (`false` = Space A @ +0, `true` = Space B @ +1 GiB).
+    /// Which half is currently active (`false` = Space A @ +0, `true` = Space B @ +8 GiB).
     pub(crate) active_is_b: bool,
     /// Committed bytes of the active semi-space (aligned to 4 KiB).
     pub(crate) from_cap: usize,
@@ -263,13 +265,13 @@ impl GcHeap {
                 std::ptr::null_mut(),
                 ARENA_TOTAL_BYTES,
                 libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 -1,
                 0,
             )
         };
         if base == libc::MAP_FAILED {
-            return Err(Error::msg("failed to reserve 2 GiB GC virtual arena"));
+            return Err(Error::msg("failed to reserve 16 GiB GC virtual arena"));
         }
         let arena_base = base as usize;
         // Commit Space A `[arena_base, arena_base + SPACE_START_PAD + init_cap)`.
@@ -354,8 +356,12 @@ impl GcHeap {
             word as u32
         } else {
             let off = word.wrapping_sub(self.arena_base as u64);
-            debug_assert!(off > 0 && off < (ARENA_TOTAL_BYTES as u64) && (off & 7) == 0);
-            off as u32
+            debug_assert!(
+                off >= SPACE_START_PAD as u64 && off < (ARENA_TOTAL_BYTES as u64) && (off & 7) == 0
+            );
+            let raw = (off >> 2) as u32;
+            debug_assert!(raw != 0 && (raw & 1) == 0);
+            raw
         }
     }
 
@@ -367,7 +373,7 @@ impl GcHeap {
         } else if (raw & 1) != 0 {
             u64::from(raw)
         } else {
-            (self.arena_base as u64).wrapping_add(u64::from(raw))
+            (self.arena_base as u64).wrapping_add(u64::from(raw) << 2)
         }
     }
 
@@ -2001,7 +2007,21 @@ impl ArrayRef {
                     | Val::ExternRef(None)
                     | Val::FuncRef(None)
             ) {
-                unsafe { std::ptr::write_bytes((ptr + 8) as *mut u8, 0, data_bytes as usize) };
+                let data_start = ptr + 8;
+                if data_bytes <= (1u64 << 20) {
+                    unsafe { std::ptr::write_bytes(data_start as *mut u8, 0, data_bytes as usize) };
+                } else {
+                    // Bump-allocated pages beyond the current partial page are freshly `mmap`ped
+                    // or `MADV_DONTNEED`ed anonymous memory and are already guaranteed OS-zeroed;
+                    // zero only the leading partial page to avoid faulting multi-GiB zero arrays.
+                    let first_page_end = (data_start + 4095) & !4095;
+                    let head_len = first_page_end.saturating_sub(data_start).min(data_bytes);
+                    if head_len > 0 {
+                        unsafe {
+                            std::ptr::write_bytes(data_start as *mut u8, 0, head_len as usize);
+                        }
+                    }
+                }
             } else {
                 for i in 0..len {
                     let off = 8u64 + u64::from(i) * elem_sz;

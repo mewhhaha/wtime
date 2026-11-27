@@ -18,16 +18,28 @@ use super::simd_lower::{
     emit_a64_v128_bin, emit_a64_v128_shift, emit_a64_v128_shuffle, emit_a64_v128_to_i32,
     emit_a64_v128_un,
 };
+use crate::x64::gc_rt::{GC_OFF_ALLOC_LIMIT, GC_OFF_ALLOC_PTR, GC_OFF_FROM_BASE, GC_OFF_FROM_CAP};
 use crate::x64::ir::{
-    CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, SimdLaneKind,
-    SimdSplatKind, StoreKind, Term, TruncOp, Ty, Val, ValRange, VecElemKind, VecReduceKind,
+    AtomicRmwOp, AtomicWidth, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, GcFieldLoadKind,
+    GcHeapTarget, IntBinOp, IrFunc, LoadKind, Op, SimdLaneKind, SimdSplatKind, StoreKind, Term,
+    TruncOp, Ty, Val, ValRange, VecElemKind, VecReduceKind,
+};
+use crate::x64::module::{
+    GC_DISPLAY_LEN, GC_EXT_I31_TAG_HI, GC_HDR_KIND_ARRAY, GC_HDR_KIND_INTERNAL_EXTERN,
+    GC_HDR_KIND_STRUCT, GcCanonType, GcCompositeInfo, GcStorageKind, X64Module,
 };
 use crate::x64::{
-    CtxLayout, HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW,
-    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT, HELPER_TABLE_COPY,
-    HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT, OFF_RET_SPILL_PTR, OFF_SCRATCH_TMP,
-    OFF_SCRATCH_V128, OFF_STACK_FLOOR, TRAP_CALL_STACK, TRAP_DIV_ZERO, TRAP_INDIRECT_CALL,
-    TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
+    CtxLayout, HELPER_ATOMIC_NOTIFY, HELPER_ATOMIC_WAIT, HELPER_EXTRA_MEM_COPY,
+    HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_GC_ARRAY_COPY, HELPER_GC_ARRAY_FILL,
+    HELPER_GC_ARRAY_FILL_RAW, HELPER_GC_ARRAY_INIT_DATA, HELPER_GC_ARRAY_INIT_ELEM,
+    HELPER_GC_COLLECT, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT,
+    HELPER_STORE_EXN_ALLOC, HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW,
+    HELPER_TABLE_INIT, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_RESERVE_BYTES, OFF_RET_SPILL_PTR,
+    OFF_SCRATCH_TMP, OFF_SCRATCH_V128, OFF_STACK_FLOOR, OFF_STORE_CANON_MAP, OFF_STORE_FUNC_REFS,
+    OFF_STORE_MEM_DESCS, OFF_STORE_PTR, OFF_STORE_TABLE_DESCS, OFF_STORE_TAG_IDS,
+    STORE_OFF_EXN_ACTIVE, STORE_OFF_RET_SPILL_PTR, STORE_OFF_TYPE_DESCS_PTR, TRAP_ALLOC_FAILED,
+    TRAP_CALL_STACK, TRAP_DIV_ZERO, TRAP_INDIRECT_CALL, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV,
+    TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNALIGNED_ATOMIC, TRAP_UNREACHABLE,
 };
 
 pub const CTX_REG: Reg = Reg::X28;
@@ -302,6 +314,7 @@ struct LowerA64<'a> {
     ir: &'a IrFunc,
     alloc: &'a A64AllocResult,
     layout: &'a CtxLayout,
+    module: &'a X64Module,
     asm: A64Asm,
     bb_labels: Vec<Label>,
     trap_oob: Option<Label>,
@@ -312,11 +325,15 @@ struct LowerA64<'a> {
     trap_inv_conv: Option<Label>,
     trap_unreach: Option<Label>,
     trap_stack: Option<Label>,
+    trap_alloc: Option<Label>,
+    trap_unaligned: Option<Label>,
     trap_prop: Option<Label>,
     epilogue_ok: Option<Label>,
     epilogue_trap: Option<Label>,
     edge_tramps: Vec<(Label, u32, ValRange)>,
     edge_tramp_cache: HashMap<(u32, u32, u32), Label>,
+    cur_bb: u32,
+    cur_inst: u32,
     /// Lazily populated map of SSA `Val`s whose AArch64 defining write guarantees bits `32..63 == 0`,
     /// allowing redundant `uxtw` on `I32WrapI64`/`I64ExtendI32U` to be elided.
     val_upper32_zero: Option<Vec<bool>>,
@@ -826,6 +843,14 @@ impl<'a> LowerA64<'a> {
     fn trap_stack_lbl(&mut self) -> Label {
         *self.trap_stack.get_or_insert_with(|| self.asm.new_label())
     }
+    fn trap_alloc_lbl(&mut self) -> Label {
+        *self.trap_alloc.get_or_insert_with(|| self.asm.new_label())
+    }
+    fn trap_unaligned_lbl(&mut self) -> Label {
+        *self
+            .trap_unaligned
+            .get_or_insert_with(|| self.asm.new_label())
+    }
     fn trap_prop_lbl(&mut self) -> Label {
         *self.trap_prop.get_or_insert_with(|| self.asm.new_label())
     }
@@ -833,6 +858,135 @@ impl<'a> LowerA64<'a> {
         *self
             .epilogue_trap
             .get_or_insert_with(|| self.asm.new_label())
+    }
+
+    #[inline]
+    fn frame_caller_ret_off(&self) -> u32 {
+        debug_assert!(self.alloc.has_calls);
+        (self.alloc.saved_fp_lr_off + 8) as u32
+    }
+
+    /// Records a machine-code GC safepoint at the current `asm.pos()` (immediately after a `bl`/`blr`).
+    fn record_gc_safepoint(&mut self, inst_idx: u32) -> Result<(), String> {
+        if !self.ir.uses_gc {
+            return Ok(());
+        }
+        let plan = self
+            .alloc
+            .safepoint_for(self.cur_bb, inst_idx)
+            .ok_or_else(|| {
+                format!(
+                    "aarch64: missing SafepointPlan for fn {} bb{} inst {inst_idx}",
+                    self.ir.func_index, self.cur_bb
+                )
+            })?;
+        self.asm.record_safepoint(
+            self.frame_caller_ret_off(),
+            plan.gc_slots.clone(),
+            plan.ext_slots.clone(),
+        );
+        Ok(())
+    }
+
+    /// Publishes caller's overflow return buffer pointer (`reg`, must not be `SGP3`).
+    fn emit_publish_ret_spill(&mut self, reg: Reg) {
+        if self.layout.is_store {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            emit_store_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(reg),
+                None,
+                SGP3,
+                STORE_OFF_RET_SPILL_PTR,
+                SGP3,
+            );
+        } else {
+            emit_store_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(reg),
+                None,
+                CTX_REG,
+                OFF_RET_SPILL_PTR,
+                SGP3,
+            );
+        }
+    }
+
+    /// Saves caller's `CTX_REG` (`X28`) and calls imported function `f` via `StoreFuncRef*`,
+    /// swapping `X28/X27/X26` while preserving all Wasm argument registers (`X0..X7, V0..V7`).
+    fn emit_store_call_import(&mut self, f: u32) {
+        let slot = self
+            .alloc
+            .store_saved_ctx_off
+            .expect("store_saved_ctx_off missing");
+        emit_store_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(CTX_REG),
+            None,
+            Reg::SP,
+            slot,
+            SGP3,
+        );
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            OFF_STORE_FUNC_REFS,
+            SGP3,
+        );
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            SGP1,
+            (f as i32) * 8,
+            SGP3,
+        );
+        self.asm.ldr_uimm(true, CTX_REG, SGP1, 8);
+        self.asm
+            .ldr_uimm(true, MEM_BASE_REG, CTX_REG, OFF_MEM_BASE as u32);
+        self.asm
+            .ldr_uimm(true, SGP2, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+        self.asm.ldr_uimm(true, MEM_LEN_REG, SGP2, 8);
+        self.asm.ldr_uimm(true, SGP1, SGP1, 0);
+        self.asm.blr(SGP1);
+    }
+
+    /// Restores caller's `X28`, `X27`, and `X26` immediately after a cross-module or indirect call.
+    /// Uses ONLY `X28, X27, X26, SGP2, SGP3` — preserves `W16` (`SGP1` trap code) and all return regs!
+    fn emit_store_restore_ctx(&mut self) {
+        let slot = self
+            .alloc
+            .store_saved_ctx_off
+            .expect("store_saved_ctx_off missing");
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(CTX_REG),
+            None,
+            Reg::SP,
+            slot,
+            SGP3,
+        );
+        self.asm
+            .ldr_uimm(true, MEM_BASE_REG, CTX_REG, OFF_MEM_BASE as u32);
+        self.asm
+            .ldr_uimm(true, SGP2, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+        self.asm.ldr_uimm(true, MEM_LEN_REG, SGP2, 8);
     }
 
     fn emit_epilogue_teardown(&mut self) {
@@ -857,31 +1011,6 @@ impl<'a> LowerA64<'a> {
             }
         }
         let mut gp_off = self.alloc.saved_gp_base;
-        if self.alloc.has_calls {
-            if (gp_off & 7) == 0 && (-512..=504).contains(&gp_off) {
-                self.asm.ldp_x(Reg::FP, Reg::LR, Reg::SP, gp_off);
-            } else {
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(Reg::FP),
-                    None,
-                    Reg::SP,
-                    gp_off,
-                    SGP3,
-                );
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(Reg::LR),
-                    None,
-                    Reg::SP,
-                    gp_off + 8,
-                    SGP3,
-                );
-            }
-            gp_off += 16;
-        }
         let gps = &self.alloc.used_callee_gp;
         let mut gi = 0usize;
         while gi < gps.len() {
@@ -901,6 +1030,31 @@ impl<'a> LowerA64<'a> {
                 );
                 gp_off += 8;
                 gi += 1;
+            }
+        }
+        if self.alloc.has_calls {
+            let fp_lr_off = self.alloc.saved_fp_lr_off;
+            if (fp_lr_off & 7) == 0 && (-512..=504).contains(&fp_lr_off) {
+                self.asm.ldp_x(Reg::FP, Reg::LR, Reg::SP, fp_lr_off);
+            } else {
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::FP),
+                    None,
+                    Reg::SP,
+                    fp_lr_off,
+                    SGP3,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::LR),
+                    None,
+                    Reg::SP,
+                    fp_lr_off + 8,
+                    SGP3,
+                );
             }
         }
         if self.alloc.frame_size > 0 {
@@ -932,7 +1086,7 @@ impl<'a> LowerA64<'a> {
         offset: u64,
         access_bytes: u64,
     ) -> (Reg, u64) {
-        if !self.layout.spectre_mitigations {
+        if !self.layout.spectre_mitigations || (self.layout.is_store && self.module.memory_shared) {
             self.emit_bounds_check(addr, offset.saturating_add(access_bytes));
             return (addr, offset);
         }
@@ -1016,7 +1170,6 @@ impl<'a> LowerA64<'a> {
     /// into `SGP2`, using branchless `csel + csdb` clamping under `spectre_mitigations` when
     /// `mem_min_bytes >= access_bytes`.
     fn emit_extra_mem_ptr(&mut self, mem: u32, addr: Val, offset: u64, access_bytes: u64) {
-        let desc_off = self.layout.mem_desc_off(mem);
         let is64 = self.layout.mem_is64(mem);
         let ar = self.gp_read(addr, SGP1);
         if is64 {
@@ -1027,6 +1180,70 @@ impl<'a> LowerA64<'a> {
             self.asm.uxtw(SGP1, ar);
         }
         let oob = self.trap_oob_lbl();
+        if self.layout.is_store {
+            if offset != 0 {
+                if offset < 4096 && !is64 {
+                    self.asm.add_imm(true, SGP1, SGP1, offset as u16);
+                } else {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.adds_r(true, SGP1, SGP1, SGP3);
+                    if is64 || offset > u32::MAX as u64 {
+                        self.asm.b_cond(Cond::Hs, oob);
+                    }
+                }
+            }
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                OFF_STORE_MEM_DESCS,
+                SGP2,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                SGP3,
+                (mem as i32) * 8,
+                SGP2,
+            );
+            self.asm.mov_imm64(SGP2, access_bytes);
+            self.asm.adds_r(true, SGP2, SGP1, SGP2);
+            if is64 || offset.saturating_add(access_bytes) > u32::MAX as u64 {
+                self.asm.b_cond(Cond::Hs, oob);
+            }
+            // Compare end (SGP2) against desc->len ([SGP3 + 8]).
+            self.asm.ldr_uimm(true, SGP3, SGP3, 8);
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hi, oob);
+            self.emit_speculation_barrier();
+            // Reload desc->base ([ [CTX_REG + OFF_STORE_MEM_DESCS][mem] + 0 ]) and add SGP1.
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                OFF_STORE_MEM_DESCS,
+                SGP2,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                SGP3,
+                (mem as i32) * 8,
+                SGP2,
+            );
+            self.asm.ldr_uimm(true, SGP2, SGP3, 0);
+            self.asm.add_r(true, SGP2, SGP2, SGP1);
+            return;
+        }
+        let desc_off = self.layout.mem_desc_off(mem);
         if self.layout.spectre_mitigations
             && (1..4096).contains(&access_bytes)
             && self.layout.mem_min_bytes_idx(mem) >= access_bytes
@@ -1135,7 +1352,18 @@ impl<'a> LowerA64<'a> {
         }
         if end_off == 0 {
             self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
-            self.asm.b_cond(Cond::Hi, oob);
+            if self.layout.is_store && self.module.memory_shared {
+                let lbl_ok = self.asm.new_label();
+                self.asm.b_cond(Cond::Ls, lbl_ok);
+                self.asm
+                    .ldr_uimm(true, MEM_LEN_REG, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+                self.asm.ldr_uimm(true, MEM_LEN_REG, MEM_LEN_REG, 8);
+                self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
+                self.asm.b_cond(Cond::Hi, oob);
+                self.asm.bind(lbl_ok);
+            } else {
+                self.asm.b_cond(Cond::Hi, oob);
+            }
             if with_barrier {
                 self.emit_speculation_barrier();
             }
@@ -1144,7 +1372,7 @@ impl<'a> LowerA64<'a> {
         if self.layout.memory64 {
             // Fast 1-branch wrap-proof check when `mem_min_bytes >= end_off` (so `MEM_LEN_REG - end_off`
             // cannot underflow, because linear memory never shrinks): `addr <=u (MEM_LEN_REG - end_off)`!
-            if end_off <= self.layout.mem_min_bytes {
+            if !self.module.memory_shared && end_off <= self.layout.mem_min_bytes {
                 if end_off < 4096 {
                     self.asm.sub_imm(true, SGP3, MEM_LEN_REG, end_off as u16);
                 } else {
@@ -1162,7 +1390,18 @@ impl<'a> LowerA64<'a> {
             self.asm.adds_r(true, SGP2, SGP2, SGP3);
             self.asm.b_cond(Cond::Hs, oob); // carry set => 64-bit unsigned overflow!
             self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
-            self.asm.b_cond(Cond::Hi, oob);
+            if self.layout.is_store && self.module.memory_shared {
+                let lbl_ok = self.asm.new_label();
+                self.asm.b_cond(Cond::Ls, lbl_ok);
+                self.asm
+                    .ldr_uimm(true, MEM_LEN_REG, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+                self.asm.ldr_uimm(true, MEM_LEN_REG, MEM_LEN_REG, 8);
+                self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
+                self.asm.b_cond(Cond::Hi, oob);
+                self.asm.bind(lbl_ok);
+            } else {
+                self.asm.b_cond(Cond::Hi, oob);
+            }
             if with_barrier {
                 self.emit_speculation_barrier();
             }
@@ -1175,9 +1414,853 @@ impl<'a> LowerA64<'a> {
             self.asm.add_r(true, SGP2, SGP2, SGP3);
         }
         self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
-        self.asm.b_cond(Cond::Hi, oob);
+        if self.layout.is_store && self.module.memory_shared {
+            let lbl_ok = self.asm.new_label();
+            self.asm.b_cond(Cond::Ls, lbl_ok);
+            self.asm
+                .ldr_uimm(true, MEM_LEN_REG, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+            self.asm.ldr_uimm(true, MEM_LEN_REG, MEM_LEN_REG, 8);
+            self.asm.cmp_r(true, SGP2, MEM_LEN_REG);
+            self.asm.b_cond(Cond::Hi, oob);
+            self.asm.bind(lbl_ok);
+        } else {
+            self.asm.b_cond(Cond::Hi, oob);
+        }
         if with_barrier {
             self.emit_speculation_barrier();
+        }
+    }
+
+    /// Computes and validates the effective host pointer for an atomic access of `width` bytes
+    /// on memory `mem`, checking natural alignment (`TRAP_UNALIGNED_ATOMIC`) and live bounds
+    /// (`TRAP_OOB`). Leaves the host pointer in `SGP1 (X16)`.
+    fn emit_atomic_ea(&mut self, mem: u32, addr: Val, offset: u64, width: u32) {
+        let is64 = self.module.mem_is_64(mem);
+        let trap_oob = self.trap_oob_lbl();
+        let ar = self.gp_read(addr, SGP1);
+        if is64 {
+            if ar != SGP1 {
+                self.asm.mov_r(true, SGP1, ar);
+            }
+        } else {
+            self.asm.uxtw(SGP1, ar);
+        }
+        if offset != 0 {
+            if is64 || offset > u32::MAX as u64 {
+                self.asm.mov_imm64(SGP2, offset);
+                self.asm.adds_r(true, SGP1, SGP1, SGP2);
+                self.asm.b_cond(Cond::Hs, trap_oob);
+            } else if offset < 4096 {
+                self.asm.add_imm(true, SGP1, SGP1, offset as u16);
+            } else {
+                self.asm.mov_imm64(SGP2, offset);
+                self.asm.add_r(true, SGP1, SGP1, SGP2);
+            }
+        }
+        if width > 1 {
+            let trap_unaligned = self.trap_unaligned_lbl();
+            let k = width.trailing_zeros() as u8;
+            self.asm.tst_imm_low_bits(false, SGP1, k);
+            self.asm.b_cond(Cond::Ne, trap_unaligned);
+        }
+        self.asm.mov_imm32(SGP2, width);
+        self.asm.adds_r(true, SGP2, SGP1, SGP2);
+        if is64 {
+            self.asm.b_cond(Cond::Hs, trap_oob);
+        }
+        if self.layout.is_store {
+            if mem == 0 {
+                self.asm
+                    .ldr_uimm(true, SGP3, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+                self.asm.ldr_uimm(true, SGP3, SGP3, 8);
+                if self.module.memory_shared {
+                    self.asm.mov_r(true, MEM_LEN_REG, SGP3);
+                }
+                self.asm.cmp_r(true, SGP2, SGP3);
+                self.asm.b_cond(Cond::Hi, trap_oob);
+                self.emit_speculation_barrier();
+                self.asm.add_r(true, SGP1, MEM_BASE_REG, SGP1);
+            } else {
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP3),
+                    None,
+                    CTX_REG,
+                    OFF_STORE_MEM_DESCS,
+                    SGP3,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP3),
+                    None,
+                    SGP3,
+                    (mem as i32) * 8,
+                    SGP3,
+                );
+                self.asm.ldr_uimm(true, SGP3, SGP3, 8);
+                self.asm.cmp_r(true, SGP2, SGP3);
+                self.asm.b_cond(Cond::Hi, trap_oob);
+                self.emit_speculation_barrier();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP3),
+                    None,
+                    CTX_REG,
+                    OFF_STORE_MEM_DESCS,
+                    SGP3,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP3),
+                    None,
+                    SGP3,
+                    (mem as i32) * 8,
+                    SGP3,
+                );
+                self.asm.ldr_uimm(true, SGP2, SGP3, 0);
+                self.asm.add_r(true, SGP1, SGP2, SGP1);
+            }
+            return;
+        }
+        if mem == 0 {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                OFF_MEM_LEN,
+                SGP3,
+            );
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hi, trap_oob);
+            self.emit_speculation_barrier();
+            self.asm.add_r(true, SGP1, MEM_BASE_REG, SGP1);
+        } else {
+            let desc_off = self.layout.mem_desc_off(mem);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                desc_off + 8,
+                SGP3,
+            );
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hi, trap_oob);
+            self.emit_speculation_barrier();
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                desc_off,
+                SGP3,
+            );
+            self.asm.add_r(true, SGP1, SGP3, SGP1);
+        }
+    }
+
+    /// Writes the 32-bit (or zero-extended 64-bit for structs) GC object header word to `[obj_reg + 0]`.
+    /// Clobbers ONLY `SGP1 (X16)` and `SGP3 (X24)`.
+    fn emit_write_gc_header(&mut self, obj_reg: Reg, gt: &GcCanonType, is_struct_64: bool) {
+        if self.layout.is_store {
+            let kind_bits = match gt.composite {
+                GcCompositeInfo::Struct { .. } => GC_HDR_KIND_STRUCT,
+                GcCompositeInfo::Array { .. } => GC_HDR_KIND_ARRAY,
+                GcCompositeInfo::Func => unreachable!(),
+            };
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_CANON_MAP,
+                SGP3,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(SGP1),
+                None,
+                SGP1,
+                (gt.canon_id as i32) * 4,
+                SGP3,
+            );
+            self.asm.lsl_imm(false, SGP1, SGP1, 3);
+            if kind_bits == GC_HDR_KIND_ARRAY {
+                self.asm.orr_imm_2_w(SGP1, SGP1);
+            } else if kind_bits != 0 {
+                self.asm.mov_imm32(SGP3, kind_bits);
+                self.asm.orr_r(false, SGP1, SGP1, SGP3);
+            }
+            self.asm.str_uimm(is_struct_64, SGP1, obj_reg, 0);
+        } else if is_struct_64 {
+            self.asm.mov_imm64(SGP1, u64::from(gt.header_word()));
+            self.asm.str_uimm(true, SGP1, obj_reg, 0);
+        } else {
+            self.asm.mov_imm32(SGP1, gt.header_word());
+            self.asm.str_uimm(false, SGP1, obj_reg, 0);
+        }
+    }
+
+    /// Inline bump-pointer allocation of a fixed `size_bytes` (multiple of 8, `>= 8`) GC object
+    /// with a cold preserve-all `HELPER_GC_COLLECT` safepoint.
+    /// Returns the new object pointer in `SGP2 (X17)` while preserving all allocatable GP/FP regs.
+    fn emit_gc_alloc_fixed(&mut self, size_bytes: u32) -> Result<(), String> {
+        let gc_off = self
+            .layout
+            .gc
+            .as_ref()
+            .ok_or("aarch64: GC alloc without GcCtxLayout")?
+            .gc_state_off;
+        let lbl_have = self.asm.new_label();
+        let trap_alloc = self.trap_alloc_lbl();
+        let sz_i32 =
+            i32::try_from(size_bytes).map_err(|_| "aarch64: fixed GC alloc size exceeds i32")?;
+        if self.layout.is_store {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            self.asm.ldr_uimm(true, SGP2, SGP1, GC_OFF_ALLOC_PTR as u32);
+            self.asm.add_i32_checked(true, SGP2, SGP2, sz_i32, SGP3);
+            self.asm
+                .ldr_uimm(true, SGP3, SGP1, GC_OFF_ALLOC_LIMIT as u32);
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Ls, lbl_have);
+            self.asm.mov_imm64(SGP2, u64::from(size_bytes));
+            self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_GC_COLLECT));
+            self.record_gc_safepoint(self.cur_inst)?;
+            self.asm.cbnz(false, SGP1, trap_alloc);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            self.asm.ldr_uimm(true, SGP2, SGP1, GC_OFF_ALLOC_PTR as u32);
+            self.asm.add_i32_checked(true, SGP2, SGP2, sz_i32, SGP3);
+            self.asm.bind(lbl_have);
+            self.asm.str_uimm(true, SGP2, SGP1, GC_OFF_ALLOC_PTR as u32);
+            self.asm.add_i32_checked(true, SGP2, SGP2, -sz_i32, SGP3);
+            return Ok(());
+        }
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_PTR,
+            SGP3,
+        );
+        self.asm.add_i32_checked(true, SGP1, SGP2, sz_i32, SGP3);
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP3),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_LIMIT,
+            SGP3,
+        );
+        self.asm.cmp_r(true, SGP1, SGP3);
+        self.asm.b_cond(Cond::Ls, lbl_have);
+        self.asm.mov_imm64(SGP2, u64::from(size_bytes));
+        self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_GC_COLLECT));
+        self.record_gc_safepoint(self.cur_inst)?;
+        self.asm.cbnz(false, SGP1, trap_alloc);
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_PTR,
+            SGP3,
+        );
+        self.asm.add_i32_checked(true, SGP1, SGP2, sz_i32, SGP3);
+        self.asm.bind(lbl_have);
+        emit_store_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_PTR,
+            SGP3,
+        );
+        Ok(())
+    }
+
+    /// Inline bump-pointer allocation of a dynamic-length GC array (`align8(8 + len * elem_sz)`)
+    /// with a cold preserve-all `HELPER_GC_COLLECT` safepoint, preserving ALL allocatable regs.
+    /// Stores the freshly allocated `new_obj` pointer into `[CTX_REG + OFF_SCRATCH_TMP]`.
+    fn emit_gc_alloc_array_dyn(&mut self, len_val: Val, elem_sz: u32) -> Result<(), String> {
+        let gc_off = self
+            .layout
+            .gc
+            .as_ref()
+            .ok_or("aarch64: GC array alloc without GcCtxLayout")?
+            .gc_state_off;
+        let lbl_have = self.asm.new_label();
+        let trap_alloc = self.trap_alloc_lbl();
+        let lr = self.gp_read(len_val, SGP1);
+        self.asm.uxtw(SGP2, lr);
+        if elem_sz > 1 {
+            debug_assert!(elem_sz.is_power_of_two());
+            self.asm
+                .lsl_imm(true, SGP2, SGP2, elem_sz.trailing_zeros() as u8);
+        }
+        self.asm.add_imm(true, SGP2, SGP2, 15);
+        self.asm.and_imm_align8(SGP2, SGP2);
+        emit_store_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_SCRATCH_TMP,
+            SGP3,
+        );
+
+        if self.layout.is_store {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            self.asm.ldr_uimm(true, SGP3, SGP1, GC_OFF_ALLOC_PTR as u32);
+            self.asm.adds_r(true, SGP2, SGP3, SGP2);
+            self.asm.b_cond(Cond::Hs, trap_alloc);
+            self.asm
+                .ldr_uimm(true, SGP3, SGP1, GC_OFF_ALLOC_LIMIT as u32);
+            self.asm.cmp_r(true, SGP2, SGP3);
+            self.asm.b_cond(Cond::Ls, lbl_have);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_GC_COLLECT));
+            self.record_gc_safepoint(self.cur_inst)?;
+            self.asm.cbnz(false, SGP1, trap_alloc);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            self.asm.ldr_uimm(true, SGP2, SGP1, GC_OFF_ALLOC_PTR as u32);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            self.asm.add_r(true, SGP2, SGP2, SGP3);
+            self.asm.bind(lbl_have);
+            self.asm.str_uimm(true, SGP2, SGP1, GC_OFF_ALLOC_PTR as u32);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            self.asm.sub_r(true, SGP2, SGP2, SGP3);
+            emit_store_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            return Ok(());
+        }
+
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_PTR,
+            SGP3,
+        );
+        self.asm.adds_r(true, SGP1, SGP1, SGP2);
+        self.asm.b_cond(Cond::Hs, trap_alloc);
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP3),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_LIMIT,
+            SGP3,
+        );
+        self.asm.cmp_r(true, SGP1, SGP3);
+        self.asm.b_cond(Cond::Ls, lbl_have);
+        self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_GC_COLLECT));
+        self.record_gc_safepoint(self.cur_inst)?;
+        self.asm.cbnz(false, SGP1, trap_alloc);
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_PTR,
+            SGP3,
+        );
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_SCRATCH_TMP,
+            SGP3,
+        );
+        self.asm.add_r(true, SGP1, SGP1, SGP2);
+        self.asm.bind(lbl_have);
+        emit_store_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            gc_off + GC_OFF_ALLOC_PTR,
+            SGP3,
+        );
+        emit_load_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_SCRATCH_TMP,
+            SGP3,
+        );
+        self.asm.sub_r(true, SGP1, SGP1, SGP2);
+        emit_store_off(
+            &mut self.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            OFF_SCRATCH_TMP,
+            SGP3,
+        );
+        Ok(())
+    }
+
+    /// Checks whether `actual_cid` (in `SGP2`, zero-extended u32) is a subtype of
+    /// `(target_canon_id, target_depth)` using O(1) Cohen display / overflow table lookup.
+    /// Clobbers `SGP1`, `SGP2`, `SGP3`; jumps to `lbl_false` on mismatch.
+    fn emit_gc_canon_subtype_check(
+        &mut self,
+        type_desc_ro_off: u32,
+        target_canon_id: u32,
+        target_depth: u32,
+        lbl_false: Label,
+    ) {
+        self.asm.lsl_imm(true, SGP2, SGP2, 6); // actual_cid * 64
+        if self.layout.is_store {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                SGP1,
+                STORE_OFF_TYPE_DESCS_PTR,
+                SGP3,
+            );
+            self.asm.add_r(true, SGP2, SGP1, SGP2); // &StoreTypeDesc[actual_cid]
+            if (target_depth as usize) < GC_DISPLAY_LEN {
+                let disp_off = 16 + target_depth * 4;
+                self.asm.ldr_uimm(false, SGP2, SGP2, disp_off);
+            } else {
+                self.asm.ldr_uimm(false, SGP1, SGP2, 8); // actual_depth
+                self.asm.mov_imm32(SGP3, target_depth);
+                self.asm.cmp_r(false, SGP1, SGP3);
+                self.asm.b_cond(Cond::Lo, lbl_false);
+                self.asm.ldr_uimm(true, SGP2, SGP2, 56); // supertypes_all_ptr
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(SGP2),
+                    None,
+                    SGP2,
+                    (target_depth as i32) * 4,
+                    SGP3,
+                );
+            }
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_CANON_MAP,
+                SGP3,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(SGP1),
+                None,
+                SGP1,
+                (target_canon_id as i32) * 4,
+                SGP3,
+            );
+            self.asm.cmp_r(false, SGP2, SGP1);
+            self.asm.b_cond(Cond::Ne, lbl_false);
+            return;
+        }
+        self.asm
+            .adr_reloc(SGP1, A64RelocTarget::Rodata(type_desc_ro_off));
+        self.asm.add_r(true, SGP2, SGP1, SGP2); // &TypeDesc[actual_cid]
+        if (target_depth as usize) < GC_DISPLAY_LEN {
+            let disp_off = 24 + target_depth * 4;
+            self.asm.ldr_uimm(false, SGP2, SGP2, disp_off);
+            self.asm.mov_imm32(SGP1, target_canon_id);
+            self.asm.cmp_r(false, SGP2, SGP1);
+            self.asm.b_cond(Cond::Ne, lbl_false);
+        } else {
+            self.asm.ldr_uimm(false, SGP1, SGP2, 20); // actual_depth
+            self.asm.mov_imm32(SGP3, target_depth);
+            self.asm.cmp_r(false, SGP1, SGP3);
+            self.asm.b_cond(Cond::Lo, lbl_false);
+            self.asm.ldrsw_uimm(SGP2, SGP2, 16); // super_overflow_rel
+            self.asm
+                .adr_reloc(SGP1, A64RelocTarget::Rodata(type_desc_ro_off));
+            self.asm.add_r(true, SGP2, SGP1, SGP2);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(SGP1),
+                None,
+                SGP2,
+                (target_depth as i32) * 4,
+                SGP3,
+            );
+            self.asm.mov_imm32(SGP2, target_canon_id);
+            self.asm.cmp_r(false, SGP1, SGP2);
+            self.asm.b_cond(Cond::Ne, lbl_false);
+        }
+    }
+
+    /// Tests whether non-null `val_reg` matches `target`, jumping to `lbl_false` on mismatch.
+    /// Uses ONLY `SGP1`, `SGP2`, `SGP3`.
+    fn emit_gc_nonnull_matches_target(
+        &mut self,
+        val_reg: Reg,
+        target: GcHeapTarget,
+        lbl_false: Label,
+    ) -> Result<(), String> {
+        let gc = self
+            .layout
+            .gc
+            .as_ref()
+            .ok_or("aarch64: GC type test without GcCtxLayout")?;
+        match target {
+            GcHeapTarget::Any | GcHeapTarget::Extern | GcHeapTarget::Func | GcHeapTarget::Exn => {}
+            GcHeapTarget::None
+            | GcHeapTarget::NoFunc
+            | GcHeapTarget::NoExtern
+            | GcHeapTarget::NoExn => {
+                self.asm.b(lbl_false);
+            }
+            GcHeapTarget::I31 => {
+                self.asm.tst_imm_low_bits(false, val_reg, 1);
+                self.asm.b_cond(Cond::Eq, lbl_false);
+            }
+            GcHeapTarget::Eq => {
+                let lbl_match = self.asm.new_label();
+                self.asm.tst_imm_low_bits(false, val_reg, 1);
+                self.asm.b_cond(Cond::Ne, lbl_match);
+                self.asm.ldr_uimm(false, SGP1, val_reg, 0);
+                self.asm.and_imm_6_w(SGP1, SGP1);
+                self.asm
+                    .cmp_imm(false, SGP1, GC_HDR_KIND_INTERNAL_EXTERN as u16);
+                self.asm.b_cond(Cond::Eq, lbl_false);
+                self.asm.bind(lbl_match);
+            }
+            GcHeapTarget::Struct => {
+                self.asm.tst_imm_low_bits(false, val_reg, 1);
+                self.asm.b_cond(Cond::Ne, lbl_false);
+                self.asm.ldr_uimm(false, SGP1, val_reg, 0);
+                self.asm.and_imm_6_w(SGP1, SGP1);
+                self.asm.cmp_imm(false, SGP1, GC_HDR_KIND_STRUCT as u16);
+                self.asm.b_cond(Cond::Ne, lbl_false);
+            }
+            GcHeapTarget::Array => {
+                self.asm.tst_imm_low_bits(false, val_reg, 1);
+                self.asm.b_cond(Cond::Ne, lbl_false);
+                self.asm.ldr_uimm(false, SGP1, val_reg, 0);
+                self.asm.and_imm_6_w(SGP1, SGP1);
+                self.asm.cmp_imm(false, SGP1, GC_HDR_KIND_ARRAY as u16);
+                self.asm.b_cond(Cond::Ne, lbl_false);
+            }
+            GcHeapTarget::Concrete { canon_id, is_func } => {
+                let gt = &self.module.gc_canon_types[canon_id as usize];
+                if is_func {
+                    if self.layout.is_store {
+                        self.asm.ldr_uimm(false, SGP2, val_reg, 16);
+                        if gt.is_final {
+                            emit_load_off(
+                                &mut self.asm,
+                                Ty::I64,
+                                Some(SGP1),
+                                None,
+                                CTX_REG,
+                                OFF_STORE_CANON_MAP,
+                                SGP3,
+                            );
+                            emit_load_off(
+                                &mut self.asm,
+                                Ty::I32,
+                                Some(SGP1),
+                                None,
+                                SGP1,
+                                (gt.canon_id as i32) * 4,
+                                SGP3,
+                            );
+                            self.asm.cmp_r(false, SGP2, SGP1);
+                            self.asm.b_cond(Cond::Ne, lbl_false);
+                        } else {
+                            self.emit_gc_canon_subtype_check(
+                                gc.type_desc_ro_off,
+                                gt.canon_id,
+                                gt.depth,
+                                lbl_false,
+                            );
+                        }
+                    } else {
+                        self.asm.sub_imm(true, SGP2, val_reg, 1);
+                        self.asm
+                            .adr_reloc(SGP1, A64RelocTarget::Rodata(gc.func_canon_ro_off));
+                        self.asm.ldr_reg_scaled(false, SGP2, SGP1, SGP2, true);
+                        if gt.is_final {
+                            self.asm.mov_imm32(SGP1, gt.canon_id);
+                            self.asm.cmp_r(false, SGP2, SGP1);
+                            self.asm.b_cond(Cond::Ne, lbl_false);
+                        } else {
+                            self.emit_gc_canon_subtype_check(
+                                gc.type_desc_ro_off,
+                                gt.canon_id,
+                                gt.depth,
+                                lbl_false,
+                            );
+                        }
+                    }
+                } else {
+                    let expected_kind = match gt.composite {
+                        GcCompositeInfo::Struct { .. } => GC_HDR_KIND_STRUCT,
+                        GcCompositeInfo::Array { .. } => GC_HDR_KIND_ARRAY,
+                        GcCompositeInfo::Func => unreachable!(),
+                    };
+                    self.asm.tst_imm_low_bits(false, val_reg, 1);
+                    self.asm.b_cond(Cond::Ne, lbl_false);
+                    self.asm.ldr_uimm(false, SGP2, val_reg, 0);
+                    if gt.is_final {
+                        if self.layout.is_store {
+                            emit_load_off(
+                                &mut self.asm,
+                                Ty::I64,
+                                Some(SGP1),
+                                None,
+                                CTX_REG,
+                                OFF_STORE_CANON_MAP,
+                                SGP3,
+                            );
+                            emit_load_off(
+                                &mut self.asm,
+                                Ty::I32,
+                                Some(SGP1),
+                                None,
+                                SGP1,
+                                (gt.canon_id as i32) * 4,
+                                SGP3,
+                            );
+                            self.asm.lsl_imm(false, SGP1, SGP1, 3);
+                            if expected_kind == GC_HDR_KIND_ARRAY {
+                                self.asm.orr_imm_2_w(SGP1, SGP1);
+                            } else if expected_kind != 0 {
+                                self.asm.mov_imm32(SGP3, expected_kind);
+                                self.asm.orr_r(false, SGP1, SGP1, SGP3);
+                            }
+                            self.asm.cmp_r(false, SGP2, SGP1);
+                            self.asm.b_cond(Cond::Ne, lbl_false);
+                        } else {
+                            self.asm.mov_imm32(SGP1, gt.header_word());
+                            self.asm.cmp_r(false, SGP2, SGP1);
+                            self.asm.b_cond(Cond::Ne, lbl_false);
+                        }
+                    } else {
+                        self.asm.and_imm_6_w(SGP1, SGP2);
+                        self.asm.cmp_imm(false, SGP1, expected_kind as u16);
+                        self.asm.b_cond(Cond::Ne, lbl_false);
+                        self.asm.lsr_imm(false, SGP2, SGP2, 3);
+                        self.emit_gc_canon_subtype_check(
+                            gc.type_desc_ro_off,
+                            gt.canon_id,
+                            gt.depth,
+                            lbl_false,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores a GC struct/array field of `storage` kind from SSA `val` into `[base + off]`.
+    /// Must NOT clobber `base` (caller passes `SGP2` or an allocatable GP reg; uses `SGP1`/`SGP3`/`SFP1`).
+    fn emit_gc_storage_store(&mut self, base: Reg, off: i32, storage: GcStorageKind, val: Val) {
+        match storage {
+            GcStorageKind::I8 => {
+                let vr = self.gp_read(val, SGP1);
+                if (0..=4095).contains(&off) {
+                    self.asm.strb_uimm(vr, base, off as u32);
+                } else {
+                    self.asm.add_i32_checked(true, SGP3, base, off, SGP3);
+                    self.asm.strb_uimm(vr, SGP3, 0);
+                }
+            }
+            GcStorageKind::I16 => {
+                let vr = self.gp_read(val, SGP1);
+                if (0..=8190).contains(&off) && (off & 1) == 0 {
+                    self.asm.strh_uimm(vr, base, off as u32);
+                } else {
+                    self.asm.add_i32_checked(true, SGP3, base, off, SGP3);
+                    self.asm.strh_uimm(vr, SGP3, 0);
+                }
+            }
+            GcStorageKind::I32 => {
+                let vr = self.gp_read(val, SGP1);
+                emit_store_off(&mut self.asm, Ty::I32, Some(vr), None, base, off, SGP3);
+            }
+            GcStorageKind::I64
+            | GcStorageKind::GcRef
+            | GcStorageKind::ExternRef
+            | GcStorageKind::OtherRef => {
+                let vr = self.gp_read(val, SGP1);
+                emit_store_off(&mut self.asm, Ty::I64, Some(vr), None, base, off, SGP3);
+            }
+            GcStorageKind::F32 => {
+                let fx = self.fp_read(val, SFP1);
+                emit_store_off(&mut self.asm, Ty::F32, None, Some(fx), base, off, SGP3);
+            }
+            GcStorageKind::F64 => {
+                let fx = self.fp_read(val, SFP1);
+                emit_store_off(&mut self.asm, Ty::F64, None, Some(fx), base, off, SGP3);
+            }
+            GcStorageKind::V128 => {
+                let fx = self.fp_read(val, SFP1);
+                emit_store_off(&mut self.asm, Ty::V128, None, Some(fx), base, off, SGP3);
+            }
+        }
+    }
+
+    /// Loads a GC struct/array field of `kind` from `[base + off]` into SSA result `r`.
+    fn emit_gc_field_load(&mut self, r: Val, base: Reg, off: i32, kind: GcFieldLoadKind) {
+        match kind {
+            GcFieldLoadKind::I8S => {
+                let d = self.gp_write_reg(r);
+                if (0..=4095).contains(&off) {
+                    self.asm.ldrsb_uimm(false, d, base, off as u32);
+                } else {
+                    self.asm.add_i32_checked(true, SGP3, base, off, SGP3);
+                    self.asm.ldrsb_uimm(false, d, SGP3, 0);
+                }
+                self.gp_commit(r, d);
+            }
+            GcFieldLoadKind::I8U => {
+                let d = self.gp_write_reg(r);
+                if (0..=4095).contains(&off) {
+                    self.asm.ldrb_uimm(d, base, off as u32);
+                } else {
+                    self.asm.add_i32_checked(true, SGP3, base, off, SGP3);
+                    self.asm.ldrb_uimm(d, SGP3, 0);
+                }
+                self.gp_commit(r, d);
+            }
+            GcFieldLoadKind::I16S => {
+                let d = self.gp_write_reg(r);
+                if (0..=8190).contains(&off) && (off & 1) == 0 {
+                    self.asm.ldrsh_uimm(false, d, base, off as u32);
+                } else {
+                    self.asm.add_i32_checked(true, SGP3, base, off, SGP3);
+                    self.asm.ldrsh_uimm(false, d, SGP3, 0);
+                }
+                self.gp_commit(r, d);
+            }
+            GcFieldLoadKind::I16U => {
+                let d = self.gp_write_reg(r);
+                if (0..=8190).contains(&off) && (off & 1) == 0 {
+                    self.asm.ldrh_uimm(d, base, off as u32);
+                } else {
+                    self.asm.add_i32_checked(true, SGP3, base, off, SGP3);
+                    self.asm.ldrh_uimm(d, SGP3, 0);
+                }
+                self.gp_commit(r, d);
+            }
+            GcFieldLoadKind::Val(ty) => {
+                if ty.is_fp() {
+                    let d = self.fp_write_reg(r);
+                    emit_load_off(&mut self.asm, ty, None, Some(d), base, off, SGP3);
+                    self.fp_commit(r, d);
+                } else {
+                    let d = self.gp_write_reg(r);
+                    emit_load_off(&mut self.asm, ty, Some(d), None, base, off, SGP3);
+                    self.gp_commit(r, d);
+                }
+            }
         }
     }
 
@@ -1492,6 +2575,208 @@ impl<'a> LowerA64<'a> {
         let ci = self.layout.ci_tables[ci_id as usize];
         let toob = self.trap_table_oob_lbl();
         let bad = self.trap_ci_lbl();
+        if self.layout.is_store {
+            debug_assert!(!is_tail_jump, "StoreCdylib indirect calls never tail-jump");
+            let slot = self
+                .alloc
+                .store_saved_ctx_off
+                .expect("store_saved_ctx_off missing");
+            if ci.is_call_ref {
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.asm.cbz(true, SGP2, bad);
+                self.emit_speculation_barrier();
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(CTX_REG),
+                    None,
+                    Reg::SP,
+                    slot,
+                    SGP3,
+                );
+                self.asm.ldr_uimm(true, SGP1, SGP2, 0);
+                self.asm.ldr_uimm(true, CTX_REG, SGP2, 8);
+                self.asm
+                    .ldr_uimm(true, MEM_BASE_REG, CTX_REG, OFF_MEM_BASE as u32);
+                self.asm
+                    .ldr_uimm(true, SGP2, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+                self.asm.ldr_uimm(true, MEM_LEN_REG, SGP2, 8);
+                self.asm.blr(SGP1);
+                return true;
+            }
+            // `call_indirect` through `OFF_STORE_TABLE_DESCS[table_idx]` using ONLY SGP1/SGP2/SGP3!
+            let tbl = ci.dyn_table_desc_off;
+            emit_load_off(
+                &mut self.asm,
+                if ci.table_is64 { Ty::I64 } else { Ty::I32 },
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_TABLE_DESCS,
+                SGP3,
+            );
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                SGP1,
+                tbl * 8,
+                SGP3,
+            );
+            self.asm.ldr_uimm(false, SGP3, SGP1, 8); // cur_len zero-extended to u64
+            self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hs, toob);
+            self.emit_speculation_barrier();
+            self.asm.ldr_uimm(true, SGP1, SGP1, 0); // table elements ptr
+            self.asm.ldr_reg_scaled(true, SGP2, SGP1, SGP2, true); // *const StoreFuncRef
+            self.asm.cbz(true, SGP2, bad);
+            self.emit_speculation_barrier();
+            // Verify `StoreFuncRef.canon_type_id <: exp_gt` keeping `SGP2` intact!
+            let exp_ty = self.module.ci_sigs[ci_id as usize].type_idx;
+            let exp_gt = self.module.gc_type(exp_ty);
+            self.asm.ldr_uimm(false, SGP3, SGP2, 16); // actual_cid
+            if exp_gt.is_final {
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_STORE_CANON_MAP,
+                    SGP1,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(SGP1),
+                    None,
+                    SGP1,
+                    (exp_gt.canon_id as i32) * 4,
+                    SGP1,
+                );
+                self.asm.cmp_r(false, SGP3, SGP1);
+                self.asm.b_cond(Cond::Ne, bad);
+            } else {
+                self.asm.lsl_imm(true, SGP3, SGP3, 6); // actual_cid * 64
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_STORE_PTR,
+                    SGP1,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    SGP1,
+                    STORE_OFF_TYPE_DESCS_PTR,
+                    SGP1,
+                );
+                self.asm.add_r(true, SGP3, SGP1, SGP3); // &StoreTypeDesc[actual_cid]
+                if (exp_gt.depth as usize) < GC_DISPLAY_LEN {
+                    self.asm.ldr_uimm(false, SGP3, SGP3, 16 + exp_gt.depth * 4);
+                } else {
+                    self.asm.ldr_uimm(false, SGP1, SGP3, 8); // actual_depth
+                    if exp_gt.depth < 4096 {
+                        self.asm.cmp_imm(false, SGP1, exp_gt.depth as u16);
+                    } else {
+                        // Save SGP2 temporarily? Use OFF_SCRATCH_TMP (already consumed!).
+                        emit_store_off(
+                            &mut self.asm,
+                            Ty::I64,
+                            Some(SGP2),
+                            None,
+                            CTX_REG,
+                            OFF_SCRATCH_TMP,
+                            SGP2,
+                        );
+                        self.asm.mov_imm32(SGP2, exp_gt.depth);
+                        self.asm.cmp_r(false, SGP1, SGP2);
+                        emit_load_off(
+                            &mut self.asm,
+                            Ty::I64,
+                            Some(SGP2),
+                            None,
+                            CTX_REG,
+                            OFF_SCRATCH_TMP,
+                            SGP1,
+                        );
+                    }
+                    self.asm.b_cond(Cond::Lo, bad);
+                    self.asm.ldr_uimm(true, SGP3, SGP3, 56); // supertypes_all_ptr
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I32,
+                        Some(SGP3),
+                        None,
+                        SGP3,
+                        (exp_gt.depth as i32) * 4,
+                        SGP1,
+                    );
+                }
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_STORE_CANON_MAP,
+                    SGP1,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(SGP1),
+                    None,
+                    SGP1,
+                    (exp_gt.canon_id as i32) * 4,
+                    SGP1,
+                );
+                self.asm.cmp_r(false, SGP3, SGP1);
+                self.asm.b_cond(Cond::Ne, bad);
+            }
+            self.emit_speculation_barrier();
+            emit_store_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(CTX_REG),
+                None,
+                Reg::SP,
+                slot,
+                SGP3,
+            );
+            self.asm.ldr_uimm(true, SGP1, SGP2, 0);
+            self.asm.ldr_uimm(true, CTX_REG, SGP2, 8);
+            self.asm
+                .ldr_uimm(true, MEM_BASE_REG, CTX_REG, OFF_MEM_BASE as u32);
+            self.asm
+                .ldr_uimm(true, SGP2, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+            self.asm.ldr_uimm(true, MEM_LEN_REG, SGP2, 8);
+            self.asm.blr(SGP1);
+            return true;
+        }
         if ci.is_call_ref {
             emit_load_off(
                 &mut self.asm,
@@ -1640,23 +2925,26 @@ impl<'a> LowerA64<'a> {
         if ret_layout.stack_bytes > 0 {
             self.asm
                 .add_i32_checked(true, SGP1, Reg::SP, self.alloc.ret_buf_off, SGP3);
-            emit_store_off(
-                &mut self.asm,
-                Ty::I64,
-                Some(SGP1),
-                None,
-                CTX_REG,
-                OFF_RET_SPILL_PTR,
-                SGP3,
-            );
+            self.emit_publish_ret_spill(SGP1);
         }
 
+        let mut need_store_restore = false;
         if let Some(f) = direct_func {
-            self.asm.bl_reloc(A64RelocTarget::Func(f));
-        } else if let Some((ci_id, _)) = ci_idx
-            && !self.emit_ci_dispatch(ci_id, false)
-        {
-            return Ok(());
+            if self.layout.is_store && (f as usize) < self.module.imports.len() {
+                self.emit_store_call_import(f);
+                need_store_restore = true;
+            } else {
+                self.asm.bl_reloc(A64RelocTarget::Func(f));
+            }
+        } else if let Some((ci_id, _)) = ci_idx {
+            if !self.emit_ci_dispatch(ci_id, false) {
+                return Ok(());
+            }
+            need_store_restore = self.layout.is_store;
+        }
+        self.record_gc_safepoint(self.cur_inst)?;
+        if need_store_restore {
+            self.emit_store_restore_ctx();
         }
 
         // Check trap in W16.
@@ -1729,23 +3017,26 @@ impl<'a> LowerA64<'a> {
         if ret_layout.stack_bytes > 0 {
             self.asm
                 .add_i32_checked(true, SGP1, Reg::SP, self.alloc.ret_buf_off, SGP3);
-            emit_store_off(
-                &mut self.asm,
-                Ty::I64,
-                Some(SGP1),
-                None,
-                CTX_REG,
-                OFF_RET_SPILL_PTR,
-                SGP3,
-            );
+            self.emit_publish_ret_spill(SGP1);
         }
 
+        let mut need_store_restore = false;
         if let Some(f) = direct_func {
-            self.asm.bl_reloc(A64RelocTarget::Func(f));
-        } else if let Some((ci_id, _)) = ci_idx
-            && !self.emit_ci_dispatch(ci_id, false)
-        {
-            return Ok(());
+            if self.layout.is_store && (f as usize) < self.module.imports.len() {
+                self.emit_store_call_import(f);
+                need_store_restore = true;
+            } else {
+                self.asm.bl_reloc(A64RelocTarget::Func(f));
+            }
+        } else if let Some((ci_id, _)) = ci_idx {
+            if !self.emit_ci_dispatch(ci_id, false) {
+                return Ok(());
+            }
+            need_store_restore = self.layout.is_store;
+        }
+        self.record_gc_safepoint(self.cur_inst)?;
+        if need_store_restore {
+            self.emit_store_restore_ctx();
         }
 
         let lbl_ok = self.asm.new_label();
@@ -1787,7 +3078,10 @@ impl<'a> LowerA64<'a> {
         let arg_vals = self.ir.pool_slice(args);
         let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
         let arg_layout = layout_args(&arg_tys)?;
-        let can_tail_jump = arg_layout.stack_bytes <= self_param_stack;
+        let store_forced_fallback = self.layout.is_store
+            && (ci_idx.is_some()
+                || direct_func.is_some_and(|f| (f as usize) < self.module.imports.len()));
+        let can_tail_jump = arg_layout.stack_bytes <= self_param_stack && !store_forced_fallback;
 
         if let Some((ci_id, idx_val)) = ci_idx {
             let ci = self.layout.ci_tables[ci_id as usize];
@@ -1839,15 +3133,7 @@ impl<'a> LowerA64<'a> {
                     saved_off,
                     SGP3,
                 );
-                emit_store_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    OFF_RET_SPILL_PTR,
-                    SGP3,
-                );
+                self.emit_publish_ret_spill(SGP2);
             }
             self.emit_epilogue_teardown();
             if let Some(f) = direct_func {
@@ -1858,7 +3144,7 @@ impl<'a> LowerA64<'a> {
             return Ok(());
         }
 
-        // Growing-arity fallback (`callee_arg_stack > caller_param_stack`): emit normal `bl`/`blr`
+        // Growing-arity or cross-module StoreCdylib fallback: emit normal `bl`/`blr`
         // forwarding caller's overflow return buffer pointer, then jump to epilogue.
         if !arg_vals.is_empty() {
             let mut moves = Vec::with_capacity(arg_vals.len());
@@ -1882,22 +3168,25 @@ impl<'a> LowerA64<'a> {
                 saved_off,
                 SGP3,
             );
-            emit_store_off(
-                &mut self.asm,
-                Ty::I64,
-                Some(SGP2),
-                None,
-                CTX_REG,
-                OFF_RET_SPILL_PTR,
-                SGP3,
-            );
+            self.emit_publish_ret_spill(SGP2);
         }
+        let mut need_store_restore = false;
         if let Some(f) = direct_func {
-            self.asm.bl_reloc(A64RelocTarget::Func(f));
-        } else if let Some((ci_id, _)) = ci_idx
-            && !self.emit_ci_dispatch(ci_id, false)
-        {
-            return Ok(());
+            if self.layout.is_store && (f as usize) < self.module.imports.len() {
+                self.emit_store_call_import(f);
+                need_store_restore = true;
+            } else {
+                self.asm.bl_reloc(A64RelocTarget::Func(f));
+            }
+        } else if let Some((ci_id, _)) = ci_idx {
+            if !self.emit_ci_dispatch(ci_id, false) {
+                return Ok(());
+            }
+            need_store_restore = self.layout.is_store;
+        }
+        self.record_gc_safepoint(u32::MAX)?;
+        if need_store_restore {
+            self.emit_store_restore_ctx();
         }
         // Return values & W16 trap status are already in exact ABI registers.
         let ep = *self.epilogue_ok.get_or_insert_with(|| self.asm.new_label());
@@ -2630,13 +3919,21 @@ impl<'a> LowerA64<'a> {
                     self.gp_commit(r, PINNED_GLOB_REG);
                 } else {
                     let off = self.layout.global_offs[g as usize];
+                    let (base, eff_off) = if self.layout.is_store
+                        && g < self.layout.imported_global_count
+                    {
+                        emit_load_off(&mut self.asm, Ty::I64, Some(SGP2), None, CTX_REG, off, SGP3);
+                        (SGP2, 0)
+                    } else {
+                        (CTX_REG, off)
+                    };
                     if ty.is_fp() {
                         let d = self.fp_write_reg(r);
-                        emit_load_off(&mut self.asm, ty, None, Some(d), CTX_REG, off, SGP3);
+                        emit_load_off(&mut self.asm, ty, None, Some(d), base, eff_off, SGP3);
                         self.fp_commit(r, d);
                     } else {
                         let d = self.gp_write_reg(r);
-                        emit_load_off(&mut self.asm, ty, Some(d), None, CTX_REG, off, SGP3);
+                        emit_load_off(&mut self.asm, ty, Some(d), None, base, eff_off, SGP3);
                         self.gp_commit(r, d);
                     }
                 }
@@ -2650,12 +3947,20 @@ impl<'a> LowerA64<'a> {
                     }
                 } else {
                     let off = self.layout.global_offs[g as usize];
+                    let (base, eff_off) = if self.layout.is_store
+                        && g < self.layout.imported_global_count
+                    {
+                        emit_load_off(&mut self.asm, Ty::I64, Some(SGP2), None, CTX_REG, off, SGP3);
+                        (SGP2, 0)
+                    } else {
+                        (CTX_REG, off)
+                    };
                     if ty.is_fp() {
                         let vr = self.fp_read(v, SFP1);
-                        emit_store_off(&mut self.asm, ty, None, Some(vr), CTX_REG, off, SGP3);
+                        emit_store_off(&mut self.asm, ty, None, Some(vr), base, eff_off, SGP3);
                     } else {
                         let vr = self.gp_read(v, SGP1);
-                        emit_store_off(&mut self.asm, ty, Some(vr), None, CTX_REG, off, SGP3);
+                        emit_store_off(&mut self.asm, ty, Some(vr), None, base, eff_off, SGP3);
                     }
                 }
             }
@@ -2664,7 +3969,34 @@ impl<'a> LowerA64<'a> {
                 let t64 = self.layout.table_is_64(table);
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
-                if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_TABLE_DESCS,
+                        SGP2,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        SGP3,
+                        (table as i32) * 8,
+                        SGP2,
+                    );
+                    self.asm.ldr_uimm(false, SGP2, SGP3, 8);
+                    self.asm.cmp_r(t64, ir, SGP2);
+                    self.asm.b_cond(Cond::Hs, toob);
+                    self.emit_speculation_barrier();
+                    self.asm.ldr_uimm(true, SGP3, SGP3, 0);
+                    let d = self.gp_write_reg(r);
+                    self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
+                    self.gp_commit(r, d);
+                } else if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
                     if len == 0 {
                         self.asm.b(toob);
                         return Ok(());
@@ -2722,7 +4054,36 @@ impl<'a> LowerA64<'a> {
                 let t64 = self.layout.table_is_64(table);
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
-                if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_TABLE_DESCS,
+                        SGP2,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        SGP3,
+                        (table as i32) * 8,
+                        SGP2,
+                    );
+                    self.asm.ldr_uimm(false, SGP2, SGP3, 8);
+                    self.asm.cmp_r(t64, ir, SGP2);
+                    self.asm.b_cond(Cond::Hs, toob);
+                    self.emit_speculation_barrier();
+                    self.asm.uxtw(SGP2, ir);
+                    self.asm.lsl_imm(true, SGP2, SGP2, 3);
+                    self.asm.ldr_uimm(true, SGP3, SGP3, 0);
+                    self.asm.add_r(true, SGP2, SGP3, SGP2);
+                    let vr = self.gp_read(val, SGP1);
+                    self.asm.str_uimm(true, vr, SGP2, 0);
+                } else if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
                     if len == 0 {
                         self.asm.b(toob);
                         return Ok(());
@@ -3522,6 +4883,11 @@ impl<'a> LowerA64<'a> {
             Op::MemSize => {
                 let r = res.unwrap();
                 let d = self.gp_write_reg(r);
+                if self.layout.is_store {
+                    self.asm
+                        .ldr_uimm(true, MEM_LEN_REG, CTX_REG, OFF_MEM_RESERVE_BYTES as u32);
+                    self.asm.ldr_uimm(true, MEM_LEN_REG, MEM_LEN_REG, 8);
+                }
                 self.asm.lsr_imm(true, d, MEM_LEN_REG, 16);
                 self.gp_commit(r, d);
             }
@@ -3845,17 +5211,39 @@ impl<'a> LowerA64<'a> {
             }
             Op::MemSizeIdx(mem) => {
                 let r = res.unwrap();
-                let desc_off = self.layout.mem_desc_off(mem);
                 let d = self.gp_write_reg(r);
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(d),
-                    None,
-                    CTX_REG,
-                    desc_off + 8,
-                    SGP3,
-                );
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_MEM_DESCS,
+                        SGP3,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        SGP1,
+                        (mem as i32) * 8,
+                        SGP3,
+                    );
+                    self.asm.ldr_uimm(true, d, SGP1, 8);
+                } else {
+                    let desc_off = self.layout.mem_desc_off(mem);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(d),
+                        None,
+                        CTX_REG,
+                        desc_off + 8,
+                        SGP3,
+                    );
+                }
                 self.asm.lsr_imm(true, d, d, 16);
                 self.gp_commit(r, d);
             }
@@ -4104,7 +5492,27 @@ impl<'a> LowerA64<'a> {
             Op::TableSize(table) => {
                 let r = res.unwrap();
                 let d = self.gp_write_reg(r);
-                if let Some(&(desc_off, _, _)) = self.layout.dyn_tables.get(&table) {
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_TABLE_DESCS,
+                        SGP3,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        SGP1,
+                        (table as i32) * 8,
+                        SGP3,
+                    );
+                    self.asm.ldr_uimm(false, d, SGP1, 8);
+                } else if let Some(&(desc_off, _, _)) = self.layout.dyn_tables.get(&table) {
                     emit_load_off(
                         &mut self.asm,
                         Ty::I32,
@@ -5454,149 +6862,271 @@ impl<'a> LowerA64<'a> {
             } => self.emit_call_abi(args, rets, Some((ci_id, idx)), None)?,
             Op::ExnAlloc { tag, args } => {
                 let r = res.unwrap();
-                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                 let (ref fields, rec_size) = self.layout.tag_layouts[tag as usize];
-                let lbl_oom = self.asm.new_label();
-                let lbl_ok = self.asm.new_label();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP1),
-                    None,
-                    CTX_REG,
-                    exn_off + 16,
-                    SGP3,
-                );
-                self.asm.mov_imm32(SGP3, rec_size);
-                self.asm.add_r(true, SGP3, SGP1, SGP3);
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    exn_off + 24,
-                    SGP2,
-                );
-                self.asm.cmp_r(true, SGP3, SGP2);
-                self.asm.b_cond(Cond::Hi, lbl_oom);
-                emit_store_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP3),
-                    None,
-                    CTX_REG,
-                    exn_off + 16,
-                    SGP2,
-                );
-                emit_store_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP1),
-                    None,
-                    CTX_REG,
-                    OFF_SCRATCH_TMP,
-                    SGP2,
-                );
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    exn_off + 8,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, SGP1); // SGP2 = record_ptr
-                self.asm.mov_imm32(SGP1, tag);
-                self.asm.str_uimm(false, SGP1, SGP2, 0);
-                self.asm.str_uimm(false, Reg::XZR, SGP2, 4);
                 let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
                 let field_specs: Vec<(Ty, i32)> = fields.clone();
-                for (av, (ty, foff)) in arg_vals.into_iter().zip(field_specs) {
-                    if ty.is_fp() {
-                        let vr = self.fp_read(av, SFP1);
-                        emit_store_off(&mut self.asm, ty, None, Some(vr), SGP2, foff, SGP3);
-                    } else {
-                        let gr = self.gp_read(av, SGP1);
-                        emit_store_off(&mut self.asm, ty, Some(gr), None, SGP2, foff, SGP3);
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_TAG_IDS,
+                        SGP3,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I32,
+                        Some(SGP1),
+                        None,
+                        SGP1,
+                        (tag as i32) * 4,
+                        SGP3,
+                    );
+                    self.asm.mov_imm32(SGP2, rec_size);
+                    self.asm
+                        .bl_reloc(A64RelocTarget::Helper(HELPER_STORE_EXN_ALLOC));
+                    let prop = self.trap_prop_lbl();
+                    self.asm.cbnz(false, SGP1, prop);
+                    // `SGP2 (X17)` holds `exn_ptr` (with `global_tag_id` already written at `+0`).
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    for (av, (ty, foff)) in arg_vals.into_iter().zip(field_specs) {
+                        if ty.is_fp() {
+                            let vr = self.fp_read(av, SFP1);
+                            emit_store_off(&mut self.asm, ty, None, Some(vr), SGP2, foff, SGP3);
+                        } else {
+                            let gr = self.gp_read(av, SGP1);
+                            emit_store_off(&mut self.asm, ty, Some(gr), None, SGP2, foff, SGP3);
+                        }
                     }
+                    let d = self.gp_write_reg(r);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(d),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    self.gp_commit(r, d);
+                } else {
+                    let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                    let lbl_oom = self.asm.new_label();
+                    let lbl_ok = self.asm.new_label();
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        exn_off + 16,
+                        SGP3,
+                    );
+                    self.asm.mov_imm32(SGP3, rec_size);
+                    self.asm.add_r(true, SGP3, SGP1, SGP3);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        exn_off + 24,
+                        SGP2,
+                    );
+                    self.asm.cmp_r(true, SGP3, SGP2);
+                    self.asm.b_cond(Cond::Hi, lbl_oom);
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        exn_off + 16,
+                        SGP2,
+                    );
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP2,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        exn_off + 8,
+                        SGP3,
+                    );
+                    self.asm.add_r(true, SGP2, SGP2, SGP1); // SGP2 = record_ptr
+                    self.asm.mov_imm32(SGP1, tag);
+                    self.asm.str_uimm(false, SGP1, SGP2, 0);
+                    self.asm.str_uimm(false, Reg::XZR, SGP2, 4);
+                    for (av, (ty, foff)) in arg_vals.into_iter().zip(field_specs) {
+                        if ty.is_fp() {
+                            let vr = self.fp_read(av, SFP1);
+                            emit_store_off(&mut self.asm, ty, None, Some(vr), SGP2, foff, SGP3);
+                        } else {
+                            let gr = self.gp_read(av, SGP1);
+                            emit_store_off(&mut self.asm, ty, Some(gr), None, SGP2, foff, SGP3);
+                        }
+                    }
+                    let d = self.gp_write_reg(r);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(d),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    self.gp_commit(r, d);
+                    self.asm.b(lbl_ok);
+                    self.asm.bind(lbl_oom);
+                    self.asm.mov_imm32(SGP1, u32::from(TRAP_ALLOC_FAILED));
+                    let ep = self.epilogue_trap_lbl();
+                    self.asm.b(ep);
+                    self.asm.bind(lbl_ok);
                 }
-                let d = self.gp_write_reg(r);
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(d),
-                    None,
-                    CTX_REG,
-                    OFF_SCRATCH_TMP,
-                    SGP3,
-                );
-                self.gp_commit(r, d);
-                self.asm.b(lbl_ok);
-                self.asm.bind(lbl_oom);
-                self.asm
-                    .mov_imm32(SGP1, u32::from(crate::x64::TRAP_ALLOC_FAILED));
-                let ep = self.epilogue_trap_lbl();
-                self.asm.b(ep);
-                self.asm.bind(lbl_ok);
             }
             Op::ExnSetActive(h) => {
-                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                 let hr = self.gp_read(h, SGP1);
-                emit_store_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(hr),
-                    None,
-                    CTX_REG,
-                    exn_off,
-                    SGP3,
-                );
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_PTR,
+                        SGP3,
+                    );
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(hr),
+                        None,
+                        SGP2,
+                        STORE_OFF_EXN_ACTIVE,
+                        SGP3,
+                    );
+                } else {
+                    let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(hr),
+                        None,
+                        CTX_REG,
+                        exn_off,
+                        SGP3,
+                    );
+                }
             }
             Op::ExnGetActive => {
                 let r = res.unwrap();
-                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                 let d = self.gp_write_reg(r);
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(d),
-                    None,
-                    CTX_REG,
-                    exn_off,
-                    SGP3,
-                );
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_PTR,
+                        SGP3,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(d),
+                        None,
+                        SGP1,
+                        STORE_OFF_EXN_ACTIVE,
+                        SGP3,
+                    );
+                } else {
+                    let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(d),
+                        None,
+                        CTX_REG,
+                        exn_off,
+                        SGP3,
+                    );
+                }
                 self.gp_commit(r, d);
             }
             Op::ExnClearActive => {
-                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
-                emit_store_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(Reg::XZR),
-                    None,
-                    CTX_REG,
-                    exn_off,
-                    SGP3,
-                );
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_PTR,
+                        SGP3,
+                    );
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(Reg::XZR),
+                        None,
+                        SGP2,
+                        STORE_OFF_EXN_ACTIVE,
+                        SGP3,
+                    );
+                } else {
+                    let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(Reg::XZR),
+                        None,
+                        CTX_REG,
+                        exn_off,
+                        SGP3,
+                    );
+                }
             }
             Op::ExnGetTag(h) => {
                 let r = res.unwrap();
-                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                 let hr = self.gp_read(h, SGP1);
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    exn_off + 8,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, hr);
                 let d = self.gp_write_reg(r);
-                self.asm.ldr_uimm(false, d, SGP2, 0);
+                if self.layout.is_store {
+                    self.asm.ldr_uimm(false, d, hr, 0);
+                } else {
+                    let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        exn_off + 8,
+                        SGP3,
+                    );
+                    self.asm.add_r(true, SGP2, SGP2, hr);
+                    self.asm.ldr_uimm(false, d, SGP2, 0);
+                }
                 self.gp_commit(r, d);
             }
             Op::ExnGetPayload {
@@ -5606,26 +7136,31 @@ impl<'a> LowerA64<'a> {
                 ty,
             } => {
                 let r = res.unwrap();
-                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                 let foff = self.layout.tag_layouts[tag as usize].0[field as usize].1;
                 let hr = self.gp_read(handle, SGP1);
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I64,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    exn_off + 8,
-                    SGP3,
-                );
-                self.asm.add_r(true, SGP2, SGP2, hr);
+                let base = if self.layout.is_store {
+                    hr
+                } else {
+                    let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        exn_off + 8,
+                        SGP3,
+                    );
+                    self.asm.add_r(true, SGP2, SGP2, hr);
+                    SGP2
+                };
                 if ty.is_fp() {
                     let d = self.fp_write_reg(r);
-                    emit_load_off(&mut self.asm, ty, None, Some(d), SGP2, foff, SGP3);
+                    emit_load_off(&mut self.asm, ty, None, Some(d), base, foff, SGP3);
                     self.fp_commit(r, d);
                 } else {
                     let d = self.gp_write_reg(r);
-                    emit_load_off(&mut self.asm, ty, Some(d), None, SGP2, foff, SGP3);
+                    emit_load_off(&mut self.asm, ty, Some(d), None, base, foff, SGP3);
                     self.gp_commit(r, d);
                 }
             }
@@ -5823,44 +7358,1130 @@ impl<'a> LowerA64<'a> {
                 self.asm.bind(lbl_done);
                 self.gp_commit(r, d);
             }
-            Op::GcNull
-            | Op::ExternNull
-            | Op::GcConstI31(_)
-            | Op::ExternConstI31(_)
-            | Op::FuncRef(_)
-            | Op::TagId(_)
-            | Op::RefEq(_, _)
-            | Op::RefI31(_)
-            | Op::I31GetS(_)
-            | Op::I31GetU(_)
-            | Op::AnyConvertExtern(_)
-            | Op::ExternConvertAny(_)
-            | Op::StructNew { .. }
-            | Op::StructNewDefault(_)
-            | Op::StructGet { .. }
-            | Op::StructSet { .. }
-            | Op::ArrayNew { .. }
-            | Op::ArrayNewDefault { .. }
-            | Op::ArrayNewFixed { .. }
-            | Op::ArrayNewData { .. }
-            | Op::ArrayNewElem { .. }
-            | Op::ArrayGet { .. }
-            | Op::ArraySet { .. }
-            | Op::ArrayLen(_)
-            | Op::ArrayFill { .. }
-            | Op::ArrayCopy { .. }
-            | Op::ArrayInitData { .. }
-            | Op::ArrayInitElem { .. }
-            | Op::RefTest { .. }
-            | Op::RefCast { .. }
-            | Op::AtomicFence
-            | Op::AtomicLoad { .. }
-            | Op::AtomicStore { .. }
-            | Op::AtomicRmw { .. }
-            | Op::AtomicCmpxchg { .. }
-            | Op::AtomicWait { .. }
-            | Op::AtomicNotify { .. } => {
-                unreachable!("aarch64: GC modules rejected at admission: {op:?}");
+            Op::TagId(tag) => {
+                let r = res.unwrap();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_STORE_TAG_IDS,
+                    SGP3,
+                );
+                let d = self.gp_write_reg(r);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(d),
+                    None,
+                    SGP1,
+                    (tag as i32) * 4,
+                    SGP3,
+                );
+                self.gp_commit(r, d);
+            }
+            Op::FuncRef(func) => {
+                let r = res.unwrap();
+                let d = self.gp_write_reg(r);
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_FUNC_REFS,
+                        SGP3,
+                    );
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(d),
+                        None,
+                        SGP1,
+                        (func as i32) * 8,
+                        SGP3,
+                    );
+                } else {
+                    self.asm.mov_imm64(d, u64::from(func) + 1);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::GcNull | Op::ExternNull => {
+                let r = res.unwrap();
+                if !matches!(self.loc(r), A64Loc::Remat(_)) {
+                    let d = self.gp_write_reg(r);
+                    self.asm.movz(true, d, 0, 0);
+                    self.gp_commit(r, d);
+                }
+            }
+            Op::GcConstI31(enc) => {
+                let r = res.unwrap();
+                if !matches!(self.loc(r), A64Loc::Remat(_)) {
+                    let d = self.gp_write_reg(r);
+                    self.asm.mov_imm64(d, u64::from(enc));
+                    self.gp_commit(r, d);
+                }
+            }
+            Op::ExternConstI31(enc) => {
+                let r = res.unwrap();
+                if !matches!(self.loc(r), A64Loc::Remat(_)) {
+                    let d = self.gp_write_reg(r);
+                    self.asm.mov_imm64(d, GC_EXT_I31_TAG_HI | u64::from(enc));
+                    self.gp_commit(r, d);
+                }
+            }
+            Op::RefEq(a, b) => {
+                let r = res.unwrap();
+                let ar = self.gp_read(a, SGP1);
+                let br = self.gp_read(b, SGP2);
+                self.asm.cmp_r(true, ar, br);
+                let d = self.gp_write_reg(r);
+                self.asm.cset(false, d, Cond::Eq);
+                self.gp_commit(r, d);
+            }
+            Op::RefI31(x) => {
+                let r = res.unwrap();
+                let xr = self.gp_read(x, SGP1);
+                let d = self.gp_write_reg(r);
+                self.asm.lsl_imm(false, d, xr, 1);
+                self.asm.orr_imm_low_bits(false, d, d, 1);
+                self.gp_commit(r, d);
+            }
+            Op::I31GetS(v) => {
+                let r = res.unwrap();
+                let trap = self.trap_ci_lbl();
+                let vr = self.gp_read(v, SGP1);
+                self.asm.cbz(true, vr, trap);
+                let d = self.gp_write_reg(r);
+                self.asm.asr_imm(false, d, vr, 1);
+                self.gp_commit(r, d);
+            }
+            Op::I31GetU(v) => {
+                let r = res.unwrap();
+                let trap = self.trap_ci_lbl();
+                let vr = self.gp_read(v, SGP1);
+                self.asm.cbz(true, vr, trap);
+                let d = self.gp_write_reg(r);
+                self.asm.lsr_imm(false, d, vr, 1);
+                self.gp_commit(r, d);
+            }
+            Op::ExternConvertAny(v) => {
+                let r = res.unwrap();
+                let vr = self.gp_read(v, SGP2);
+                let d = self.gp_write_reg(r);
+                if d != vr {
+                    self.asm.mov_r(true, d, vr);
+                }
+                let lbl_done = self.asm.new_label();
+                let lbl_i31 = self.asm.new_label();
+                self.asm.cbz(true, d, lbl_done);
+                self.asm.tst_imm_low_bits(false, d, 1);
+                self.asm.b_cond(Cond::Ne, lbl_i31);
+                let tmp = if d == SGP1 { SGP2 } else { SGP1 };
+                self.asm.ldr_uimm(false, tmp, d, 0);
+                self.asm.and_imm_6_w(tmp, tmp);
+                self.asm
+                    .cmp_imm(false, tmp, GC_HDR_KIND_INTERNAL_EXTERN as u16);
+                self.asm.b_cond(Cond::Ne, lbl_done);
+                self.asm.ldr_uimm(true, d, d, 8);
+                self.asm.b(lbl_done);
+                self.asm.bind(lbl_i31);
+                self.asm.mov_imm64(tmp, GC_EXT_I31_TAG_HI);
+                self.asm.orr_r(true, d, d, tmp);
+                self.asm.bind(lbl_done);
+                self.gp_commit(r, d);
+            }
+            Op::AnyConvertExtern(v) => {
+                let r = res.unwrap();
+                let gc_off = self
+                    .layout
+                    .gc
+                    .as_ref()
+                    .ok_or("aarch64: AnyConvertExtern without GcCtxLayout")?
+                    .gc_state_off;
+                let vr = self.gp_read(v, SGP2);
+                if vr != SGP2 {
+                    self.asm.mov_r(true, SGP2, vr);
+                }
+                let lbl_done = self.asm.new_label();
+                let lbl_untag_i31 = self.asm.new_label();
+                let lbl_box = self.asm.new_label();
+                self.asm.cbz(true, SGP2, lbl_done);
+                self.asm.lsr_imm(true, SGP1, SGP2, 32);
+                self.asm.mov_imm32(SGP3, (GC_EXT_I31_TAG_HI >> 32) as u32);
+                self.asm.cmp_r(false, SGP1, SGP3);
+                self.asm.b_cond(Cond::Eq, lbl_untag_i31);
+                self.asm.tst_imm_low_bits(true, SGP2, 3);
+                self.asm.b_cond(Cond::Ne, lbl_box);
+                if self.layout.is_store {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_STORE_PTR,
+                        SGP3,
+                    );
+                    self.asm.ldr_uimm(true, SGP3, SGP1, GC_OFF_FROM_BASE as u32);
+                    self.asm.subs_r(true, SGP3, SGP2, SGP3);
+                    self.asm.b_cond(Cond::Lo, lbl_box);
+                    self.asm.ldr_uimm(true, SGP1, SGP1, GC_OFF_FROM_CAP as u32);
+                    self.asm.cmp_r(true, SGP3, SGP1);
+                    self.asm.b_cond(Cond::Lo, lbl_done);
+                } else {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        gc_off + GC_OFF_FROM_BASE,
+                        SGP3,
+                    );
+                    self.asm.subs_r(true, SGP3, SGP2, SGP3);
+                    self.asm.b_cond(Cond::Lo, lbl_box);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        gc_off + GC_OFF_FROM_CAP,
+                        SGP1,
+                    );
+                    self.asm.cmp_r(true, SGP3, SGP1);
+                    self.asm.b_cond(Cond::Lo, lbl_done);
+                }
+                self.asm.bind(lbl_box);
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.emit_gc_alloc_fixed(16)?;
+                self.asm
+                    .mov_imm64(SGP1, u64::from(GC_HDR_KIND_INTERNAL_EXTERN));
+                self.asm.str_uimm(true, SGP1, SGP2, 0);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.asm.str_uimm(true, SGP1, SGP2, 8);
+                self.asm.b(lbl_done);
+
+                self.asm.bind(lbl_untag_i31);
+                self.asm.uxtw(SGP2, SGP2);
+
+                self.asm.bind(lbl_done);
+                let d = self.gp_write_reg(r);
+                if d != SGP2 {
+                    self.asm.mov_r(true, d, SGP2);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::StructNew { ty, fields } => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let (field_defs, total_bytes) = match &gt.composite {
+                    GcCompositeInfo::Struct {
+                        fields,
+                        total_bytes,
+                        ..
+                    } => (fields.clone(), *total_bytes),
+                    _ => return Err("aarch64: StructNew on non-struct type".into()),
+                };
+                self.emit_gc_alloc_fixed(total_bytes)?;
+                self.emit_write_gc_header(SGP2, gt, true);
+                let fvals = self.ir.pool_slice(fields).to_vec();
+                for (&fv, fd) in fvals.iter().zip(field_defs.iter()) {
+                    self.emit_gc_storage_store(SGP2, fd.offset as i32, fd.storage, fv);
+                }
+                let d = self.gp_write_reg(r);
+                if d != SGP2 {
+                    self.asm.mov_r(true, d, SGP2);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::StructNewDefault(ty) => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let total_bytes = match gt.composite {
+                    GcCompositeInfo::Struct { total_bytes, .. } => total_bytes,
+                    _ => return Err("aarch64: StructNewDefault on non-struct type".into()),
+                };
+                self.emit_gc_alloc_fixed(total_bytes)?;
+                self.emit_write_gc_header(SGP2, gt, true);
+                let zero_qwords = (total_bytes - 8) / 8;
+                for q in 0..zero_qwords {
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(Reg::XZR),
+                        None,
+                        SGP2,
+                        8 + (q as i32) * 8,
+                        SGP3,
+                    );
+                }
+                let d = self.gp_write_reg(r);
+                if d != SGP2 {
+                    self.asm.mov_r(true, d, SGP2);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::StructGet {
+                obj,
+                ty,
+                field,
+                kind,
+            } => {
+                let r = res.unwrap();
+                let trap = self.trap_ci_lbl();
+                let gt = self.module.gc_type(ty);
+                let foff = match &gt.composite {
+                    GcCompositeInfo::Struct { fields, .. } => fields[field as usize].offset as i32,
+                    _ => return Err("aarch64: StructGet on non-struct type".into()),
+                };
+                let or = self.gp_read(obj, SGP2);
+                self.asm.cbz(true, or, trap);
+                self.emit_gc_field_load(r, or, foff, kind);
+            }
+            Op::StructSet {
+                obj,
+                ty,
+                field,
+                val,
+            } => {
+                let trap = self.trap_ci_lbl();
+                let gt = self.module.gc_type(ty);
+                let fd = match &gt.composite {
+                    GcCompositeInfo::Struct { fields, .. } => fields[field as usize],
+                    _ => return Err("aarch64: StructSet on non-struct type".into()),
+                };
+                let or = self.gp_read(obj, SGP2);
+                self.asm.cbz(true, or, trap);
+                self.emit_gc_storage_store(or, fd.offset as i32, fd.storage, val);
+            }
+            Op::ArrayNew { ty, init, len } => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let elem = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArrayNew on non-array type".into()),
+                };
+                let elem_sz = elem.byte_size();
+                self.emit_gc_alloc_array_dyn(len, elem_sz)?;
+                let len_ml = MoveLoc::from(self.loc(len));
+                match elem {
+                    GcStorageKind::F32 => {
+                        emit_parallel_moves(
+                            &mut self.asm,
+                            &[(MoveLoc::Gp(Reg::X1), len_ml, Ty::I32)],
+                        );
+                        let fx = self.fp_read(init, SFP1);
+                        self.asm.fmov_gp_from_fp(false, Reg::X2, fx);
+                    }
+                    GcStorageKind::F64 => {
+                        emit_parallel_moves(
+                            &mut self.asm,
+                            &[(MoveLoc::Gp(Reg::X1), len_ml, Ty::I32)],
+                        );
+                        let fx = self.fp_read(init, SFP1);
+                        self.asm.fmov_gp_from_fp(true, Reg::X2, fx);
+                    }
+                    GcStorageKind::V128 => {
+                        emit_parallel_moves(
+                            &mut self.asm,
+                            &[(MoveLoc::Gp(Reg::X1), len_ml, Ty::I32)],
+                        );
+                        let fx = self.fp_read(init, SFP1);
+                        self.asm.mov_16b(SFP1, fx);
+                    }
+                    _ => {
+                        let moves = [
+                            (MoveLoc::Gp(Reg::X1), len_ml, Ty::I32),
+                            (
+                                MoveLoc::Gp(Reg::X2),
+                                MoveLoc::from(self.loc(init)),
+                                self.ty(init),
+                            ),
+                        ];
+                        emit_parallel_moves(&mut self.asm, &moves);
+                    }
+                }
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.emit_write_gc_header(Reg::X0, gt, false);
+                self.asm.str_uimm(false, Reg::X1, Reg::X0, 4);
+                self.asm.mov_imm32(Reg::X3, elem_sz);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_FILL_RAW));
+                let d = self.gp_write_reg(r);
+                if d != Reg::X0 {
+                    self.asm.mov_r(true, d, Reg::X0);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::ArrayNewDefault { ty, len } => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let elem = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArrayNewDefault on non-array type".into()),
+                };
+                let elem_sz = elem.byte_size();
+                self.emit_gc_alloc_array_dyn(len, elem_sz)?;
+                let len_ml = MoveLoc::from(self.loc(len));
+                emit_parallel_moves(&mut self.asm, &[(MoveLoc::Gp(Reg::X1), len_ml, Ty::I32)]);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.emit_write_gc_header(Reg::X0, gt, false);
+                self.asm.str_uimm(false, Reg::X1, Reg::X0, 4);
+                if elem_sz == 16 {
+                    self.asm.movi_zero_16b(SFP1);
+                } else {
+                    self.asm.movz(true, Reg::X2, 0, 0);
+                }
+                self.asm.mov_imm32(Reg::X3, elem_sz);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_FILL_RAW));
+                let d = self.gp_write_reg(r);
+                if d != Reg::X0 {
+                    self.asm.mov_r(true, d, Reg::X0);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::ArrayNewFixed { ty, elems } => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let elem = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArrayNewFixed on non-array type".into()),
+                };
+                let elem_sz = elem.byte_size();
+                let evals = self.ir.pool_slice(elems).to_vec();
+                let byte_size = u32::try_from((8usize + evals.len() * (elem_sz as usize) + 7) & !7)
+                    .map_err(|_| "aarch64: ArrayNewFixed byte size exceeds u32")?;
+                self.emit_gc_alloc_fixed(byte_size)?;
+                self.emit_write_gc_header(SGP2, gt, false);
+                self.asm.mov_imm32(SGP1, evals.len() as u32);
+                self.asm.str_uimm(false, SGP1, SGP2, 4);
+                for (i, &ev) in evals.iter().enumerate() {
+                    self.emit_gc_storage_store(SGP2, 8 + (i as i32) * (elem_sz as i32), elem, ev);
+                }
+                let d = self.gp_write_reg(r);
+                if d != SGP2 {
+                    self.asm.mov_r(true, d, SGP2);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::ArrayNewData { ty, data, src, len } => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let elem = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArrayNewData on non-array type".into()),
+                };
+                let elem_sz = elem.byte_size();
+                let drop_off = self
+                    .layout
+                    .data_dropped_off
+                    .ok_or("aarch64: ArrayNewData missing data_dropped_off")?;
+                let trap_oob = self.trap_oob_lbl();
+                let lr = self.gp_read(len, SGP1);
+                self.asm.uxtw(SGP2, lr);
+                if elem_sz > 1 {
+                    self.asm
+                        .lsl_imm(true, SGP2, SGP2, elem_sz.trailing_zeros() as u8);
+                }
+                let sr = self.gp_read(src, SGP1);
+                self.asm.uxtw(SGP1, sr);
+                self.asm.adds_r(true, SGP2, SGP2, SGP1);
+                self.asm.b_cond(Cond::Hs, trap_oob);
+                let lbl_not_dropped = self.asm.new_label();
+                let lbl_cmp_seg = self.asm.new_label();
+                self.asm
+                    .add_i32_checked(true, SGP3, CTX_REG, drop_off + data as i32, SGP3);
+                self.asm.ldrb_uimm(SGP1, SGP3, 0);
+                self.asm.cbz(false, SGP1, lbl_not_dropped);
+                self.asm.movz(true, SGP1, 0, 0);
+                self.asm.b(lbl_cmp_seg);
+                self.asm.bind(lbl_not_dropped);
+                self.asm.adr_reloc(
+                    SGP1,
+                    A64RelocTarget::Rodata(self.layout.passive_data_table_off),
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(SGP1),
+                    None,
+                    SGP1,
+                    (data as i32) * 8 + 4,
+                    SGP3,
+                );
+                self.asm.bind(lbl_cmp_seg);
+                self.asm.cmp_r(true, SGP2, SGP1);
+                self.asm.b_cond(Cond::Hi, trap_oob);
+
+                self.emit_gc_alloc_array_dyn(len, elem_sz)?;
+                let moves = [
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.emit_write_gc_header(Reg::X0, gt, false);
+                self.asm.str_uimm(false, Reg::X3, Reg::X0, 4);
+                self.asm.movz(false, Reg::X1, 0, 0); // dst_elem_off = 0
+                self.asm
+                    .mov_imm64(Reg::X4, (u64::from(data) << 32) | u64::from(elem_sz));
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_INIT_DATA));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+                let d = self.gp_write_reg(r);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(d),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.gp_commit(r, d);
+            }
+            Op::ArrayNewElem { ty, elem, src, len } => {
+                let r = res.unwrap();
+                let gt = self.module.gc_type(ty);
+                let elem_sz = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem.byte_size(),
+                    _ => return Err("aarch64: ArrayNewElem on non-array type".into()),
+                };
+                let gc_elem_desc_ro = self
+                    .layout
+                    .gc
+                    .as_ref()
+                    .ok_or("aarch64: ArrayNewElem missing GcCtxLayout")?
+                    .gc_elem_desc_ro_off;
+                let drop_off = self
+                    .layout
+                    .elem_dropped_off
+                    .ok_or("aarch64: ArrayNewElem missing elem_dropped_off")?;
+                let trap_oob = self.trap_oob_lbl();
+                let lr = self.gp_read(len, SGP1);
+                self.asm.uxtw(SGP2, lr);
+                let sr = self.gp_read(src, SGP1);
+                self.asm.uxtw(SGP1, sr);
+                self.asm.add_r(true, SGP2, SGP2, SGP1);
+                let lbl_not_dropped = self.asm.new_label();
+                let lbl_cmp_seg = self.asm.new_label();
+                self.asm
+                    .add_i32_checked(true, SGP3, CTX_REG, drop_off + elem as i32, SGP3);
+                self.asm.ldrb_uimm(SGP1, SGP3, 0);
+                self.asm.cbz(false, SGP1, lbl_not_dropped);
+                self.asm.movz(true, SGP1, 0, 0);
+                self.asm.b(lbl_cmp_seg);
+                self.asm.bind(lbl_not_dropped);
+                self.asm
+                    .adr_reloc(SGP1, A64RelocTarget::Rodata(gc_elem_desc_ro));
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(SGP1),
+                    None,
+                    SGP1,
+                    (elem as i32) * 16 + 4,
+                    SGP3,
+                );
+                self.asm.bind(lbl_cmp_seg);
+                self.asm.cmp_r(true, SGP2, SGP1);
+                self.asm.b_cond(Cond::Hi, trap_oob);
+
+                self.emit_gc_alloc_array_dyn(len, elem_sz)?;
+                let moves = [
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.emit_write_gc_header(Reg::X0, gt, false);
+                self.asm.str_uimm(false, Reg::X3, Reg::X0, 4);
+                self.asm.movz(false, Reg::X1, 0, 0);
+                self.asm.mov_imm32(Reg::X4, elem);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_INIT_ELEM));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+                let d = self.gp_write_reg(r);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(d),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.gp_commit(r, d);
+            }
+            Op::ArrayGet { arr, idx, ty, kind } => {
+                let r = res.unwrap();
+                let trap_ci = self.trap_ci_lbl();
+                let trap_oob = self.trap_oob_lbl();
+                let gt = self.module.gc_type(ty);
+                let elem_sz = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem.byte_size(),
+                    _ => return Err("aarch64: ArrayGet on non-array type".into()),
+                };
+                let ar = self.gp_read(arr, SGP2);
+                self.asm.cbz(true, ar, trap_ci);
+                let ir = self.gp_read(idx, SGP1);
+                self.asm.ldr_uimm(false, SGP3, ar, 4);
+                self.asm.cmp_r(false, ir, SGP3);
+                self.asm.b_cond(Cond::Hs, trap_oob);
+                self.emit_speculation_barrier();
+                self.asm.uxtw(SGP1, ir);
+                if elem_sz > 1 {
+                    self.asm
+                        .lsl_imm(true, SGP1, SGP1, elem_sz.trailing_zeros() as u8);
+                }
+                self.asm.add_imm(true, SGP1, SGP1, 8);
+                self.asm.add_r(true, SGP2, ar, SGP1);
+                self.emit_gc_field_load(r, SGP2, 0, kind);
+            }
+            Op::ArraySet { arr, idx, val, ty } => {
+                let trap_ci = self.trap_ci_lbl();
+                let trap_oob = self.trap_oob_lbl();
+                let gt = self.module.gc_type(ty);
+                let elem = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArraySet on non-array type".into()),
+                };
+                let elem_sz = elem.byte_size();
+                let ar = self.gp_read(arr, SGP2);
+                self.asm.cbz(true, ar, trap_ci);
+                let ir = self.gp_read(idx, SGP1);
+                self.asm.ldr_uimm(false, SGP3, ar, 4);
+                self.asm.cmp_r(false, ir, SGP3);
+                self.asm.b_cond(Cond::Hs, trap_oob);
+                self.emit_speculation_barrier();
+                self.asm.uxtw(SGP1, ir);
+                if elem_sz > 1 {
+                    self.asm
+                        .lsl_imm(true, SGP1, SGP1, elem_sz.trailing_zeros() as u8);
+                }
+                self.asm.add_imm(true, SGP1, SGP1, 8);
+                self.asm.add_r(true, SGP2, ar, SGP1);
+                self.emit_gc_storage_store(SGP2, 0, elem, val);
+            }
+            Op::ArrayLen(arr) => {
+                let r = res.unwrap();
+                let trap = self.trap_ci_lbl();
+                let ar = self.gp_read(arr, SGP2);
+                self.asm.cbz(true, ar, trap);
+                let d = self.gp_write_reg(r);
+                self.asm.ldr_uimm(false, d, ar, 4);
+                self.gp_commit(r, d);
+            }
+            Op::ArrayFill {
+                ty,
+                arr,
+                dst,
+                val,
+                len,
+            } => {
+                let gt = self.module.gc_type(ty);
+                let elem = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArrayFill on non-array type".into()),
+                };
+                let elem_sz = elem.byte_size();
+                match elem {
+                    GcStorageKind::F32 | GcStorageKind::F64 | GcStorageKind::V128 => {
+                        let moves = [
+                            (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(arr)), Ty::I64),
+                            (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(dst)), Ty::I32),
+                            (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
+                        ];
+                        emit_parallel_moves(&mut self.asm, &moves);
+                        let fx = self.fp_read(val, SFP1);
+                        match elem {
+                            GcStorageKind::F32 => self.asm.fmov_gp_from_fp(false, Reg::X2, fx),
+                            GcStorageKind::F64 => self.asm.fmov_gp_from_fp(true, Reg::X2, fx),
+                            GcStorageKind::V128 => self.asm.mov_16b(SFP1, fx),
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => {
+                        let moves = [
+                            (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(arr)), Ty::I64),
+                            (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(dst)), Ty::I32),
+                            (
+                                MoveLoc::Gp(Reg::X2),
+                                MoveLoc::from(self.loc(val)),
+                                self.ty(val),
+                            ),
+                            (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
+                        ];
+                        emit_parallel_moves(&mut self.asm, &moves);
+                    }
+                }
+                self.asm.mov_imm32(Reg::X4, elem_sz);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_FILL));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::ArrayCopy {
+                dst_ty,
+                dst,
+                dst_off,
+                src,
+                src_off,
+                len,
+                ..
+            } => {
+                let gt = self.module.gc_type(dst_ty);
+                let elem_sz = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem.byte_size(),
+                    _ => return Err("aarch64: ArrayCopy on non-array type".into()),
+                };
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I64),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(dst_off)),
+                        Ty::I32,
+                    ),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(src)), Ty::I64),
+                    (
+                        MoveLoc::Gp(Reg::X3),
+                        MoveLoc::from(self.loc(src_off)),
+                        Ty::I32,
+                    ),
+                    (MoveLoc::Gp(Reg::X4), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.mov_imm32(Reg::X5, elem_sz);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_COPY));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::ArrayInitData {
+                ty,
+                data,
+                arr,
+                dst,
+                src,
+                len,
+            } => {
+                let gt = self.module.gc_type(ty);
+                let elem_sz = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => elem.byte_size(),
+                    _ => return Err("aarch64: ArrayInitData on non-array type".into()),
+                };
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(arr)), Ty::I64),
+                    (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm
+                    .mov_imm64(Reg::X4, (u64::from(data) << 32) | u64::from(elem_sz));
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_INIT_DATA));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::ArrayInitElem {
+                elem,
+                arr,
+                dst,
+                src,
+                len,
+                ..
+            } => {
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(arr)), Ty::I64),
+                    (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.mov_imm32(Reg::X4, elem);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_INIT_ELEM));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::RefTest {
+                val,
+                heap,
+                nullable,
+            } => {
+                let r = res.unwrap();
+                let lbl_true = self.asm.new_label();
+                let lbl_false = self.asm.new_label();
+                let lbl_done = self.asm.new_label();
+                let vr = self.gp_read(val, SGP2);
+                self.asm
+                    .cbz(true, vr, if nullable { lbl_true } else { lbl_false });
+                self.emit_gc_nonnull_matches_target(vr, heap, lbl_false)?;
+                self.asm.bind(lbl_true);
+                let d = self.gp_write_reg(r);
+                self.asm.movz(false, d, 1, 0);
+                self.asm.b(lbl_done);
+                self.asm.bind(lbl_false);
+                self.asm.movz(false, d, 0, 0);
+                self.asm.bind(lbl_done);
+                self.gp_commit(r, d);
+            }
+            Op::RefCast {
+                val,
+                heap,
+                nullable,
+            } => {
+                let r = res.unwrap();
+                let trap = self.trap_ci_lbl();
+                let lbl_ok = self.asm.new_label();
+                match (self.loc(val), self.loc(r)) {
+                    (A64Loc::Gp(g), _) => {
+                        self.asm.cbz(true, g, if nullable { lbl_ok } else { trap });
+                        self.emit_gc_nonnull_matches_target(g, heap, trap)?;
+                        self.asm.bind(lbl_ok);
+                        let d = self.gp_write_reg(r);
+                        if d != g {
+                            self.asm.mov_r(true, d, g);
+                        }
+                        self.gp_commit(r, d);
+                    }
+                    (_, A64Loc::Gp(dg)) => {
+                        let vr = self.gp_read(val, dg);
+                        if vr != dg {
+                            self.asm.mov_r(true, dg, vr);
+                        }
+                        self.asm.cbz(true, dg, if nullable { lbl_ok } else { trap });
+                        self.emit_gc_nonnull_matches_target(dg, heap, trap)?;
+                        self.asm.bind(lbl_ok);
+                        self.gp_commit(r, dg);
+                    }
+                    _ => {
+                        let vr = self.gp_read(val, SGP2);
+                        self.asm.cbz(true, vr, if nullable { lbl_ok } else { trap });
+                        self.emit_gc_nonnull_matches_target(vr, heap, trap)?;
+                        self.asm.bind(lbl_ok);
+                        if self.loc(val) != self.loc(r) {
+                            let vr2 = self.gp_read(val, SGP1);
+                            self.gp_commit(r, vr2);
+                        }
+                    }
+                }
+            }
+            // ---- Wasm Threads / Atomics (`0xfe00..=0xfe4e`) ----
+            Op::AtomicFence => {
+                self.asm.dmb_ish();
+            }
+            Op::AtomicLoad {
+                mem,
+                width,
+                addr,
+                offset,
+                ..
+            } => {
+                let r = res.unwrap();
+                self.emit_atomic_ea(mem, addr, offset, width.bytes());
+                let d = self.gp_write_reg(r);
+                match width {
+                    AtomicWidth::B1 => self.asm.ldarb(d, SGP1),
+                    AtomicWidth::B2 => self.asm.ldarh(d, SGP1),
+                    AtomicWidth::B4 => self.asm.ldar_w(d, SGP1),
+                    AtomicWidth::B8 => self.asm.ldar(d, SGP1),
+                }
+                self.gp_commit(r, d);
+            }
+            Op::AtomicStore {
+                mem,
+                width,
+                addr,
+                val,
+                offset,
+            } => {
+                self.emit_atomic_ea(mem, addr, offset, width.bytes());
+                let vr = self.gp_read(val, SGP2);
+                match width {
+                    AtomicWidth::B1 => self.asm.stlrb(vr, SGP1),
+                    AtomicWidth::B2 => self.asm.stlrh(vr, SGP1),
+                    AtomicWidth::B4 => self.asm.stlr_w(vr, SGP1),
+                    AtomicWidth::B8 => self.asm.stlr(vr, SGP1),
+                }
+            }
+            Op::AtomicRmw {
+                mem,
+                op,
+                width,
+                res_ty,
+                addr,
+                val,
+                offset,
+            } => {
+                let r = res.unwrap();
+                let is64 = width == AtomicWidth::B8;
+                self.emit_atomic_ea(mem, addr, offset, width.bytes());
+                let vr = self.gp_read(val, SGP2);
+                if vr != SGP2 {
+                    self.asm.mov_r(is64, SGP2, vr);
+                }
+                let lp = self.asm.new_label();
+                self.asm.bind(lp);
+                match width {
+                    AtomicWidth::B1 => self.asm.ldaxrb(Reg::X0, SGP1),
+                    AtomicWidth::B2 => self.asm.ldaxrh(Reg::X0, SGP1),
+                    AtomicWidth::B4 => self.asm.ldaxr_w(Reg::X0, SGP1),
+                    AtomicWidth::B8 => self.asm.ldaxr(Reg::X0, SGP1),
+                }
+                match op {
+                    AtomicRmwOp::Add => self.asm.add_r(is64, Reg::X1, Reg::X0, SGP2),
+                    AtomicRmwOp::Sub => self.asm.sub_r(is64, Reg::X1, Reg::X0, SGP2),
+                    AtomicRmwOp::And => self.asm.and_r(is64, Reg::X1, Reg::X0, SGP2),
+                    AtomicRmwOp::Or => self.asm.orr_r(is64, Reg::X1, Reg::X0, SGP2),
+                    AtomicRmwOp::Xor => self.asm.eor_r(is64, Reg::X1, Reg::X0, SGP2),
+                    AtomicRmwOp::Xchg => self.asm.mov_r(is64, Reg::X1, SGP2),
+                }
+                match width {
+                    AtomicWidth::B1 => self.asm.stlxrb(SGP3, Reg::X1, SGP1),
+                    AtomicWidth::B2 => self.asm.stlxrh(SGP3, Reg::X1, SGP1),
+                    AtomicWidth::B4 => self.asm.stlxr_w(SGP3, Reg::X1, SGP1),
+                    AtomicWidth::B8 => self.asm.stlxr(SGP3, Reg::X1, SGP1),
+                }
+                self.asm.cbnz(false, SGP3, lp);
+                let d = self.gp_write_reg(r);
+                if d != Reg::X0 {
+                    self.asm.mov_r(res_ty == Ty::I64, d, Reg::X0);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::AtomicCmpxchg {
+                mem,
+                width,
+                res_ty,
+                addr,
+                expected,
+                replacement,
+                offset,
+            } => {
+                let r = res.unwrap();
+                let is64 = width == AtomicWidth::B8;
+                self.emit_atomic_ea(mem, addr, offset, width.bytes());
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                let moves = [
+                    (
+                        MoveLoc::Gp(Reg::X0),
+                        MoveLoc::from(self.loc(expected)),
+                        res_ty,
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(replacement)),
+                        res_ty,
+                    ),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.mov_r(is64, SGP2, Reg::X0);
+                match width {
+                    AtomicWidth::B1 => self.asm.and_imm_low_bits(false, SGP2, SGP2, 8),
+                    AtomicWidth::B2 => self.asm.and_imm_low_bits(false, SGP2, SGP2, 16),
+                    AtomicWidth::B4 => self.asm.uxtw(SGP2, SGP2),
+                    AtomicWidth::B8 => {}
+                }
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                let lp = self.asm.new_label();
+                let lbl_fail = self.asm.new_label();
+                let lbl_done = self.asm.new_label();
+                self.asm.bind(lp);
+                match width {
+                    AtomicWidth::B1 => self.asm.ldaxrb(Reg::X0, SGP1),
+                    AtomicWidth::B2 => self.asm.ldaxrh(Reg::X0, SGP1),
+                    AtomicWidth::B4 => self.asm.ldaxr_w(Reg::X0, SGP1),
+                    AtomicWidth::B8 => self.asm.ldaxr(Reg::X0, SGP1),
+                }
+                self.asm.cmp_r(is64, Reg::X0, SGP2);
+                self.asm.b_cond(Cond::Ne, lbl_fail);
+                match width {
+                    AtomicWidth::B1 => self.asm.stlxrb(SGP3, Reg::X1, SGP1),
+                    AtomicWidth::B2 => self.asm.stlxrh(SGP3, Reg::X1, SGP1),
+                    AtomicWidth::B4 => self.asm.stlxr_w(SGP3, Reg::X1, SGP1),
+                    AtomicWidth::B8 => self.asm.stlxr(SGP3, Reg::X1, SGP1),
+                }
+                self.asm.cbnz(false, SGP3, lp);
+                self.asm.b(lbl_done);
+                self.asm.bind(lbl_fail);
+                self.asm.clrex();
+                self.asm.bind(lbl_done);
+                let d = self.gp_write_reg(r);
+                if d != Reg::X0 {
+                    self.asm.mov_r(res_ty == Ty::I64, d, Reg::X0);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::AtomicWait {
+                mem,
+                is_64,
+                addr,
+                expected,
+                timeout,
+                offset,
+            } => {
+                let r = res.unwrap();
+                if !self.module.mem_is_shared(mem) {
+                    let lbl = self.trap_unreach_lbl();
+                    self.asm.b(lbl);
+                } else {
+                    self.emit_atomic_ea(mem, addr, offset, if is_64 { 8 } else { 4 });
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    let ety = if is_64 { Ty::I64 } else { Ty::I32 };
+                    let moves = [
+                        (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(expected)), ety),
+                        (
+                            MoveLoc::Gp(Reg::X2),
+                            MoveLoc::from(self.loc(timeout)),
+                            Ty::I64,
+                        ),
+                    ];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(Reg::X0),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    self.asm.mov_imm32(Reg::X3, u32::from(is_64));
+                    self.asm
+                        .bl_reloc(A64RelocTarget::Helper(HELPER_ATOMIC_WAIT));
+                    let d = self.gp_write_reg(r);
+                    if d != Reg::X0 {
+                        self.asm.mov_r(false, d, Reg::X0);
+                    }
+                    self.gp_commit(r, d);
+                }
+            }
+            Op::AtomicNotify {
+                mem,
+                addr,
+                count,
+                offset,
+            } => {
+                let r = res.unwrap();
+                self.emit_atomic_ea(mem, addr, offset, 4);
+                if !self.module.mem_is_shared(mem) {
+                    let d = self.gp_write_reg(r);
+                    self.asm.movz(false, d, 0, 0);
+                    self.gp_commit(r, d);
+                } else {
+                    emit_store_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP1),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    let moves = [(
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(count)),
+                        Ty::I32,
+                    )];
+                    emit_parallel_moves(&mut self.asm, &moves);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(Reg::X0),
+                        None,
+                        CTX_REG,
+                        OFF_SCRATCH_TMP,
+                        SGP3,
+                    );
+                    self.asm
+                        .bl_reloc(A64RelocTarget::Helper(HELPER_ATOMIC_NOTIFY));
+                    let d = self.gp_write_reg(r);
+                    if d != Reg::X0 {
+                        self.asm.mov_r(false, d, Reg::X0);
+                    }
+                    self.gp_commit(r, d);
+                }
             }
             Op::Trap(code) => {
                 let lbl = match code {
@@ -6080,6 +8701,7 @@ pub fn lower_ir_to_aarch64(
     ir: &IrFunc,
     alloc: &A64AllocResult,
     layout: &CtxLayout,
+    module: &X64Module,
 ) -> Result<A64Asm, String> {
     let mut asm = A64Asm::new();
     let bb_labels: Vec<Label> = (0..ir.blocks.len()).map(|_| asm.new_label()).collect();
@@ -6087,6 +8709,7 @@ pub fn lower_ir_to_aarch64(
         ir,
         alloc,
         layout,
+        module,
         asm,
         bb_labels,
         trap_oob: None,
@@ -6097,11 +8720,15 @@ pub fn lower_ir_to_aarch64(
         trap_inv_conv: None,
         trap_unreach: None,
         trap_stack: None,
+        trap_alloc: None,
+        trap_unaligned: None,
         trap_prop: None,
         epilogue_ok: None,
         epilogue_trap: None,
         edge_tramps: Vec::new(),
         edge_tramp_cache: HashMap::new(),
+        cur_bb: 0,
+        cur_inst: 0,
         val_upper32_zero: None,
         live_flags: None,
     };
@@ -6132,10 +8759,10 @@ pub fn lower_ir_to_aarch64(
         l.asm
             .add_i32_checked(true, Reg::SP, Reg::SP, -l.alloc.frame_size, SGP3);
     }
-    let mut gp_off = l.alloc.saved_gp_base;
     if l.alloc.has_calls {
-        if (gp_off & 7) == 0 && (-512..=504).contains(&gp_off) {
-            l.asm.stp_x(Reg::FP, Reg::LR, Reg::SP, gp_off);
+        let fp_lr_off = l.alloc.saved_fp_lr_off;
+        if (fp_lr_off & 7) == 0 && (-512..=504).contains(&fp_lr_off) {
+            l.asm.stp_x(Reg::FP, Reg::LR, Reg::SP, fp_lr_off);
         } else {
             emit_store_off(
                 &mut l.asm,
@@ -6143,7 +8770,7 @@ pub fn lower_ir_to_aarch64(
                 Some(Reg::FP),
                 None,
                 Reg::SP,
-                gp_off,
+                fp_lr_off,
                 SGP3,
             );
             emit_store_off(
@@ -6152,14 +8779,15 @@ pub fn lower_ir_to_aarch64(
                 Some(Reg::LR),
                 None,
                 Reg::SP,
-                gp_off + 8,
+                fp_lr_off + 8,
                 SGP3,
             );
         }
-        l.asm.add_i32_checked(true, Reg::FP, Reg::SP, gp_off, SGP3);
-        gp_off += 16;
+        l.asm
+            .add_i32_checked(true, Reg::FP, Reg::SP, fp_lr_off, SGP3);
     }
     {
+        let mut gp_off = l.alloc.saved_gp_base;
         let gps = &l.alloc.used_callee_gp;
         let mut gi = 0usize;
         while gi < gps.len() {
@@ -6203,15 +8831,36 @@ pub fn lower_ir_to_aarch64(
         }
     }
     if let Some(saved_off) = l.alloc.saved_ret_ptr_off {
-        emit_load_off(
-            &mut l.asm,
-            Ty::I64,
-            Some(SGP1),
-            None,
-            CTX_REG,
-            OFF_RET_SPILL_PTR,
-            SGP3,
-        );
+        if l.layout.is_store {
+            emit_load_off(
+                &mut l.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_STORE_PTR,
+                SGP3,
+            );
+            emit_load_off(
+                &mut l.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                SGP1,
+                STORE_OFF_RET_SPILL_PTR,
+                SGP3,
+            );
+        } else {
+            emit_load_off(
+                &mut l.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_RET_SPILL_PTR,
+                SGP3,
+            );
+        }
         emit_store_off(
             &mut l.asm,
             Ty::I64,
@@ -6266,10 +8915,12 @@ pub fn lower_ir_to_aarch64(
             }
         }
         l.asm.bind(l.bb_labels[bid as usize]);
+        l.cur_bb = bid;
         l.live_flags = None;
         let bb = &l.ir.blocks[bid as usize];
         let mut ii = 0usize;
         while ii < bb.insts.len() {
+            l.cur_inst = ii as u32;
             let inst = &bb.insts[ii];
             // Try `madd`/`msub` fusion: `tmp = x * y` (single use) followed by `z + tmp`, `tmp + z`, or `z - tmp`.
             if ii + 1 < bb.insts.len()
@@ -6345,6 +8996,7 @@ pub fn lower_ir_to_aarch64(
             l.emit_inst(inst.res, inst.op, bc_guard_covered)?;
             ii += 1;
         }
+        l.cur_inst = u32::MAX;
         l.emit_term(bb.term, next_bb)?;
     }
 
@@ -6369,6 +9021,8 @@ pub fn lower_ir_to_aarch64(
         (l.trap_int_ovf, TRAP_INT_OVERFLOW),
         (l.trap_inv_conv, TRAP_INVALID_CONV),
         (l.trap_unreach, TRAP_UNREACHABLE),
+        (l.trap_alloc, TRAP_ALLOC_FAILED),
+        (l.trap_unaligned, TRAP_UNALIGNED_ATOMIC),
     ];
     let need_ep_trap = l.epilogue_trap.is_some()
         || l.trap_prop.is_some()

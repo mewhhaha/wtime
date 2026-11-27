@@ -16,11 +16,18 @@ use std::sync::{Arc, Mutex, Once};
 
 use crate::abi::{StoreState, TRAP_INTERRUPT_CODE};
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
 pub(crate) struct SigJmpBuf {
-    // Linux x86_64 glibc `sigjmp_buf` is 200 bytes; reserve 256 bytes aligned to 16.
-    pub(crate) raw: [u64; 32],
+    // Linux glibc `sigjmp_buf` is 200 bytes on x86_64 and 312 bytes on aarch64;
+    // reserve 320 bytes aligned to 16.
+    pub(crate) raw: [u64; 40],
+}
+
+impl Default for SigJmpBuf {
+    fn default() -> Self {
+        Self { raw: [0; 40] }
+    }
 }
 
 unsafe extern "C" {
@@ -326,6 +333,8 @@ static mut PREV_SIGSEGV: libc::sigaction = unsafe { std::mem::zeroed() };
 static mut PREV_SIGBUS: libc::sigaction = unsafe { std::mem::zeroed() };
 static mut PREV_SIGFPE: libc::sigaction = unsafe { std::mem::zeroed() };
 static mut PREV_SIGILL: libc::sigaction = unsafe { std::mem::zeroed() };
+#[cfg(target_arch = "aarch64")]
+static mut PREV_SIGTRAP: libc::sigaction = unsafe { std::mem::zeroed() };
 
 pub(crate) fn ensure_signal_handlers_installed() {
     INSTALL_ONCE.call_once(|| unsafe {
@@ -337,23 +346,41 @@ pub(crate) fn ensure_signal_handlers_installed() {
         libc::sigaction(libc::SIGBUS, &sa, std::ptr::addr_of_mut!(PREV_SIGBUS));
         libc::sigaction(libc::SIGFPE, &sa, std::ptr::addr_of_mut!(PREV_SIGFPE));
         libc::sigaction(libc::SIGILL, &sa, std::ptr::addr_of_mut!(PREV_SIGILL));
+        #[cfg(target_arch = "aarch64")]
+        libc::sigaction(libc::SIGTRAP, &sa, std::ptr::addr_of_mut!(PREV_SIGTRAP));
     });
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[inline]
+unsafe fn ucontext_pc(ucontext: *const libc::c_void) -> usize {
+    let uc = unsafe { &*(ucontext as *const libc::ucontext_t) };
+    uc.uc_mcontext.gregs[libc::REG_RIP as usize] as usize
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline]
+unsafe fn ucontext_pc(ucontext: *const libc::c_void) -> usize {
+    let uc = unsafe { &*(ucontext as *const libc::ucontext_t) };
+    uc.uc_mcontext.pc as usize
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe extern "C" fn trap_signal_handler(
     sig: libc::c_int,
     info: *mut libc::siginfo_t,
     ucontext: *mut libc::c_void,
 ) {
-    let uc = unsafe { &*(ucontext as *const libc::ucontext_t) };
-    let rip = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as usize;
+    let pc = unsafe { ucontext_pc(ucontext) };
     let fault_addr = if !info.is_null() {
         unsafe { (*info).si_addr() as usize }
     } else {
         0
     };
-    let in_wasm = is_in_wasm_code(rip);
+    let in_wasm = is_in_wasm_code(pc);
 
     // 1. Check if this SIGSEGV hit an `InterruptHandle`-protected region.
     if sig == libc::SIGSEGV && fault_addr != 0 {
@@ -402,7 +429,7 @@ unsafe extern "C" fn trap_signal_handler(
                     }
                 }
                 libc::SIGFPE => wtime_aot::x64::TRAP_DIV_ZERO as u32,
-                libc::SIGILL => {
+                libc::SIGILL | libc::SIGTRAP => {
                     let store_ptr = unsafe { (*frame).store_ptr };
                     let stored = if !store_ptr.is_null() {
                         unsafe { (*store_ptr).last_trap_code }
@@ -430,6 +457,8 @@ unsafe extern "C" fn trap_signal_handler(
         libc::SIGBUS => unsafe { PREV_SIGBUS },
         libc::SIGFPE => unsafe { PREV_SIGFPE },
         libc::SIGILL => unsafe { PREV_SIGILL },
+        #[cfg(target_arch = "aarch64")]
+        libc::SIGTRAP => unsafe { PREV_SIGTRAP },
         _ => unsafe { std::mem::zeroed() },
     };
     if (prev.sa_flags & libc::SA_SIGINFO) != 0 && prev.sa_sigaction != 0 {

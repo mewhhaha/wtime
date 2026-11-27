@@ -7136,7 +7136,10 @@ fn oracle_wasm_threads_atomics_all_opcodes_and_traps() {
             // 1. atomic.store (0xfe17 + lane)
             push_i32(&mut f0, base);
             if is64 {
-                push_i64(&mut f0, 0x1122_3344_5566_7788 ^ i64::from(lane * 13 + mem * 7));
+                push_i64(
+                    &mut f0,
+                    0x1122_3344_5566_7788 ^ i64::from(lane * 13 + mem * 7),
+                );
             } else {
                 push_i32(&mut f0, 0x1234_5678 ^ ((lane * 19 + mem * 11) as i32));
             }
@@ -7152,7 +7155,10 @@ fn oracle_wasm_threads_atomics_all_opcodes_and_traps() {
             for (gi, base_sub) in [30u32, 37, 44, 51, 58, 65].into_iter().enumerate() {
                 push_i32(&mut f0, base);
                 if is64 {
-                    push_i64(&mut f0, 0x0f0f_1234_abcd_0055i64.wrapping_add(gi as i64 * 17));
+                    push_i64(
+                        &mut f0,
+                        0x0f0f_1234_abcd_0055i64.wrapping_add(gi as i64 * 17),
+                    );
                 } else {
                     push_i32(&mut f0, 0x00ff_55aai32.wrapping_add(gi as i32 * 29));
                 }
@@ -7378,10 +7384,7 @@ fn oracle_wasm_threads_atomics_all_opcodes_and_traps() {
         func_sec(&[0, 1]),
         mem_sec,
         export_sec(&[("run_all_atomics", 0, 0), ("atomic_traps", 0, 1)]),
-        code_sec(&[
-            enc_body(&[(2, 0x7e), (1, 0x7f)], &f0),
-            enc_body(&[], &f1),
-        ]),
+        code_sec(&[enc_body(&[(2, 0x7e), (1, 0x7f)], &f0), enc_body(&[], &f1)]),
     ]);
 
     let c = |export: &str, arg: ArgSpec| OracleCall {

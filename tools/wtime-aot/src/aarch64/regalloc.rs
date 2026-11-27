@@ -24,10 +24,14 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use super::asm::{Reg, VReg};
-use crate::x64::ir::{FloatBinOp, IntBinOp, IrFunc, Op, SimdLaneKind, Term, Ty, Val, ValRange};
+use crate::x64::ir::{
+    FloatBinOp, IntBinOp, IrFunc, Op, SimdLaneKind, Term, Ty, Val, ValRange, ValRefKind,
+};
+use crate::x64::module::GC_EXT_I31_TAG_HI;
 use crate::x64::module::{
     CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS,
 };
+use crate::x64::regalloc::SafepointPlan;
 
 pub const CALL_GP_ARGS: [Reg; 8] = [
     Reg::X0,
@@ -186,6 +190,12 @@ pub fn layout_rets(tys: &[Ty]) -> Result<A64AbiLayout, String> {
     layout_args(tys)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct A64AllocConfig {
+    pub is_store: bool,
+    pub n_imports: usize,
+}
+
 pub struct A64AllocResult {
     pub locs: Vec<A64Loc>,
     pub block_order: Vec<u32>,
@@ -193,10 +203,27 @@ pub struct A64AllocResult {
     pub used_callee_fp: Vec<VReg>,
     pub saved_gp_base: i32,
     pub saved_fp_base: i32,
+    /// Offset of saved `(FP, LR)` pair when `has_calls` (always `frame_size - 16` so caller's
+    /// saved LR sits at `[sp_caller - 8]`, matching the GC stack-walker frame convention).
+    pub saved_fp_lr_off: i32,
     pub ret_buf_off: i32,
     pub saved_ret_ptr_off: Option<i32>,
+    /// Frame slot (`[sp + off]`) saving caller's `X28` (`Ctx*`) across cross-module/indirect calls in `StoreCdylib`.
+    pub store_saved_ctx_off: Option<i32>,
     pub frame_size: i32,
     pub has_calls: bool,
+    /// Sorted by `(block_id, inst_idx)` precise GC safepoint root plans (empty when `!ir.uses_gc`).
+    pub safepoints: Vec<SafepointPlan>,
+}
+
+impl A64AllocResult {
+    /// Looks up the precise GC safepoint plan for `(block_id, inst_idx)` (`u32::MAX` for terminator).
+    pub fn safepoint_for(&self, block_id: u32, inst_idx: u32) -> Option<&SafepointPlan> {
+        self.safepoints
+            .binary_search_by_key(&(block_id, inst_idx), |sp| (sp.block_id, sp.inst_idx))
+            .ok()
+            .map(|i| &self.safepoints[i])
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +256,14 @@ struct ActiveEntry {
 const GP_CALLER_COUNT: usize = 16;
 
 pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocResult, String> {
+    allocate_with_config(ir, A64AllocConfig::default(), budget)
+}
+
+pub fn allocate_with_config(
+    ir: &IrFunc,
+    cfg: A64AllocConfig,
+    budget: Option<&CompileBudget>,
+) -> Result<A64AllocResult, String> {
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
@@ -494,9 +529,21 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut val_remat_addr: Vec<Option<(u32, i32, bool)>> = vec![None; n_vals];
     let mut clobbers: Vec<(u32, u32, u32)> = Vec::new();
     let mut slp_bcast_avoid_v0: Vec<u32> = Vec::new();
+    let mut gc_safepoint_pos: Vec<u32> = Vec::new();
+    let mut gc_safepoint_blocks: Vec<bool> = if ir.uses_gc {
+        vec![false; n_ord]
+    } else {
+        Vec::new()
+    };
+    let mut used_by_gc_alloc: Vec<bool> = if ir.uses_gc {
+        vec![false; n_vals]
+    } else {
+        Vec::new()
+    };
     let mut max_out_args = 0i32;
     let mut max_ret_buf = 0i32;
     let mut has_calls = false;
+    let mut needs_store_saved_ctx = false;
     let self_param_tys: Vec<Ty> = ir
         .params
         .iter()
@@ -515,15 +562,37 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
         pos += 2;
         for inst in &bb.insts {
+            let is_gc_alloc = ir.uses_gc && inst.op.is_gc_alloc();
             inst.op.for_each_use(&ir.val_pool, |v| {
                 let vi = v.0 as usize;
                 last_use[vi] = last_use[vi].max(pos);
                 if def_block[vi] != oi as u32 {
                     cross_block[vi] = true;
                 }
+                if is_gc_alloc {
+                    used_by_gc_alloc[vi] = true;
+                }
             });
+            if is_gc_alloc {
+                has_calls = true;
+                gc_safepoint_pos.push(pos);
+                gc_safepoint_blocks[oi] = true;
+            }
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
+                    if cfg.is_store
+                        && match inst.op {
+                            Op::Call { func, .. } => (func as usize) < cfg.n_imports,
+                            Op::CallIndirect { .. } => true,
+                            _ => false,
+                        }
+                    {
+                        needs_store_saved_ctx = true;
+                    }
+                    if ir.uses_gc {
+                        gc_safepoint_pos.push(pos);
+                        gc_safepoint_blocks[oi] = true;
+                    }
                     has_calls = true;
                     clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
                     let arg_tys: Vec<Ty> = ir
@@ -554,9 +623,27 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 | Op::TableInit { .. }
                 | Op::TableCopy { .. }
                 | Op::TableGrow { .. }
-                | Op::TableFill { .. } => {
+                | Op::TableFill { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. } => {
                     has_calls = true;
                     clobbers.push((pos, MASK_GP_CALLER, 0));
+                }
+                Op::ExnAlloc { .. } if cfg.is_store => {
+                    // `HELPER_STORE_EXN_ALLOC` is preserve-all, but still calls a helper and needs LR saved.
+                    has_calls = true;
+                }
+                Op::AtomicRmw { .. } | Op::AtomicCmpxchg { .. } => {
+                    // Exclusive LL/SC loop uses X0 (old) and X1 (new/replacement) alongside SGP1/SGP2/SGP3.
+                    clobbers.push((pos, (1 << 0) | (1 << 1), 0));
                 }
                 Op::VecElemLoop { .. } | Op::VecReduceLoop { .. } => {
                     clobbers.push((pos, 0x000f, 0x0007));
@@ -584,6 +671,17 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 match inst.op {
                     Op::ConstI32(c) => val_remat[r.0 as usize] = Some(A64RematConst::I32(c)),
                     Op::ConstI64(c) => val_remat[r.0 as usize] = Some(A64RematConst::I64(c)),
+                    Op::GcNull | Op::ExternNull => {
+                        val_remat[r.0 as usize] = Some(A64RematConst::I64(0));
+                    }
+                    Op::GcConstI31(enc) => {
+                        val_remat[r.0 as usize] = Some(A64RematConst::I64(i64::from(enc)));
+                    }
+                    Op::ExternConstI31(enc) => {
+                        val_remat[r.0 as usize] = Some(A64RematConst::I64(
+                            (GC_EXT_I31_TAG_HI | u64::from(enc)) as i64,
+                        ));
+                    }
                     Op::I32BinImm(IntBinOp::Add, base, disp)
                         if disp != 0 && disp.unsigned_abs() < 4096 =>
                     {
@@ -601,11 +699,15 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
         match bb.term {
             Term::CallCatch {
+                func,
                 args,
                 ok_bb,
                 catch_args,
                 ..
             } => {
+                if cfg.is_store && (func as usize) < cfg.n_imports {
+                    needs_store_saved_ctx = true;
+                }
                 for &v in ir.pool_slice(args) {
                     let vi = v.0 as usize;
                     last_use[vi] = last_use[vi].max(pos);
@@ -622,6 +724,10 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 }
                 has_calls = true;
                 clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
+                if ir.uses_gc {
+                    gc_safepoint_pos.push(pos);
+                    gc_safepoint_blocks[oi] = true;
+                }
                 let arg_tys: Vec<Ty> = ir
                     .pool_slice(args)
                     .iter()
@@ -642,6 +748,9 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 catch_args,
                 ..
             } => {
+                if cfg.is_store {
+                    needs_store_saved_ctx = true;
+                }
                 let ii = idx.0 as usize;
                 last_use[ii] = last_use[ii].max(pos);
                 if def_block[ii] != oi as u32 {
@@ -663,6 +772,10 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 }
                 has_calls = true;
                 clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
+                if ir.uses_gc {
+                    gc_safepoint_pos.push(pos);
+                    gc_safepoint_blocks[oi] = true;
+                }
                 let arg_tys: Vec<Ty> = ir
                     .pool_slice(args)
                     .iter()
@@ -690,8 +803,22 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     .map(|&v| ir.val_tys[v.0 as usize])
                     .collect();
                 let arg_stack = layout_args(&arg_tys)?.stack_bytes;
-                if arg_stack > self_param_stack {
+                let store_forced_fallback = cfg.is_store
+                    && match bb.term {
+                        Term::ReturnCall { func, .. } => (func as usize) < cfg.n_imports,
+                        Term::ReturnCallIndirect { .. } => true,
+                        _ => false,
+                    };
+                if store_forced_fallback {
+                    needs_store_saved_ctx = true;
+                }
+                if arg_stack > self_param_stack || store_forced_fallback {
                     has_calls = true;
+                    clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
+                    if ir.uses_gc {
+                        gc_safepoint_pos.push(pos);
+                        gc_safepoint_blocks[oi] = true;
+                    }
                     max_out_args = max_out_args.max(arg_stack);
                 }
             }
@@ -722,6 +849,8 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut iv_start = def_pos.clone();
     let mut iv_end = last_use;
     let n_cb = cb_vals.len();
+    let mut saved_live_out: Vec<u64> = Vec::new();
+    let mut saved_live_words = 0usize;
     if n_cb > 0 {
         let words = n_cb.div_ceil(64);
         let matrix_words = n_ord
@@ -871,6 +1000,10 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     }
                 }
             }
+        }
+        if ir.uses_gc && !gc_safepoint_pos.is_empty() {
+            saved_live_out = live_out;
+            saved_live_words = words;
         }
     }
 
@@ -1169,6 +1302,12 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     for &bv in &slp_bcast_avoid_v0 {
         val_clob_fp[bv as usize] |= 1 << 0;
     }
+    let has_gc_safepoints = ir.uses_gc && !gc_safepoint_pos.is_empty();
+    let range_crosses_sp = |s: u32, e: u32| -> bool {
+        let lo = gc_safepoint_pos.partition_point(|&p| p <= s);
+        let hi = gc_safepoint_pos.partition_point(|&p| p < e);
+        lo < hi
+    };
     let mut gp_ivs = Vec::new();
     let mut fp_ivs = Vec::new();
     for vi in 0..n_vals {
@@ -1186,6 +1325,16 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             }
             cgp |= gm;
             cfp |= fm;
+        }
+        if has_gc_safepoints
+            && val_remat[vi].is_none()
+            && ir.val_ref_kind(Val(vi as u32)).is_traced()
+            && (used_by_gc_alloc[vi] || range_crosses_sp(s, e))
+        {
+            // Force traced non-remat GC/extern refs live across any GC safepoint (or consumed
+            // by an allocating GC op) into a spill slot so the precise copying GC can relocate
+            // them directly in `[sp + off]`.
+            cgp = u32::MAX;
         }
         val_clob_gp[vi] = cgp;
         val_clob_fp[vi] = cfp;
@@ -1702,19 +1851,232 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     } else {
         None
     };
+    let store_saved_ctx_off = if needs_store_saved_ctx {
+        cur = align_i32(cur, 8)?;
+        let off = cur;
+        cur += 8;
+        Some(off)
+    } else {
+        None
+    };
 
     cur = align_i32(cur, 16)?;
     let saved_gp_base = cur;
-    let gp_save_count = used_callee_gp.len() + if has_calls { 2 } else { 0 };
-    cur += (gp_save_count as i32) * 8;
+    cur += (used_callee_gp.len() as i32) * 8;
     cur = align_i32(cur, 16)?;
     let saved_fp_base = cur;
     cur += (used_callee_fp.len() as i32) * 16;
+    cur = align_i32(cur, 16)?;
+    let saved_fp_lr_off = if has_calls {
+        let off = cur;
+        cur += 16;
+        off
+    } else {
+        0
+    };
     let frame_size = align_i32(cur, 16)?;
     if frame_size > MAX_FRAME_BYTES {
         return Err(format!(
             "aarch64: stack frame ({frame_size} B) exceeds {MAX_FRAME_BYTES} B"
         ));
+    }
+
+    // 6b. Build exact per-safepoint GC stack maps via reverse intra-block liveness from `saved_live_out`.
+    let mut safepoints: Vec<SafepointPlan> = Vec::new();
+    if has_gc_safepoints {
+        let mut live_stamp = vec![0u32; n_vals];
+        let mut stamp = 0u32;
+        let mut live_vals: Vec<u32> = Vec::new();
+        let insert_traced =
+            |v: Val, live_stamp: &mut [u32], cur_stamp: u32, live_vals: &mut Vec<u32>| {
+                let vi = v.0 as usize;
+                if ir.val_ref_kind(v).is_traced()
+                    && val_remat[vi].is_none()
+                    && live_stamp[vi] != cur_stamp
+                {
+                    live_stamp[vi] = cur_stamp;
+                    live_vals.push(v.0);
+                }
+            };
+        let snapshot_plan = |block_id: u32,
+                             inst_idx: u32,
+                             live_vals: &mut Vec<u32>,
+                             live_stamp: &[u32],
+                             cur_stamp: u32,
+                             locs: &[A64Loc],
+                             out: &mut Vec<SafepointPlan>|
+         -> Result<(), String> {
+            let mut gc_slots = Vec::new();
+            let mut ext_slots = Vec::new();
+            live_vals.retain(|&vi| live_stamp[vi as usize] == cur_stamp);
+            for &vi in live_vals.iter() {
+                let kind = ir.val_ref_kind(Val(vi));
+                let off = match locs[vi as usize] {
+                    A64Loc::Spill(off) => off,
+                    other => {
+                        return Err(format!(
+                            "aarch64: GC safepoint fn {} bb{block_id} inst {inst_idx}: live traced v{vi} ({kind:?}) in {other:?}",
+                            ir.func_index
+                        ));
+                    }
+                };
+                match kind {
+                    ValRefKind::GcRef => gc_slots.push(off),
+                    ValRefKind::ExternRef => ext_slots.push(off),
+                    ValRefKind::None => {}
+                }
+            }
+            gc_slots.sort_unstable();
+            gc_slots.dedup();
+            ext_slots.sort_unstable();
+            ext_slots.dedup();
+            out.push(SafepointPlan {
+                block_id,
+                inst_idx,
+                gc_slots,
+                ext_slots,
+            });
+            Ok(())
+        };
+
+        for (oi, &bid) in block_order.iter().enumerate() {
+            if !gc_safepoint_blocks[oi] {
+                continue;
+            }
+            stamp = stamp.wrapping_add(1);
+            if stamp == 0 {
+                live_stamp.fill(0);
+                stamp = 1;
+            }
+            live_vals.clear();
+            if saved_live_words > 0 {
+                let base = oi * saved_live_words;
+                for w in 0..saved_live_words {
+                    let mut bits = saved_live_out[base + w];
+                    while bits != 0 {
+                        let tz = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let c = (w << 6) + tz;
+                        if c < n_cb {
+                            let vi = cb_vals[c];
+                            insert_traced(Val(vi), &mut live_stamp, stamp, &mut live_vals);
+                        }
+                    }
+                }
+            }
+            let bb = &ir.blocks[bid as usize];
+            match bb.term {
+                Term::CallCatch {
+                    args, catch_args, ..
+                } => {
+                    for &v in ir.pool_slice(catch_args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                    snapshot_plan(
+                        bid,
+                        u32::MAX,
+                        &mut live_vals,
+                        &live_stamp,
+                        stamp,
+                        &locs,
+                        &mut safepoints,
+                    )?;
+                    for &v in ir.pool_slice(args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                }
+                Term::CallIndirectCatch {
+                    idx,
+                    args,
+                    catch_args,
+                    ..
+                } => {
+                    for &v in ir.pool_slice(catch_args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                    snapshot_plan(
+                        bid,
+                        u32::MAX,
+                        &mut live_vals,
+                        &live_stamp,
+                        stamp,
+                        &locs,
+                        &mut safepoints,
+                    )?;
+                    insert_traced(idx, &mut live_stamp, stamp, &mut live_vals);
+                    for &v in ir.pool_slice(args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                }
+                Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                    let arg_tys: Vec<Ty> = ir
+                        .pool_slice(args)
+                        .iter()
+                        .map(|&av| ir.val_tys[av.0 as usize])
+                        .collect();
+                    let arg_stack_bytes = layout_args(&arg_tys)?.stack_bytes;
+                    let store_forced_fallback = cfg.is_store
+                        && match bb.term {
+                            Term::ReturnCall { func, .. } => (func as usize) < cfg.n_imports,
+                            Term::ReturnCallIndirect { .. } => true,
+                            _ => false,
+                        };
+                    if arg_stack_bytes > self_param_stack || store_forced_fallback {
+                        safepoints.push(SafepointPlan {
+                            block_id: bid,
+                            inst_idx: u32::MAX,
+                            gc_slots: Vec::new(),
+                            ext_slots: Vec::new(),
+                        });
+                    }
+                    bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    });
+                }
+                _ => {
+                    bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    });
+                }
+            }
+            for (ii, inst) in bb.insts.iter().enumerate().rev() {
+                if let Some(r) = inst.res {
+                    live_stamp[r.0 as usize] = 0;
+                }
+                match inst.op {
+                    Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                        for &rv in ir.pool_slice(rets) {
+                            live_stamp[rv.0 as usize] = 0;
+                        }
+                        snapshot_plan(
+                            bid,
+                            ii as u32,
+                            &mut live_vals,
+                            &live_stamp,
+                            stamp,
+                            &locs,
+                            &mut safepoints,
+                        )?;
+                    }
+                    _ => {}
+                }
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                });
+                if inst.op.is_gc_alloc() {
+                    snapshot_plan(
+                        bid,
+                        ii as u32,
+                        &mut live_vals,
+                        &live_stamp,
+                        stamp,
+                        &locs,
+                        &mut safepoints,
+                    )?;
+                }
+            }
+        }
+        safepoints.sort_unstable_by_key(|sp| (sp.block_id, sp.inst_idx));
     }
 
     Ok(A64AllocResult {
@@ -1724,9 +2086,12 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         used_callee_fp,
         saved_gp_base,
         saved_fp_base,
+        saved_fp_lr_off,
         ret_buf_off,
         saved_ret_ptr_off,
+        store_saved_ctx_off,
         frame_size,
         has_calls,
+        safepoints,
     })
 }

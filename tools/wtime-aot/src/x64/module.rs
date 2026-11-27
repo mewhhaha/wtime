@@ -2130,7 +2130,10 @@ pub fn admit_x64_module_for_target_with_summaries(
         }
         let ti_u32 = match imp.kind {
             ImportKind::Func(t) => t.0,
-            ImportKind::Memory(_) | ImportKind::Table(_) | ImportKind::Global(_) | ImportKind::Tag(_)
+            ImportKind::Memory(_)
+            | ImportKind::Table(_)
+            | ImportKind::Global(_)
+            | ImportKind::Tag(_)
                 if is_store =>
             {
                 continue;
@@ -2470,7 +2473,10 @@ pub fn admit_x64_module_for_target_with_summaries(
             }
             ExternalKind::Tag if is_store => {
                 if (exp.index as usize) >= tags.len() {
-                    return Err(format!("x64: exported tag index {} out of range", exp.index));
+                    return Err(format!(
+                        "x64: exported tag index {} out of range",
+                        exp.index
+                    ));
                 }
                 exported_tags.push((exp.name.clone(), exp.index));
             }

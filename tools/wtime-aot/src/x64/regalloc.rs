@@ -1670,7 +1670,8 @@ pub fn allocate_with_config_and_scratch(
             // Seed worklist in reverse RPO order (exact 1-pass convergence on DAGs).
             let mut s_live_in: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
             let mut s_live_out: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
-            let mut wl: std::collections::VecDeque<u32> = std::collections::VecDeque::with_capacity(n_ord);
+            let mut wl: std::collections::VecDeque<u32> =
+                std::collections::VecDeque::with_capacity(n_ord);
             let mut in_wl = vec![false; n_ord];
             for &bid_u32 in rpo.iter().rev() {
                 let oi = block_pos_in_order[bid_u32 as usize];
@@ -1928,123 +1929,139 @@ pub fn allocate_with_config_and_scratch(
                 saved_sparse_live_out = s_live_out;
             }
         } else {
-        // Budget exact live-range hole storage strictly inside the remaining `MAX_LIVENESS_BYTES`
-        // headroom (at most 2 MiB) so parallel workers can never exceed the documented 16 MiB/fn
-        // or 256 MiB aggregate liveness caps. First segment lives inline in `cb_seg_first` (zero
-        // per-value heap allocation for contiguous live ranges!); only multi-segment values with
-        // real live-range holes allocate an entry in `cb_extra_vecs`.
-        // For `n_ord <= 2`, disjoint multi-block holes cannot exist, so skip exact segments completely!
-        let flat_hdr_bytes =
-            n_cb.saturating_mul(std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<u32>() + 1);
-        let remaining_cap = MAX_LIVENESS_BYTES.saturating_sub(base_bytes).min(2 << 20);
-        let max_cap_per_val = n_ord.min(MAX_SEGS_PER_VAL).next_power_of_two().max(4);
-        let seg_cap_slots = if n_ord > 2 && remaining_cap > flat_hdr_bytes {
-            // 24 B per slot conservatively covers 8 B in `cb_extra_vecs` + Vec header share + 8 B in `segs_pool`.
-            ((remaining_cap - flat_hdr_bytes) / 24)
-                .min(n_cb.saturating_mul(max_cap_per_val))
-                .min(MAX_SEG_SLOTS_PER_FN)
-        } else {
-            0
-        };
-        let seg_reserve_bytes = if seg_cap_slots > 0 {
-            flat_hdr_bytes.saturating_add(seg_cap_slots.saturating_mul(24))
-        } else {
-            0
-        };
-        let total_liveness_bytes = base_bytes.saturating_add(seg_reserve_bytes);
-        _liveness_guard = match budget {
-            Some(b) => Some(b.reserve_liveness(total_liveness_bytes)?),
-            None => None,
-        };
-        let mut live_use = std::mem::take(&mut scratch.live_use);
-        let mut live_def = std::mem::take(&mut scratch.live_def);
-        let mut live_in = std::mem::take(&mut scratch.live_in);
-        let mut live_out = std::mem::take(&mut scratch.live_out);
-        live_use.clear();
-        live_use.resize(matrix_words, 0u64);
-        live_def.clear();
-        live_def.resize(matrix_words, 0u64);
-        live_in.clear();
-        live_in.resize(matrix_words, 0u64);
-        live_out.clear();
-        live_out.resize(matrix_words, 0u64);
+            // Budget exact live-range hole storage strictly inside the remaining `MAX_LIVENESS_BYTES`
+            // headroom (at most 2 MiB) so parallel workers can never exceed the documented 16 MiB/fn
+            // or 256 MiB aggregate liveness caps. First segment lives inline in `cb_seg_first` (zero
+            // per-value heap allocation for contiguous live ranges!); only multi-segment values with
+            // real live-range holes allocate an entry in `cb_extra_vecs`.
+            // For `n_ord <= 2`, disjoint multi-block holes cannot exist, so skip exact segments completely!
+            let flat_hdr_bytes = n_cb
+                .saturating_mul(std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<u32>() + 1);
+            let remaining_cap = MAX_LIVENESS_BYTES.saturating_sub(base_bytes).min(2 << 20);
+            let max_cap_per_val = n_ord.min(MAX_SEGS_PER_VAL).next_power_of_two().max(4);
+            let seg_cap_slots = if n_ord > 2 && remaining_cap > flat_hdr_bytes {
+                // 24 B per slot conservatively covers 8 B in `cb_extra_vecs` + Vec header share + 8 B in `segs_pool`.
+                ((remaining_cap - flat_hdr_bytes) / 24)
+                    .min(n_cb.saturating_mul(max_cap_per_val))
+                    .min(MAX_SEG_SLOTS_PER_FN)
+            } else {
+                0
+            };
+            let seg_reserve_bytes = if seg_cap_slots > 0 {
+                flat_hdr_bytes.saturating_add(seg_cap_slots.saturating_mul(24))
+            } else {
+                0
+            };
+            let total_liveness_bytes = base_bytes.saturating_add(seg_reserve_bytes);
+            _liveness_guard = match budget {
+                Some(b) => Some(b.reserve_liveness(total_liveness_bytes)?),
+                None => None,
+            };
+            let mut live_use = std::mem::take(&mut scratch.live_use);
+            let mut live_def = std::mem::take(&mut scratch.live_def);
+            let mut live_in = std::mem::take(&mut scratch.live_in);
+            let mut live_out = std::mem::take(&mut scratch.live_out);
+            live_use.clear();
+            live_use.resize(matrix_words, 0u64);
+            live_def.clear();
+            live_def.resize(matrix_words, 0u64);
+            live_in.clear();
+            live_in.resize(matrix_words, 0u64);
+            live_out.clear();
+            live_out.resize(matrix_words, 0u64);
 
-        let set_bit = |buf: &mut [u64], oi: usize, bit: usize| {
-            buf[oi * words + (bit >> 6)] |= 1u64 << (bit & 63);
-        };
-        let has_bit = |buf: &[u64], oi: usize, bit: usize| -> bool {
-            (buf[oi * words + (bit >> 6)] & (1u64 << (bit & 63))) != 0
-        };
+            let set_bit = |buf: &mut [u64], oi: usize, bit: usize| {
+                buf[oi * words + (bit >> 6)] |= 1u64 << (bit & 63);
+            };
+            let has_bit = |buf: &[u64], oi: usize, bit: usize| -> bool {
+                (buf[oi * words + (bit >> 6)] & (1u64 << (bit & 63))) != 0
+            };
 
-        let mut def_use_steps: usize = 0;
-        for (oi, &bid) in block_order.iter().enumerate() {
-            let bb = &ir.blocks[bid as usize];
-            for &p in &bb.params {
-                let c = cb_id[p.0 as usize];
-                if c != u32::MAX {
-                    set_bit(&mut live_def, oi, c as usize);
+            let mut def_use_steps: usize = 0;
+            for (oi, &bid) in block_order.iter().enumerate() {
+                let bb = &ir.blocks[bid as usize];
+                for &p in &bb.params {
+                    let c = cb_id[p.0 as usize];
+                    if c != u32::MAX {
+                        set_bit(&mut live_def, oi, c as usize);
+                    }
                 }
-            }
-            for inst in &bb.insts {
-                def_use_steps += 1;
-                if let Some(bg) = budget
-                    && (def_use_steps & 4095) == 0
-                {
-                    bg.check_deadline()?;
+                for inst in &bb.insts {
+                    def_use_steps += 1;
+                    if let Some(bg) = budget
+                        && (def_use_steps & 4095) == 0
+                    {
+                        bg.check_deadline()?;
+                    }
+                    inst.op.for_each_use(&ir.val_pool, |v| {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX && !has_bit(&live_def, oi, c as usize) {
+                            set_bit(&mut live_use, oi, c as usize);
+                        }
+                    });
+                    if let Some(r) = inst.res {
+                        let c = cb_id[r.0 as usize];
+                        if c != u32::MAX {
+                            set_bit(&mut live_def, oi, c as usize);
+                        }
+                    }
+                    match inst.op {
+                        Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                            for &r in ir.pool_slice(rets) {
+                                let c = cb_id[r.0 as usize];
+                                if c != u32::MAX {
+                                    set_bit(&mut live_def, oi, c as usize);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                inst.op.for_each_use(&ir.val_pool, |v| {
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
                     let c = cb_id[v.0 as usize];
                     if c != u32::MAX && !has_bit(&live_def, oi, c as usize) {
                         set_bit(&mut live_use, oi, c as usize);
                     }
                 });
-                if let Some(r) = inst.res {
-                    let c = cb_id[r.0 as usize];
-                    if c != u32::MAX {
-                        set_bit(&mut live_def, oi, c as usize);
-                    }
+            }
+
+            let mut work_units: usize = 0;
+            let mut changed = true;
+            // Walk blocks in reverse RPO (exact topological order on acyclic CFGs):
+            // DAGs converge in 1 single pass with zero verification pass, and cyclic CFGs converge in
+            // minimum loop-depth iterations while producing bit-identical `live_in`/`live_out`.
+            while changed {
+                if let Some(b) = budget {
+                    b.check_deadline()?;
                 }
-                match inst.op {
-                    Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
-                        for &r in ir.pool_slice(rets) {
-                            let c = cb_id[r.0 as usize];
-                            if c != u32::MAX {
-                                set_bit(&mut live_def, oi, c as usize);
+                changed = false;
+                for &bid_u32 in rpo.iter().rev() {
+                    let bid = bid_u32 as usize;
+                    let oi = block_pos_in_order[bid] as usize;
+                    let ss = succ_offs[bid] as usize;
+                    let se = succ_offs[bid + 1] as usize;
+                    for &sid in &succ_data[ss..se] {
+                        let soi = block_pos_in_order[sid as usize];
+                        if soi == u32::MAX {
+                            continue;
+                        }
+                        let soi = soi as usize;
+                        work_units = work_units.saturating_add(words);
+                        if work_units > MAX_LIVENESS_WORK_UNITS {
+                            return Err(format!(
+                                "x64: function {} liveness work ({work_units}) exceeds cap {MAX_LIVENESS_WORK_UNITS}",
+                                ir.func_index
+                            ));
+                        }
+                        for w in 0..words {
+                            let old = live_out[oi * words + w];
+                            let nv = old | live_in[soi * words + w];
+                            if nv != old {
+                                live_out[oi * words + w] = nv;
+                                changed = true;
                             }
                         }
                     }
-                    _ => {}
-                }
-            }
-            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-                let c = cb_id[v.0 as usize];
-                if c != u32::MAX && !has_bit(&live_def, oi, c as usize) {
-                    set_bit(&mut live_use, oi, c as usize);
-                }
-            });
-        }
-
-        let mut work_units: usize = 0;
-        let mut changed = true;
-        // Walk blocks in reverse RPO (exact topological order on acyclic CFGs):
-        // DAGs converge in 1 single pass with zero verification pass, and cyclic CFGs converge in
-        // minimum loop-depth iterations while producing bit-identical `live_in`/`live_out`.
-        while changed {
-            if let Some(b) = budget {
-                b.check_deadline()?;
-            }
-            changed = false;
-            for &bid_u32 in rpo.iter().rev() {
-                let bid = bid_u32 as usize;
-                let oi = block_pos_in_order[bid] as usize;
-                let ss = succ_offs[bid] as usize;
-                let se = succ_offs[bid + 1] as usize;
-                for &sid in &succ_data[ss..se] {
-                    let soi = block_pos_in_order[sid as usize];
-                    if soi == u32::MAX {
-                        continue;
-                    }
-                    let soi = soi as usize;
                     work_units = work_units.saturating_add(words);
                     if work_units > MAX_LIVENESS_WORK_UNITS {
                         return Err(format!(
@@ -2053,219 +2070,205 @@ pub fn allocate_with_config_and_scratch(
                         ));
                     }
                     for w in 0..words {
-                        let old = live_out[oi * words + w];
-                        let nv = old | live_in[soi * words + w];
-                        if nv != old {
-                            live_out[oi * words + w] = nv;
+                        let nv = live_use[oi * words + w]
+                            | (live_out[oi * words + w] & !live_def[oi * words + w]);
+                        if nv != live_in[oi * words + w] {
+                            live_in[oi * words + w] = nv;
                             changed = true;
                         }
                     }
                 }
-                work_units = work_units.saturating_add(words);
-                if work_units > MAX_LIVENESS_WORK_UNITS {
-                    return Err(format!(
-                        "x64: function {} liveness work ({work_units}) exceeds cap {MAX_LIVENESS_WORK_UNITS}",
-                        ir.func_index
-                    ));
-                }
-                for w in 0..words {
-                    let nv = live_use[oi * words + w]
-                        | (live_out[oi * words + w] & !live_def[oi * words + w]);
-                    if nv != live_in[oi * words + w] {
-                        live_in[oi * words + w] = nv;
-                        changed = true;
-                    }
+                if !has_backedge {
+                    break;
                 }
             }
-            if !has_backedge {
-                break;
-            }
-        }
 
-        // Build exact sorted, merged per-block live-range segments within the budgeted `seg_cap_slots`
-        // (preserving live-range holes while falling back any overflowing value to its exact hull).
-        reset_fill(&mut scratch.cb_hull, n_cb, (u32::MAX, 0u32));
-        if seg_cap_slots > 0 {
-            has_exact_segs = true;
-            cb_seg_first = std::mem::take(&mut scratch.cb_seg_first);
-            cb_seg_first.clear();
-            cb_seg_first.resize(n_cb, (u32::MAX, 0u32));
-            cb_seg_extra_idx = std::mem::take(&mut scratch.cb_seg_extra_idx);
-            cb_seg_extra_idx.clear();
-            cb_seg_extra_idx.resize(n_cb, u32::MAX);
-            cb_seg_overflow = std::mem::take(&mut scratch.cb_seg_overflow);
-            cb_seg_overflow.clear();
-            cb_seg_overflow.resize(n_cb, false);
-        }
-        let mut total_seg_cap_slots = 0usize;
-        reset_fill(&mut scratch.last_use_in_blk, n_cb, (u32::MAX, 0u32));
-        let cb_hull = &mut scratch.cb_hull;
-        let last_use_in_blk = &mut scratch.last_use_in_blk;
-        for (oi, &bid) in block_order.iter().enumerate() {
-            if let Some(bg) = budget
-                && (oi & 4095) == 4095
-            {
-                bg.check_deadline()?;
+            // Build exact sorted, merged per-block live-range segments within the budgeted `seg_cap_slots`
+            // (preserving live-range holes while falling back any overflowing value to its exact hull).
+            reset_fill(&mut scratch.cb_hull, n_cb, (u32::MAX, 0u32));
+            if seg_cap_slots > 0 {
+                has_exact_segs = true;
+                cb_seg_first = std::mem::take(&mut scratch.cb_seg_first);
+                cb_seg_first.clear();
+                cb_seg_first.resize(n_cb, (u32::MAX, 0u32));
+                cb_seg_extra_idx = std::mem::take(&mut scratch.cb_seg_extra_idx);
+                cb_seg_extra_idx.clear();
+                cb_seg_extra_idx.resize(n_cb, u32::MAX);
+                cb_seg_overflow = std::mem::take(&mut scratch.cb_seg_overflow);
+                cb_seg_overflow.clear();
+                cb_seg_overflow.resize(n_cb, false);
             }
-            let oi_u32 = oi as u32;
-            let bb = &ir.blocks[bid as usize];
-            let bs = block_start[oi];
-            let be = block_end[oi];
-            let mut t = bs + 2;
-            for inst in &bb.insts {
-                inst.op.for_each_use(&ir.val_pool, |v| {
-                    let c = cb_id[v.0 as usize];
-                    if c != u32::MAX {
-                        last_use_in_blk[c as usize] = (oi_u32, t);
-                    }
-                });
-                t += 2;
-            }
-            let pos_term = t;
-            match bb.term {
-                Term::CallCatch {
-                    args, catch_args, ..
-                } => {
-                    for &v in ir.pool_slice(args) {
-                        let c = cb_id[v.0 as usize];
-                        if c != u32::MAX {
-                            last_use_in_blk[c as usize] = (oi_u32, pos_term);
-                        }
-                    }
-                    for &v in ir.pool_slice(catch_args) {
-                        let c = cb_id[v.0 as usize];
-                        if c != u32::MAX {
-                            last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
-                        }
-                    }
+            let mut total_seg_cap_slots = 0usize;
+            reset_fill(&mut scratch.last_use_in_blk, n_cb, (u32::MAX, 0u32));
+            let cb_hull = &mut scratch.cb_hull;
+            let last_use_in_blk = &mut scratch.last_use_in_blk;
+            for (oi, &bid) in block_order.iter().enumerate() {
+                if let Some(bg) = budget
+                    && (oi & 4095) == 4095
+                {
+                    bg.check_deadline()?;
                 }
-                Term::CallIndirectCatch {
-                    idx,
-                    args,
-                    catch_args,
-                    ..
-                } => {
-                    let ci = cb_id[idx.0 as usize];
-                    if ci != u32::MAX {
-                        last_use_in_blk[ci as usize] = (oi_u32, pos_term);
-                    }
-                    for &v in ir.pool_slice(args) {
+                let oi_u32 = oi as u32;
+                let bb = &ir.blocks[bid as usize];
+                let bs = block_start[oi];
+                let be = block_end[oi];
+                let mut t = bs + 2;
+                for inst in &bb.insts {
+                    inst.op.for_each_use(&ir.val_pool, |v| {
                         let c = cb_id[v.0 as usize];
                         if c != u32::MAX {
-                            last_use_in_blk[c as usize] = (oi_u32, pos_term);
-                        }
-                    }
-                    for &v in ir.pool_slice(catch_args) {
-                        let c = cb_id[v.0 as usize];
-                        if c != u32::MAX {
-                            last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
-                        }
-                    }
-                }
-                _ => {
-                    bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-                        let c = cb_id[v.0 as usize];
-                        if c != u32::MAX {
-                            last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                            last_use_in_blk[c as usize] = (oi_u32, t);
                         }
                     });
+                    t += 2;
                 }
-            }
-            for w in 0..words {
-                let mut bits =
-                    live_in[oi * words + w] | live_out[oi * words + w] | live_def[oi * words + w];
-                while bits != 0 {
-                    let tz = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let c = (w << 6) + tz;
-                    let vi = cb_vals[c] as usize;
-                    let s = if def_block[vi] == oi_u32 {
-                        def_pos[vi]
-                    } else {
-                        bs
-                    };
-                    let is_out = (live_out[oi * words + w] & (1u64 << tz)) != 0;
-                    let e = if is_out {
-                        be
-                    } else if last_use_in_blk[c].0 == oi_u32 {
-                        last_use_in_blk[c].1.max(s + 1)
-                    } else {
-                        s + 1
-                    };
-                    if s < cb_hull[c].0 {
-                        cb_hull[c].0 = s;
-                    }
-                    if e > cb_hull[c].1 {
-                        cb_hull[c].1 = e;
-                    }
-                    if !has_exact_segs || cb_seg_overflow[c] {
-                        continue;
-                    }
-                    let first = &mut cb_seg_first[c];
-                    if first.0 == u32::MAX {
-                        *first = (s, e);
-                    } else if cb_seg_extra_idx[c] == u32::MAX {
-                        if s <= first.1 + 1 {
-                            if e > first.1 {
-                                first.1 = e;
+                let pos_term = t;
+                match bb.term {
+                    Term::CallCatch {
+                        args, catch_args, ..
+                    } => {
+                        for &v in ir.pool_slice(args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term);
                             }
-                        } else if 4 > MAX_SEGS_PER_VAL
-                            || total_seg_cap_slots.saturating_add(4) > seg_cap_slots
-                        {
-                            cb_seg_overflow[c] = true;
-                        } else {
-                            let mut v = Vec::new();
-                            v.reserve_exact(4);
-                            v.push(*first);
-                            v.push((s, e));
-                            total_seg_cap_slots += 4;
-                            cb_seg_extra_idx[c] = cb_extra_vecs.len() as u32;
-                            cb_extra_vecs.push(v);
                         }
-                    } else {
-                        let segs = &mut cb_extra_vecs[cb_seg_extra_idx[c] as usize];
-                        let last = segs.last_mut().unwrap();
-                        if s <= last.1 + 1 {
-                            if e > last.1 {
-                                last.1 = e;
+                        for &v in ir.pool_slice(catch_args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
                             }
+                        }
+                    }
+                    Term::CallIndirectCatch {
+                        idx,
+                        args,
+                        catch_args,
+                        ..
+                    } => {
+                        let ci = cb_id[idx.0 as usize];
+                        if ci != u32::MAX {
+                            last_use_in_blk[ci as usize] = (oi_u32, pos_term);
+                        }
+                        for &v in ir.pool_slice(args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                            }
+                        }
+                        for &v in ir.pool_slice(catch_args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
+                            }
+                        }
+                    }
+                    _ => {
+                        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                            }
+                        });
+                    }
+                }
+                for w in 0..words {
+                    let mut bits = live_in[oi * words + w]
+                        | live_out[oi * words + w]
+                        | live_def[oi * words + w];
+                    while bits != 0 {
+                        let tz = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let c = (w << 6) + tz;
+                        let vi = cb_vals[c] as usize;
+                        let s = if def_block[vi] == oi_u32 {
+                            def_pos[vi]
                         } else {
-                            if segs.len() == segs.capacity() {
-                                let next_cap = segs.capacity().saturating_mul(2);
-                                let add_slots = next_cap.saturating_sub(segs.capacity());
-                                if next_cap > MAX_SEGS_PER_VAL
-                                    || total_seg_cap_slots.saturating_add(add_slots) > seg_cap_slots
-                                {
-                                    cb_seg_overflow[c] = true;
-                                    total_seg_cap_slots =
-                                        total_seg_cap_slots.saturating_sub(segs.capacity());
-                                    segs.clear();
-                                    segs.shrink_to_fit();
-                                    continue;
+                            bs
+                        };
+                        let is_out = (live_out[oi * words + w] & (1u64 << tz)) != 0;
+                        let e = if is_out {
+                            be
+                        } else if last_use_in_blk[c].0 == oi_u32 {
+                            last_use_in_blk[c].1.max(s + 1)
+                        } else {
+                            s + 1
+                        };
+                        if s < cb_hull[c].0 {
+                            cb_hull[c].0 = s;
+                        }
+                        if e > cb_hull[c].1 {
+                            cb_hull[c].1 = e;
+                        }
+                        if !has_exact_segs || cb_seg_overflow[c] {
+                            continue;
+                        }
+                        let first = &mut cb_seg_first[c];
+                        if first.0 == u32::MAX {
+                            *first = (s, e);
+                        } else if cb_seg_extra_idx[c] == u32::MAX {
+                            if s <= first.1 + 1 {
+                                if e > first.1 {
+                                    first.1 = e;
                                 }
-                                segs.reserve_exact(add_slots);
-                                total_seg_cap_slots += add_slots;
+                            } else if 4 > MAX_SEGS_PER_VAL
+                                || total_seg_cap_slots.saturating_add(4) > seg_cap_slots
+                            {
+                                cb_seg_overflow[c] = true;
+                            } else {
+                                let mut v = Vec::new();
+                                v.reserve_exact(4);
+                                v.push(*first);
+                                v.push((s, e));
+                                total_seg_cap_slots += 4;
+                                cb_seg_extra_idx[c] = cb_extra_vecs.len() as u32;
+                                cb_extra_vecs.push(v);
                             }
-                            segs.push((s, e));
+                        } else {
+                            let segs = &mut cb_extra_vecs[cb_seg_extra_idx[c] as usize];
+                            let last = segs.last_mut().unwrap();
+                            if s <= last.1 + 1 {
+                                if e > last.1 {
+                                    last.1 = e;
+                                }
+                            } else {
+                                if segs.len() == segs.capacity() {
+                                    let next_cap = segs.capacity().saturating_mul(2);
+                                    let add_slots = next_cap.saturating_sub(segs.capacity());
+                                    if next_cap > MAX_SEGS_PER_VAL
+                                        || total_seg_cap_slots.saturating_add(add_slots)
+                                            > seg_cap_slots
+                                    {
+                                        cb_seg_overflow[c] = true;
+                                        total_seg_cap_slots =
+                                            total_seg_cap_slots.saturating_sub(segs.capacity());
+                                        segs.clear();
+                                        segs.shrink_to_fit();
+                                        continue;
+                                    }
+                                    segs.reserve_exact(add_slots);
+                                    total_seg_cap_slots += add_slots;
+                                }
+                                segs.push((s, e));
+                            }
                         }
                     }
                 }
             }
-        }
-        // Recycle small scratch matrices immediately; oversized ones drop here before `_liveness_guard`.
-        if live_use.capacity() <= SCRATCH_RECYCLE_CAP {
-            scratch.live_use = live_use;
-        }
-        if live_def.capacity() <= SCRATCH_RECYCLE_CAP {
-            scratch.live_def = live_def;
-        }
-        if ir.uses_gc && !gc_safepoint_pos.is_empty() {
-            saved_live_out = live_out;
-        } else if live_out.capacity() <= SCRATCH_RECYCLE_CAP {
-            scratch.live_out = live_out;
-        }
-        saved_live_in = live_in;
-        saved_live_words = words;
+            // Recycle small scratch matrices immediately; oversized ones drop here before `_liveness_guard`.
+            if live_use.capacity() <= SCRATCH_RECYCLE_CAP {
+                scratch.live_use = live_use;
+            }
+            if live_def.capacity() <= SCRATCH_RECYCLE_CAP {
+                scratch.live_def = live_def;
+            }
+            if ir.uses_gc && !gc_safepoint_pos.is_empty() {
+                saved_live_out = live_out;
+            } else if live_out.capacity() <= SCRATCH_RECYCLE_CAP {
+                scratch.live_out = live_out;
+            }
+            saved_live_in = live_in;
+            saved_live_words = words;
         }
     }
 

@@ -17,6 +17,7 @@ pub mod regalloc;
 pub mod runtime;
 pub mod simd_lower;
 pub mod standalone_rt;
+pub mod store_rt;
 #[cfg(test)]
 mod tests_aarch64;
 
@@ -32,7 +33,7 @@ use inc_cache::{
     try_build_cached_a64_fn,
 };
 use lower::lower_ir_to_aarch64;
-use regalloc::allocate;
+use regalloc::{A64AllocConfig, allocate_with_config};
 use runtime::{
     emit_a64_blot_import_trampoline, emit_a64_exports, emit_a64_helper_host_call,
     emit_a64_helper_read_global, emit_a64_helpers,
@@ -44,6 +45,7 @@ use standalone_rt::{
 };
 
 use crate::x64::elf::ExportDef;
+use crate::x64::gc_rt;
 use crate::x64::inc_cache::{
     self as x64_inc, ValBodyEntry, ValIndexData, has_val_index, hash_callee_effects,
     load_val_index, save_val_index, scan_wasm_shell_and_body_spans,
@@ -60,6 +62,7 @@ use crate::x64::opt::{
     inline_small_helpers, optimize_func_stage2_with_options, try_compute_fn_own_effects,
 };
 use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables, TRAP_MESSAGES, global_kind_code};
+use crate::x64::store_rt as x64_store_rt;
 use crate::x64::verify::verify_ir;
 use crate::x64::{
     CiTableLayout, CtxLayout, HELPER_GOOSE_FMT_FLOAT, HELPER_HOST_CALL, HELPER_READ_GLOBAL,
@@ -88,6 +91,10 @@ pub struct A64CompileOptions {
     pub pgo_gen_path: Option<PathBuf>,
     /// Optional verified `WTPGO1` profile (`--pgo-use`) driving devirt, inlining, and `.text` layout.
     pub pgo_use: Option<crate::pgo::PgoProfile>,
+    /// Initial Wasm GC semi-space heap size in bytes (`0` = default 4 MiB).
+    pub gc_initial_heap_bytes: u64,
+    /// Maximum Wasm GC semi-space heap size in bytes (`0` = default 512 MiB).
+    pub gc_max_heap_bytes: u64,
 }
 
 impl Default for A64CompileOptions {
@@ -103,6 +110,8 @@ impl Default for A64CompileOptions {
             gen_fingerprint: [0u8; 32],
             pgo_gen_path: None,
             pgo_use: None,
+            gc_initial_heap_bytes: 0,
+            gc_max_heap_bytes: 0,
         }
     }
 }
@@ -146,13 +155,22 @@ fn append_rodata(rodata: &mut Vec<u8>, align: usize, bytes: &[u8]) -> Result<u32
     Ok(off)
 }
 
-/// Compiles a WebAssembly module directly to a Linux AArch64 ELF64 `.so` (`BlotCdylib`)
-/// or standalone static executable (`StandaloneExec`).
+/// Compiles a WebAssembly module directly to a Linux AArch64 ELF64 `.so` (`BlotCdylib` or
+/// `StoreCdylib`) or standalone static executable (`StandaloneExec`).
 pub fn compile_wasm_to_aarch64(
     wasm: &[u8],
     opts: &A64CompileOptions,
 ) -> Result<Vec<u8>, X64CompileError> {
     compile_wasm_to_aarch64_detailed(wasm, opts).map(|d| d.elf)
+}
+
+/// Compiles a WebAssembly module directly to a Linux AArch64 ELF64 `.so` (`BlotCdylib` or
+/// `StoreCdylib`), returning the complete `.so` image bytes.
+pub fn compile_wasm_to_aarch64_so(
+    wasm: &[u8],
+    opts: &A64CompileOptions,
+) -> Result<Vec<u8>, X64CompileError> {
+    compile_wasm_to_aarch64(wasm, opts)
 }
 
 struct A64BuildOutput {
@@ -544,9 +562,13 @@ fn try_compile_a64_incremental(
                 )
                 .map_err(X64CompileError::Failed)?;
                 verify_ir(&ir, module).map_err(X64CompileError::Failed)?;
-                let alloc =
-                    allocate(&ir, Some(budget)).map_err(X64CompileError::AdmissionRejected)?;
-                let fa = lower_ir_to_aarch64(&ir, &alloc, layout)
+                let alloc_cfg = A64AllocConfig {
+                    is_store: layout.is_store,
+                    n_imports,
+                };
+                let alloc = allocate_with_config(&ir, alloc_cfg, Some(budget))
+                    .map_err(X64CompileError::AdmissionRejected)?;
+                let fa = lower_ir_to_aarch64(&ir, &alloc, layout, module)
                     .map_err(X64CompileError::AdmissionRejected)?;
                 dirty_asms[bi] = Some(fa);
             }
@@ -560,6 +582,10 @@ fn try_compile_a64_incremental(
             let first_err: Mutex<Option<(usize, X64CompileError)>> = Mutex::new(None);
             let run_w = || {
                 let mut scratch = Stage2Scratch::default();
+                let alloc_cfg = A64AllocConfig {
+                    is_store: layout.is_store,
+                    n_imports,
+                };
                 loop {
                     if failed.load(Ordering::Acquire) {
                         break;
@@ -585,9 +611,9 @@ fn try_compile_a64_incremental(
                         )
                         .map_err(X64CompileError::Failed)?;
                         verify_ir(&ir, module).map_err(X64CompileError::Failed)?;
-                        let alloc = allocate(&ir, Some(budget))
+                        let alloc = allocate_with_config(&ir, alloc_cfg, Some(budget))
                             .map_err(X64CompileError::AdmissionRejected)?;
-                        lower_ir_to_aarch64(&ir, &alloc, layout)
+                        lower_ir_to_aarch64(&ir, &alloc, layout, module)
                             .map_err(X64CompileError::AdmissionRejected)
                     })();
                     match res {
@@ -709,7 +735,8 @@ fn compile_wasm_to_aarch64_detailed(
     let inc_enabled = opts.inc_cache_dir.is_some()
         && opts.optimize
         && opts.pgo_gen_path.is_none()
-        && opts.pgo_use.is_none();
+        && opts.pgo_use.is_none()
+        && opts.target != X64Target::StoreCdylib;
     let mut vlimits = x64_validate_limits();
     vlimits.compile_threads = if wasm.len() >= 256 * 1024 {
         resolve_a64_jobs(opts.jobs).min(16)
@@ -798,21 +825,17 @@ fn compile_wasm_to_aarch64_detailed(
         inc_enabled,
     )
     .map_err(X64CompileError::AdmissionRejected)?;
-    if opts.target == X64Target::StoreCdylib {
+    if module.uses_gc && opts.target != X64Target::StoreCdylib {
         return Err(X64CompileError::AdmissionRejected(
-            "aarch64: StoreCdylib target is not yet supported".into(),
+            "aarch64: Wasm GC is only supported for StoreCdylib target".into(),
         ));
     }
-    if module.uses_gc {
+    if module.uses_threads && opts.target != X64Target::StoreCdylib {
         return Err(X64CompileError::AdmissionRejected(
-            "aarch64: Wasm GC is not yet supported".into(),
+            "aarch64: Wasm Threads / shared memory is only supported for StoreCdylib target".into(),
         ));
     }
-    if module.uses_threads {
-        return Err(X64CompileError::AdmissionRejected(
-            "aarch64: Wasm Threads / shared memory is not yet supported".into(),
-        ));
-    }
+    let inc_enabled = inc_enabled && !module.uses_gc;
 
     // 1. Build shared `.rodata` tables (trap messages, call_indirect slots BEFORE data segments
     //    so edits to data segments do not shift `ci_tables` offsets).
@@ -888,7 +911,8 @@ fn compile_wasm_to_aarch64_detailed(
         ci_patch_info.push((roff, slice));
     }
 
-    let func_sig_ro_off = if module.uses_dyn_ci {
+    let is_store = opts.target == X64Target::StoreCdylib;
+    let func_sig_ro_off = if !is_store && module.uses_dyn_ci {
         let mut sig_bytes = Vec::with_capacity(module.func_canon_sig.len() * 4);
         for &cs in &module.func_canon_sig {
             sig_bytes.extend_from_slice(&cs.to_le_bytes());
@@ -897,7 +921,7 @@ fn compile_wasm_to_aarch64_detailed(
     } else {
         0
     };
-    let func_addr_ro_off = if module.uses_dyn_ci || module.uses_call_ref {
+    let func_addr_ro_off = if !is_store && (module.uses_dyn_ci || module.uses_call_ref) {
         append_rodata(&mut rodata, 4, &vec![0u8; module.func_canon_sig.len() * 4])
             .map_err(X64CompileError::Failed)?
     } else {
@@ -949,9 +973,10 @@ fn compile_wasm_to_aarch64_detailed(
         Vec::new()
     };
     for (ei, seg) in module.elem_segs.iter().enumerate() {
-        let need_active_dyn = seg
-            .active_target
-            .is_some_and(|(tbl, _)| module.dyn_tables.contains_key(&tbl));
+        let need_active_dyn = seg.gc_entries.is_none()
+            && seg
+                .active_target
+                .is_some_and(|(tbl, _)| module.dyn_tables.contains_key(&tbl));
         let need_passive = module.uses_bulk_elem && seg.is_passive;
         if !need_active_dyn && !need_passive {
             continue;
@@ -993,8 +1018,48 @@ fn compile_wasm_to_aarch64_detailed(
         .map_err(X64CompileError::AdmissionRejected)?
         .with_spectre_mitigations(opts.spectre_mitigations)
         .with_guard_pages(opts.guard_pages, module.memory.is_some());
+    for (ci_sig, ci_lay) in module.ci_sigs.iter().zip(&mut layout.ci_tables) {
+        if ci_sig.is_dynamic {
+            ci_lay.dyn_table_desc_off = layout.dyn_tables[&ci_sig.table].0;
+            ci_lay.canon_sig = ci_sig.canon_sig;
+        }
+    }
     layout.func_sig_ro_off = func_sig_ro_off;
     layout.func_addr_ro_off = func_addr_ro_off;
+    layout.passive_data_table_off = passive_data_table_off;
+    if module.uses_gc {
+        let gc_ro = gc_rt::build_gc_rodata(&mut rodata, &module, &layout, &passive_elem_entries)
+            .map_err(X64CompileError::Failed)?;
+        if let Some(ref mut gc_lay) = layout.gc {
+            let raw_max = if opts.gc_max_heap_bytes == 0 {
+                x64_mod::DEFAULT_GC_MAX_HEAP_BYTES
+            } else {
+                opts.gc_max_heap_bytes
+            };
+            let raw_init = if opts.gc_initial_heap_bytes == 0 {
+                x64_mod::DEFAULT_GC_INIT_HEAP_BYTES
+            } else {
+                opts.gc_initial_heap_bytes
+            };
+            let max_heap = raw_max.max(4096).saturating_add(4095) & !4095;
+            let init_heap = raw_init.max(4096).saturating_add(4095) & !4095;
+            gc_lay.max_heap_bytes = max_heap;
+            gc_lay.init_heap_bytes = init_heap.min(max_heap);
+            gc_lay.gc_elem_buf_bytes = gc_ro.gc_elem_buf_bytes;
+            gc_lay.type_desc_ro_off = gc_ro.type_desc_ro_off;
+            gc_lay.func_canon_ro_off = gc_ro.func_canon_ro_off;
+            gc_lay.gc_elem_desc_ro_off = gc_ro.gc_elem_desc_ro_off;
+            gc_lay.gc_root_globals_ro_off = gc_ro.gc_root_globals_ro_off;
+            gc_lay.gc_root_globals_count = gc_ro.gc_root_globals_count;
+            gc_lay.gc_root_inline_tables_ro_off = gc_ro.gc_root_inline_tables_ro_off;
+            gc_lay.gc_root_inline_tables_count = gc_ro.gc_root_inline_tables_count;
+            gc_lay.gc_root_dyn_tables_ro_off = gc_ro.gc_root_dyn_tables_ro_off;
+            gc_lay.gc_root_dyn_tables_count = gc_ro.gc_root_dyn_tables_count;
+            gc_lay.gc_root_exn_tags_ro_off = gc_ro.gc_root_exn_tags_ro_off;
+            gc_lay.has_traced_exn_tags = gc_ro.has_traced_exn_tags;
+            gc_lay.passive_gc_elem_offs = gc_ro.passive_gc_elem_offs;
+        }
+    }
     if let Some(ref path_nul) = pgo_gen_path_nul {
         let path_ro_off =
             append_rodata(&mut rodata, 1, path_nul).map_err(X64CompileError::Failed)?;
@@ -1499,6 +1564,10 @@ fn compile_wasm_to_aarch64_detailed(
             (None, None)
         };
 
+        let alloc_cfg = A64AllocConfig {
+            is_store: layout.is_store,
+            n_imports,
+        };
         let compiled_asms: Vec<A64Asm> = if n_workers <= 1 || n_defs <= 1 {
             let mut out = Vec::with_capacity(n_defs);
             let mut scratch = Stage2Scratch::default();
@@ -1515,9 +1584,9 @@ fn compile_wasm_to_aarch64_detailed(
                     .map_err(X64CompileError::Failed)?;
                 }
                 verify_ir(&ir, &module).map_err(X64CompileError::Failed)?;
-                let alloc =
-                    allocate(&ir, Some(&budget)).map_err(X64CompileError::AdmissionRejected)?;
-                let fa = lower_ir_to_aarch64(&ir, &alloc, &layout)
+                let alloc = allocate_with_config(&ir, alloc_cfg, Some(&budget))
+                    .map_err(X64CompileError::AdmissionRejected)?;
+                let fa = lower_ir_to_aarch64(&ir, &alloc, &layout, &module)
                     .map_err(X64CompileError::AdmissionRejected)?;
                 out.push(fa);
             }
@@ -1560,9 +1629,9 @@ fn compile_wasm_to_aarch64_detailed(
                             .map_err(X64CompileError::Failed)?;
                         }
                         verify_ir(&ir, &module).map_err(X64CompileError::Failed)?;
-                        let alloc = allocate(&ir, Some(&budget))
+                        let alloc = allocate_with_config(&ir, alloc_cfg, Some(&budget))
                             .map_err(X64CompileError::AdmissionRejected)?;
-                        lower_ir_to_aarch64(&ir, &alloc, &layout)
+                        lower_ir_to_aarch64(&ir, &alloc, &layout, &module)
                             .map_err(X64CompileError::AdmissionRejected)
                     })();
                     match res {
@@ -1658,7 +1727,7 @@ fn compile_wasm_to_aarch64_detailed(
                                     uses_bulk_data: false,
                                     uses_bulk_elem: false,
                                     uses_gc: false,
-                            uses_threads: false,
+                                    uses_threads: false,
                                     dyn_table_ops: Vec::new(),
                                     sig_arity: 0,
                                     br_table_entries: 0,
@@ -1688,9 +1757,22 @@ fn compile_wasm_to_aarch64_detailed(
         compiled_asms
     };
 
-    // 3. Emit helpers, standalone import trampolines, and either Blot ABI 8 exports or standalone `_start`.
-    let mut helper_asms =
-        emit_a64_helpers(&module, &layout, &tables).map_err(X64CompileError::Failed)?;
+    // 3. Emit helpers, import/host/export trampolines, and target entry points (`StoreCdylib`, `BlotCdylib`, `_start`).
+    let store_ro_info = if opts.target == X64Target::StoreCdylib {
+        Some(
+            x64_store_rt::build_store_rodata(&mut rodata, &module, &layout, n_defs)
+                .map_err(X64CompileError::Failed)?,
+        )
+    } else {
+        None
+    };
+
+    let mut helper_asms = if opts.target == X64Target::StoreCdylib {
+        store_rt::emit_a64_store_helpers(&module, &layout, &tables)
+            .map_err(X64CompileError::Failed)?
+    } else {
+        emit_a64_helpers(&module, &layout, &tables).map_err(X64CompileError::Failed)?
+    };
     let needs_float_fmt = opts.target == X64Target::StandaloneExec
         && module.imports.iter().any(|(m, f)| {
             m == "goose"
@@ -1747,9 +1829,12 @@ fn compile_wasm_to_aarch64_detailed(
         }
     }
 
-    let mut import_asms: Vec<A64Asm> = Vec::with_capacity(n_imports);
+    let mut import_asms: Vec<A64Asm> = Vec::new();
+    let mut store_host_tramp_asms: Vec<A64Asm> = Vec::new();
+    let mut store_export_tramp_asms: Vec<A64Asm> = Vec::new();
     match opts.target {
         X64Target::StandaloneExec => {
+            import_asms.reserve(n_imports);
             for k in 0..n_imports {
                 import_asms.push(
                     emit_a64_standalone_import_trampoline(&module, k)
@@ -1758,6 +1843,7 @@ fn compile_wasm_to_aarch64_detailed(
             }
         }
         X64Target::BlotCdylib => {
+            import_asms.reserve(n_imports);
             for k in 0..n_imports {
                 import_asms.push(
                     emit_a64_blot_import_trampoline(&module, k)
@@ -1765,7 +1851,23 @@ fn compile_wasm_to_aarch64_detailed(
                 );
             }
         }
-        X64Target::StoreCdylib => unreachable!("StoreCdylib rejected at aarch64 admission"),
+        X64Target::StoreCdylib => {
+            let sro = store_ro_info.as_ref().unwrap();
+            store_host_tramp_asms.reserve(sro.host_tramp_sigs.len());
+            for (ps, rs) in &sro.host_tramp_sigs {
+                store_host_tramp_asms.push(
+                    store_rt::emit_a64_store_host_trampoline(ps, rs)
+                        .map_err(X64CompileError::Failed)?,
+                );
+            }
+            store_export_tramp_asms.reserve(sro.export_tramp_sigs.len());
+            for (ps, rs) in &sro.export_tramp_sigs {
+                store_export_tramp_asms.push(
+                    store_rt::emit_a64_store_export_entry(ps, rs)
+                        .map_err(X64CompileError::Failed)?,
+                );
+            }
+        }
     }
 
     let (export_asms, standalone_asm) = match opts.target {
@@ -1780,10 +1882,22 @@ fn compile_wasm_to_aarch64_detailed(
                     .map_err(X64CompileError::Failed)?,
             ),
         ),
-        X64Target::StoreCdylib => unreachable!("StoreCdylib rejected at aarch64 admission"),
+        X64Target::StoreCdylib => (
+            vec![(
+                x64_store_rt::STORE_EXPORT_NAMES[0],
+                store_rt::emit_a64_store_get_desc(
+                    &module,
+                    &layout,
+                    store_ro_info.as_ref().unwrap(),
+                )
+                .map_err(X64CompileError::Failed)?,
+            )],
+            None,
+        ),
     };
 
-    // 4. Append all per-function / import / helper / export local `.rodata` slices into `.rodata`.
+    // 4. Append all per-function / import / helper / export / store-trampoline local `.rodata`
+    //    and reserve post-link GC safepoint table in `.rodata`.
     let mut export_lro: Vec<u32> = Vec::with_capacity(export_asms.len());
     for (_, a) in &export_asms {
         let off = if a.local_rodata.is_empty() {
@@ -1820,6 +1934,24 @@ fn compile_wasm_to_aarch64_detailed(
         };
         import_lro.push(off);
     }
+    let mut store_host_lro: Vec<u32> = Vec::with_capacity(store_host_tramp_asms.len());
+    for a in &store_host_tramp_asms {
+        let off = if a.local_rodata.is_empty() {
+            0
+        } else {
+            append_rodata(&mut rodata, 16, &a.local_rodata).map_err(X64CompileError::Failed)?
+        };
+        store_host_lro.push(off);
+    }
+    let mut store_export_lro: Vec<u32> = Vec::with_capacity(store_export_tramp_asms.len());
+    for a in &store_export_tramp_asms {
+        let off = if a.local_rodata.is_empty() {
+            0
+        } else {
+            append_rodata(&mut rodata, 16, &a.local_rodata).map_err(X64CompileError::Failed)?
+        };
+        store_export_lro.push(off);
+    }
     let mut fn_lro: Vec<u32> = Vec::with_capacity(n_defs);
     for a in &fn_asms {
         let off = if a.local_rodata.is_empty() {
@@ -1829,6 +1961,15 @@ fn compile_wasm_to_aarch64_detailed(
         };
         fn_lro.push(off);
     }
+    let gc_safepoint_ro_off: Option<u32> = if module.uses_gc {
+        let sp_bytes = store_rt::planned_a64_safepoint_table_bytes(&fn_asms)
+            .map_err(X64CompileError::Failed)?;
+        let off =
+            append_rodata(&mut rodata, 8, &vec![0u8; sp_bytes]).map_err(X64CompileError::Failed)?;
+        Some(off)
+    } else {
+        None
+    };
 
     // 5. Plan ELF layout (`rodata_vaddr`, `text_vaddr`).
     enum PlannedElf {
@@ -1839,10 +1980,13 @@ fn compile_wasm_to_aarch64_detailed(
         X64Target::BlotCdylib => PlannedElf::So(
             A64ElfSoLayout::plan(&EXPORT_NAMES, rodata.len()).map_err(X64CompileError::Failed)?,
         ),
+        X64Target::StoreCdylib => PlannedElf::So(
+            A64ElfSoLayout::plan(&x64_store_rt::STORE_EXPORT_NAMES, rodata.len())
+                .map_err(X64CompileError::Failed)?,
+        ),
         X64Target::StandaloneExec => {
             PlannedElf::Exec(A64ElfExecLayout::plan(rodata.len()).map_err(X64CompileError::Failed)?)
         }
-        X64Target::StoreCdylib => unreachable!("StoreCdylib rejected at aarch64 admission"),
     };
     let (rodata_vaddr, text_vaddr) = match &planned {
         PlannedElf::So(p) => (p.rodata_vaddr as u64, p.text_vaddr as u64),
@@ -1893,6 +2037,20 @@ fn compile_wasm_to_aarch64_detailed(
         func_offs[k] = off;
         text.extend_from_slice(&a.code);
     }
+    let mut store_host_tramp_offs: Vec<usize> = Vec::with_capacity(store_host_tramp_asms.len());
+    for a in &store_host_tramp_asms {
+        pad_text(&mut text);
+        let off = text.len();
+        store_host_tramp_offs.push(off);
+        text.extend_from_slice(&a.code);
+    }
+    let mut store_export_tramp_offs: Vec<usize> = Vec::with_capacity(store_export_tramp_asms.len());
+    for a in &store_export_tramp_asms {
+        pad_text(&mut text);
+        let off = text.len();
+        store_export_tramp_offs.push(off);
+        text.extend_from_slice(&a.code);
+    }
     let a64_text_order: Vec<usize> = opts
         .pgo_use
         .as_ref()
@@ -1916,7 +2074,7 @@ fn compile_wasm_to_aarch64_detailed(
         ));
     }
 
-    // 7. Patch jump tables and call_indirect dispatch tables in `.rodata`.
+    // 7. Patch jump tables, safepoint table, call_indirect tables, and StoreCdylib rel32 tables in `.rodata`.
     for (di, a) in fn_asms.iter_mut().enumerate() {
         if !a.jump_tables.is_empty() {
             let fn_va = text_vaddr + func_offs[n_imports + di] as u64;
@@ -1926,6 +2084,17 @@ fn compile_wasm_to_aarch64_detailed(
             let start = fn_lro[di] as usize;
             rodata[start..start + a.local_rodata.len()].copy_from_slice(&a.local_rodata);
         }
+    }
+    if let Some(sp_off) = gc_safepoint_ro_off {
+        store_rt::emit_a64_safepoint_table_rodata(
+            &mut rodata,
+            sp_off as usize,
+            &fn_asms,
+            &func_offs,
+            n_imports,
+            defs_start_off,
+        )
+        .map_err(X64CompileError::Failed)?;
     }
     for (roff, slots) in &ci_patch_info {
         if slots.is_empty() {
@@ -1943,7 +2112,7 @@ fn compile_wasm_to_aarch64_detailed(
             }
         }
     }
-    if module.uses_dyn_ci || module.uses_call_ref {
+    if !layout.is_store && (module.uses_dyn_ci || module.uses_call_ref) {
         let base_va = rodata_vaddr + u64::from(layout.func_addr_ro_off);
         for (fi, &target_off) in func_offs.iter().enumerate() {
             let target_va = text_vaddr + target_off as u64;
@@ -1953,6 +2122,25 @@ fn compile_wasm_to_aarch64_detailed(
             let pos = (layout.func_addr_ro_off as usize) + fi * 4;
             rodata[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
         }
+    }
+    if let Some(ref sro) = store_ro_info {
+        let mut patch_rel32_table = |ro_off: u32,
+                                     text_offs: &[usize]|
+         -> Result<(), X64CompileError> {
+            let base_va = rodata_vaddr + u64::from(ro_off);
+            for (i, &t_off) in text_offs.iter().enumerate() {
+                let target_va = text_vaddr + t_off as u64;
+                let disp = i32::try_from((target_va as i64) - (base_va as i64)).map_err(|_| {
+                    X64CompileError::Failed("aarch64: store rel32 table overflow".into())
+                })?;
+                let pos = (ro_off as usize) + i * 4;
+                rodata[pos..pos + 4].copy_from_slice(&disp.to_le_bytes());
+            }
+            Ok(())
+        };
+        patch_rel32_table(sro.def_fn_rel_ro_off, &func_offs[n_imports..])?;
+        patch_rel32_table(sro.host_tramp_rel_ro_off, &store_host_tramp_offs)?;
+        patch_rel32_table(sro.export_tramp_rel_ro_off, &store_export_tramp_offs)?;
     }
 
     // 8. Patch all link-time AArch64 relocations (`bl`, `b`, `adrp+add`).
@@ -1965,6 +2153,7 @@ fn compile_wasm_to_aarch64_detailed(
         ),
         _ => None,
     };
+    let gc_safepoint_va = gc_safepoint_ro_off.map(|off| rodata_vaddr + u64::from(off));
     let resolve_reloc = |target: A64RelocTarget, local_ro_off: u32| -> Result<u64, String> {
         match target {
             A64RelocTarget::Func(f) => {
@@ -1989,6 +2178,9 @@ fn compile_wasm_to_aarch64_detailed(
             A64RelocTarget::GuestCodeEnd => Ok(guest_code_end_va),
             A64RelocTarget::GuardState => guard_state_va
                 .ok_or_else(|| "aarch64: GuardState reloc without guard-pages ET_DYN".into()),
+            A64RelocTarget::GcSafepointHeader => gc_safepoint_va.ok_or_else(|| {
+                "aarch64: GcSafepointHeader reloc without GC safepoint table".into()
+            }),
         }
     };
 
@@ -2018,6 +2210,28 @@ fn compile_wasm_to_aarch64_detailed(
         patch_a64_relocs(&mut text, text_vaddr, func_offs[k], &a.relocs, |t| {
             resolve_reloc(t, lro)
         })
+        .map_err(X64CompileError::Failed)?;
+    }
+    for (k, a) in store_host_tramp_asms.iter().enumerate() {
+        let lro = store_host_lro[k];
+        patch_a64_relocs(
+            &mut text,
+            text_vaddr,
+            store_host_tramp_offs[k],
+            &a.relocs,
+            |t| resolve_reloc(t, lro),
+        )
+        .map_err(X64CompileError::Failed)?;
+    }
+    for (k, a) in store_export_tramp_asms.iter().enumerate() {
+        let lro = store_export_lro[k];
+        patch_a64_relocs(
+            &mut text,
+            text_vaddr,
+            store_export_tramp_offs[k],
+            &a.relocs,
+            |t| resolve_reloc(t, lro),
+        )
         .map_err(X64CompileError::Failed)?;
     }
     for (di, a) in fn_asms.iter().enumerate() {

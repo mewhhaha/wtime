@@ -54,6 +54,7 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --manifest-path tools/wtime-aot/Cargo.toml -- --check
       - run: cargo fmt --manifest-path tools/wtime-aot/rt/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path tools/wtime-aot/host/Cargo.toml -- --check
       - run: cargo clippy --locked --all-targets --manifest-path tools/wtime-aot/rt/Cargo.toml -- -D warnings
       - run: cargo test --locked --manifest-path tools/wtime-aot/rt/Cargo.toml
       - run: cargo clippy --locked --all-targets --manifest-path tools/wtime-aot/Cargo.toml -- -D warnings
@@ -61,6 +62,8 @@ jobs:
         env:
           WTIME_AOT_REQUIRE_NATIVE_TESTS: "1"
         run: cargo test --locked --manifest-path tools/wtime-aot/Cargo.toml
+      - run: cargo clippy --locked --all-targets --manifest-path tools/wtime-aot/host/Cargo.toml -- -D warnings
+      - run: cargo test --locked --manifest-path tools/wtime-aot/host/Cargo.toml
   wtime-goose:
     runs-on: ubuntu-24.04
     steps:

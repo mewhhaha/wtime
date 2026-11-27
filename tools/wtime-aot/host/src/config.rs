@@ -400,7 +400,7 @@ impl Config {
             wasm_relaxed_simd: true,
             wasm_memory64: true,
             gc_heap_initial_size: 4 << 20,
-            gc_heap_reservation: 1 << 30,
+            gc_heap_reservation: crate::gc::SEMI_SPACE_RESERVE_BYTES as u64,
             gc_heap_guard_size: 32 << 20,
             max_wasm_stack: 32 << 20,
             async_stack_size: 64 << 20,
@@ -802,6 +802,7 @@ impl Engine {
             }
         }
         let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+        std::env::consts::ARCH.as_bytes().hash(&mut h);
         wtime_aot::x64::store_rt::STORE_ABI_VERSION.hash(&mut h);
         let c = &self.inner.config;
         (c.opt_level as u8).hash(&mut h);

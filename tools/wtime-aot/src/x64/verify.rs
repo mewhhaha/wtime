@@ -2524,7 +2524,11 @@ fn verify_inst_types(
             mem, res_ty, addr, ..
         } => {
             expect_res(ir, bi, res, res_ty, "AtomicLoad")?;
-            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            let addr_ty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, addr, addr_ty, "AtomicLoad.addr")?;
         }
         Op::AtomicStore {
@@ -2535,7 +2539,11 @@ fn verify_inst_types(
             ..
         } => {
             expect_no_res(ir, bi, res, "AtomicStore")?;
-            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            let addr_ty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, addr, addr_ty, "AtomicStore.addr")?;
             let vty = ir.val_tys[val.0 as usize];
             if !matches!(vty, Ty::I32 | Ty::I64)
@@ -2555,7 +2563,11 @@ fn verify_inst_types(
             ..
         } => {
             expect_res(ir, bi, res, res_ty, "AtomicRmw")?;
-            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            let addr_ty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, addr, addr_ty, "AtomicRmw.addr")?;
             expect_ty(ir, bi, val, res_ty, "AtomicRmw.val")?;
         }
@@ -2568,7 +2580,11 @@ fn verify_inst_types(
             ..
         } => {
             expect_res(ir, bi, res, res_ty, "AtomicCmpxchg")?;
-            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            let addr_ty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, addr, addr_ty, "AtomicCmpxchg.addr")?;
             expect_ty(ir, bi, expected, res_ty, "AtomicCmpxchg.expected")?;
             expect_ty(ir, bi, replacement, res_ty, "AtomicCmpxchg.replacement")?;
@@ -2582,7 +2598,11 @@ fn verify_inst_types(
             ..
         } => {
             expect_res(ir, bi, res, Ty::I32, "AtomicWait")?;
-            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            let addr_ty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, addr, addr_ty, "AtomicWait.addr")?;
             expect_ty(
                 ir,
@@ -2597,7 +2617,11 @@ fn verify_inst_types(
             mem, addr, count, ..
         } => {
             expect_res(ir, bi, res, Ty::I32, "AtomicNotify")?;
-            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            let addr_ty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, addr, addr_ty, "AtomicNotify.addr")?;
             expect_ty(ir, bi, count, Ty::I32, "AtomicNotify.count")?;
         }

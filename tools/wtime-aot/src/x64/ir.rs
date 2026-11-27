@@ -3788,11 +3788,12 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                                 let match_bb = b.new_block(false)?;
                                 let next_bb = if let Some(tag_idx) = tag_opt {
                                     let nbb = b.new_block(false)?;
-                                    let tc = if module.target == super::module::X64Target::StoreCdylib {
-                                        b.emit(Ty::I32, Op::TagId(tag_idx))
-                                    } else {
-                                        b.const_i32(tag_idx as i32)
-                                    };
+                                    let tc =
+                                        if module.target == super::module::X64Target::StoreCdylib {
+                                            b.emit(Ty::I32, Op::TagId(tag_idx))
+                                        } else {
+                                            b.const_i32(tag_idx as i32)
+                                        };
                                     let eq = b.emit_i32_cmp(CmpOp::Eq, exn_tag.unwrap(), tc);
                                     b.terminate(Term::BranchIf {
                                         cond: eq,

@@ -884,7 +884,11 @@ pub fn build_store_rodata(
         if module.type_kinds.get(ti).copied().unwrap_or(0) != 0 {
             continue;
         }
-        let ps_ty: Vec<Ty> = fty.params.iter().map(|&v| val_type_to_machine_ty(v)).collect();
+        let ps_ty: Vec<Ty> = fty
+            .params
+            .iter()
+            .map(|&v| val_type_to_machine_ty(v))
+            .collect();
         let rs_ty: Vec<Ty> = fty
             .results
             .iter()
@@ -918,9 +922,9 @@ pub fn build_store_rodata(
             .iter()
             .map(|&v| ty_to_code(val_type_to_machine_ty(v)))
             .collect();
-        let tramp_idx = *host_sig_map
-            .get(&(ps_c, rs_c))
-            .ok_or_else(|| format!("x64: exported func {fi} signature missing from trampoline table"))?;
+        let tramp_idx = *host_sig_map.get(&(ps_c, rs_c)).ok_or_else(|| {
+            format!("x64: exported func {fi} signature missing from trampoline table")
+        })?;
         exported_funcs.push((name.clone(), *fi as u32, tramp_idx));
     }
 
@@ -957,10 +961,24 @@ pub fn build_store_rodata(
         let dmax = module.all_mem_declared_max.get(mi).copied().flatten();
         if mi == 0 {
             let (min_p, max_p) = module.memory.unwrap();
-            defined_mems.push((0u32, min_p, max_p, dmax, module.memory64, module.memory_shared));
+            defined_mems.push((
+                0u32,
+                min_p,
+                max_p,
+                dmax,
+                module.memory64,
+                module.memory_shared,
+            ));
         } else {
             let em = module.extra_memories[mi - 1];
-            defined_mems.push((mi as u32, em.min_pages, em.max_pages, dmax, em.memory64, em.shared));
+            defined_mems.push((
+                mi as u32,
+                em.min_pages,
+                em.max_pages,
+                dmax,
+                em.memory64,
+                em.shared,
+            ));
         }
     }
 
@@ -1004,7 +1022,15 @@ pub fn build_store_rodata(
     let exported_globals: Vec<(String, u32, ValType, bool, i32)> = module
         .exported_globals
         .iter()
-        .map(|(name, gi, vt, mut_)| (name.clone(), *gi as u32, *vt, *mut_, layout.global_offs[*gi]))
+        .map(|(name, gi, vt, mut_)| {
+            (
+                name.clone(),
+                *gi as u32,
+                *vt,
+                *mut_,
+                layout.global_offs[*gi],
+            )
+        })
         .collect();
 
     let mut passive_gc_elem_ranges = Vec::new();
@@ -1149,13 +1175,19 @@ pub fn emit_store_get_desc(
 
 fn emit_save_xmm0_15(a: &mut Asm, base_off: i32) {
     for i in 0u8..16 {
-        a.movdqu_mx(Mem::base_disp(Gp::Rsp, base_off + i32::from(i) * 16), Xmm::from_id(i));
+        a.movdqu_mx(
+            Mem::base_disp(Gp::Rsp, base_off + i32::from(i) * 16),
+            Xmm::from_id(i),
+        );
     }
 }
 
 fn emit_restore_xmm0_15(a: &mut Asm, base_off: i32) {
     for i in 0u8..16 {
-        a.movdqu_xm(Xmm::from_id(i), Mem::base_disp(Gp::Rsp, base_off + i32::from(i) * 16));
+        a.movdqu_xm(
+            Xmm::from_id(i),
+            Mem::base_disp(Gp::Rsp, base_off + i32::from(i) * 16),
+        );
     }
 }
 
@@ -1320,12 +1352,20 @@ fn emit_store_gc_collect_stub() -> Result<Asm, String> {
     for &g in &saved_gps {
         a.push(g);
     }
-    a.lea(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, (saved_gps.len() as i32) * 8));
+    a.lea(
+        true,
+        Gp::Rdx,
+        Mem::base_disp(Gp::Rsp, (saved_gps.len() as i32) * 8),
+    );
     a.mov_rr(true, Gp::Rsi, Gp::R10);
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
     a.sub_ri(true, Gp::Rsp, 256);
     emit_save_xmm0_15(&mut a, 0);
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_GC_COLLECT_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_GC_COLLECT_FN),
+    );
     a.call_reg(Gp::Rax);
     a.mov_rr(false, Gp::R11, Gp::Rax);
     emit_restore_xmm0_15(&mut a, 0);
@@ -1364,7 +1404,11 @@ fn emit_store_exn_alloc_stub() -> Result<Asm, String> {
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
     a.mov_rr(false, Gp::Rsi, Gp::R11);
     a.mov_rr(false, Gp::Rdx, Gp::R10);
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_EXN_ALLOC_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_EXN_ALLOC_FN),
+    );
     a.call_reg(Gp::Rax);
     a.mov_rr(true, Gp::R10, Gp::Rax);
     a.xor_rr(false, Gp::R11, Gp::R11);
@@ -1392,12 +1436,24 @@ fn emit_store_mem_grow(memory64: bool) -> Result<Asm, String> {
     } else {
         a.mov_rr(true, Gp::Rdx, Gp::Rdi);
     }
-    a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::Rsi,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_MEM_GROW_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_MEM_GROW_FN),
+    );
     a.call_reg(Gp::Rax);
     // Reload live `R13 = mem0_desc->len`.
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
     if !memory64 {
         a.mov_rr(false, Gp::Rax, Gp::Rax);
@@ -1422,11 +1478,19 @@ fn emit_store_extra_mem_grow() -> Result<Asm, String> {
     a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS));
     a.mov_rm(true, Gp::Rsi, Mem::indexed(Gp::R10, Gp::Rbx, 8, 0));
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_MEM_GROW_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_MEM_GROW_FN),
+    );
     a.call_reg(Gp::Rax);
     a.test_rr(false, Gp::Rbx, Gp::Rbx);
     a.jcc(Cond::Ne, lbl_not0);
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
     a.bind(lbl_not0);
     emit_restore_xmm0_15(&mut a, 0);
@@ -1448,7 +1512,11 @@ fn emit_store_mem_copy(memory64: bool) -> Result<Asm, String> {
         a.mov_rr(false, Gp::Rsi, Gp::Rsi);
         a.mov_rr(false, Gp::Rdx, Gp::Rdx);
     }
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
     a.mov_rr(true, Gp::Rax, Gp::Rdi);
     a.add_rr(true, Gp::Rax, Gp::Rdx);
@@ -1494,7 +1562,11 @@ fn emit_store_mem_fill(memory64: bool) -> Result<Asm, String> {
         a.mov_rr(false, Gp::Rdi, Gp::Rdi);
         a.mov_rr(false, Gp::Rdx, Gp::Rdx);
     }
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
     a.mov_rr(true, Gp::Rax, Gp::Rdi);
     a.add_rr(true, Gp::Rax, Gp::Rdx);
@@ -1658,10 +1730,18 @@ fn emit_store_table_grow() -> Result<Asm, String> {
     a.mov_rr(true, Gp::Rcx, Gp::Rsi); // delta
     a.mov_rr(false, Gp::R10, Gp::Rdx); // tbl_idx
     a.mov_rr(true, Gp::Rdx, Gp::Rdi); // init_val
-    a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+    a.mov_rm(
+        true,
+        Gp::R11,
+        Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+    );
     a.mov_rm(true, Gp::Rsi, Mem::indexed(Gp::R11, Gp::R10, 8, 0)); // tbl_desc
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_TABLE_GROW_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_TABLE_GROW_FN),
+    );
     a.call_reg(Gp::Rax);
     emit_restore_xmm0_15(&mut a, 0);
     a.add_ri(true, Gp::Rsp, 264);
@@ -1677,7 +1757,11 @@ fn emit_store_table_fill() -> Result<Asm, String> {
     let lbl_lp = a.new_label();
     let lbl_done = a.new_label();
     a.mov_rr(false, Gp::Rcx, Gp::Rcx);
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+    );
     a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R10, Gp::Rcx, 8, 0));
     a.mov_rm(false, Gp::R10, Mem::base_disp(Gp::R9, 8)); // cur_len zero-ext u64
     a.mov_rr(true, Gp::Rax, Gp::Rdi);
@@ -1712,7 +1796,11 @@ fn emit_store_table_copy() -> Result<Asm, String> {
     let lbl_done = a.new_label();
     a.mov_rr(false, Gp::Rcx, Gp::Rcx);
     a.mov_rr(false, Gp::R8, Gp::R8);
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+    );
     a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R10, Gp::Rcx, 8, 0)); // dst_desc
     a.mov_rm(true, Gp::R10, Mem::indexed(Gp::R10, Gp::R8, 8, 0)); // src_desc
     a.mov_rm(false, Gp::Rax, Mem::base_disp(Gp::R9, 8)); // dst_len
@@ -1777,7 +1865,11 @@ fn emit_store_table_init(
 
     a.mov_rr(false, Gp::Rcx, Gp::Rcx); // elem_idx
     a.mov_rr(false, Gp::R8, Gp::R8); // tbl_idx
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+    );
     a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R10, Gp::R8, 8, 0)); // tbl_desc
     // Check dst + len <= tbl_desc->cur_len
     a.mov_rm(false, Gp::R10, Mem::base_disp(Gp::R9, 8));
@@ -1857,7 +1949,11 @@ fn emit_store_table_init(
     {
         a.bind(lbl_gc_copy);
         // Copy `len` qwords from `[elem_buf_ptr + gc_buf_off + src*8]` to `Rdi`.
-        a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::R15, OFF_STORE_ELEM_BUF_PTR));
+        a.mov_rm(
+            true,
+            Gp::R8,
+            Mem::base_disp(Gp::R15, OFF_STORE_ELEM_BUF_PTR),
+        );
         a.add_rr(true, Gp::R8, Gp::Rax);
         a.lea(true, Gp::Rsi, Mem::indexed(Gp::R8, Gp::Rsi, 8, 0));
         a.bind(lbl_gc_lp);
@@ -1881,10 +1977,7 @@ fn emit_store_table_init(
 
 /// `HELPER_GC_ARRAY_INIT_ELEM` for `StoreCdylib`:
 /// `Rdi = arr, Rsi = dst (u32), Rdx = src (u32), Rcx = len (u32), R8 = elem_idx (u32)`.
-fn emit_store_gc_array_init_elem(
-    _module: &X64Module,
-    layout: &CtxLayout,
-) -> Result<Asm, String> {
+fn emit_store_gc_array_init_elem(_module: &X64Module, layout: &CtxLayout) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(280);
     let Some(ref gc) = layout.gc else {
         a.ud2();
@@ -1967,7 +2060,11 @@ fn emit_store_gc_array_init_elem(
     a.jmp(lbl_done);
 
     a.bind(lbl_gc_copy);
-    a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::R15, OFF_STORE_ELEM_BUF_PTR));
+    a.mov_rm(
+        true,
+        Gp::R8,
+        Mem::base_disp(Gp::R15, OFF_STORE_ELEM_BUF_PTR),
+    );
     a.add_rr(true, Gp::R8, Gp::Rax);
     a.lea(true, Gp::Rsi, Mem::indexed(Gp::R8, Gp::Rdx, 8, 0));
     a.bind(lbl_gc_lp);
@@ -2002,7 +2099,11 @@ fn emit_store_atomic_wait() -> Result<Asm, String> {
     a.mov_rr(true, Gp::Rdx, Gp::Rsi);
     a.mov_rr(true, Gp::Rsi, Gp::Rdi);
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_ATOMIC_WAIT_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_ATOMIC_WAIT_FN),
+    );
     a.call_reg(Gp::Rax);
     emit_restore_xmm0_15(&mut a, 0);
     a.add_ri(true, Gp::Rsp, 264);
@@ -2020,7 +2121,11 @@ fn emit_store_atomic_notify() -> Result<Asm, String> {
     a.mov_rr(false, Gp::Rdx, Gp::Rsi);
     a.mov_rr(true, Gp::Rsi, Gp::Rdi);
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, STORE_OFF_ATOMIC_NOTIFY_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rdi, STORE_OFF_ATOMIC_NOTIFY_FN),
+    );
     a.call_reg(Gp::Rax);
     emit_restore_xmm0_15(&mut a, 0);
     a.add_ri(true, Gp::Rsp, 264);
@@ -2060,7 +2165,11 @@ fn emit_store_init_instance(
 
     a.mov_rr(true, Gp::R15, Gp::Rdi);
     a.mov_rm(true, Gp::R14, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
-    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
 
     // 1. Initialize defined non-folded scalar / FuncRef / V128 globals (`gi >= imported_globals.len()`).
@@ -2131,7 +2240,11 @@ fn emit_store_init_instance(
         } else {
             a.mov_ri64(Gp::Rax, meta.init_val);
         }
-        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+        a.mov_rm(
+            true,
+            Gp::Rdi,
+            Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+        );
         a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, (tbl as i32) * 8));
         a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, 0));
         a.xor_rr(false, Gp::Rcx, Gp::Rcx);
@@ -2253,7 +2366,11 @@ fn emit_store_init_instance(
             a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::R11, (s as i32) * 8));
             a.mov_rm(true, Gp::R15, Mem::base_disp(Gp::R11, 8));
             a.mov_rm(true, Gp::R14, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
-            a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+            a.mov_rm(
+                true,
+                Gp::R10,
+                Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+            );
             a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
             a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::R11, 0));
             a.call_reg(Gp::R11);
@@ -2368,17 +2485,17 @@ pub fn emit_store_host_trampoline(param_tys: &[Ty], result_tys: &[Ty]) -> Result
     // Load `store_ptr` into `Rbx` (preserved across C call!).
     a.mov_rm(true, Gp::Rbx, Mem::base_disp(Gp::R15, 16));
     if ret_layout.stack_bytes > 0 {
-        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::Rbx, STORE_OFF_RET_SPILL_PTR));
+        a.mov_rm(
+            true,
+            Gp::R10,
+            Mem::base_disp(Gp::Rbx, STORE_OFF_RET_SPILL_PTR),
+        );
         a.mov_mr(true, Mem::base_disp(Gp::Rsp, ret_spill_save_off), Gp::R10);
     }
 
     // 1. Pack Wasm ABI arguments into `[rsp + 0 .. arg_flat_bytes]`.
     //    (Note: `Rdi, Rsi, Rdx, Rcx, R8, R9, Xmm0..7` are all untouched so far!)
-    for ((&ty, &slot), &foff) in param_tys
-        .iter()
-        .zip(&arg_layout.slots)
-        .zip(&arg_flat_offs)
-    {
+    for ((&ty, &slot), &foff) in param_tys.iter().zip(&arg_layout.slots).zip(&arg_flat_offs) {
         let dst = Mem::base_disp(Gp::Rsp, foff);
         match slot {
             AbiSlot::Gp(r) => {
@@ -2452,7 +2569,11 @@ pub fn emit_store_host_trampoline(param_tys: &[Ty], result_tys: &[Ty]) -> Result
     a.mov_rm(false, Gp::Rsi, Mem::base_disp(Gp::R15, 8)); // host_func_id
     a.lea(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, 0));
     a.lea(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, rets_off));
-    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rbx, STORE_OFF_HOST_CALL_FN));
+    a.mov_rm(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rbx, STORE_OFF_HOST_CALL_FN),
+    );
     a.call_reg(Gp::Rax);
     a.mov_rr(false, Gp::R11, Gp::Rax); // trap / exn status in R11d!
 
@@ -2469,11 +2590,7 @@ pub fn emit_store_host_trampoline(param_tys: &[Ty], result_tys: &[Ty]) -> Result
     if ret_layout.stack_bytes > 0 {
         a.mov_rm(true, Gp::Rbp, Mem::base_disp(Gp::Rsp, ret_spill_save_off));
     }
-    for ((&ty, &slot), &foff) in result_tys
-        .iter()
-        .zip(&ret_layout.slots)
-        .zip(&ret_flat_offs)
-    {
+    for ((&ty, &slot), &foff) in result_tys.iter().zip(&ret_layout.slots).zip(&ret_flat_offs) {
         let src = Mem::base_disp(Gp::Rsp, rets_off + foff);
         match slot {
             AbiSlot::Gp(r) => a.mov_rm(ty == Ty::I64, r, src),
@@ -2584,21 +2701,25 @@ pub fn emit_store_export_entry(
 
     // Load `R14 = mem0_base`, `R13 = mem0_desc->len`.
     a.mov_rm(true, Gp::R14, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
-    a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::R11,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R11, 8));
 
     // Publish overflow return buffer pointer if needed.
     if ret_layout.stack_bytes > 0 {
         a.lea(true, Gp::R11, Mem::base_disp(Gp::Rsp, ret_buf_off));
-        a.mov_mr(true, Mem::base_disp(Gp::Rbp, STORE_OFF_RET_SPILL_PTR), Gp::R11);
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::Rbp, STORE_OFF_RET_SPILL_PTR),
+            Gp::R11,
+        );
     }
 
     // Unpack flat `args_ptr` (`R10`) into Wasm ABI argument regs & outgoing stack area.
-    for ((&ty, &slot), &foff) in param_tys
-        .iter()
-        .zip(&arg_layout.slots)
-        .zip(&arg_flat_offs)
-    {
+    for ((&ty, &slot), &foff) in param_tys.iter().zip(&arg_layout.slots).zip(&arg_flat_offs) {
         let src = Mem::base_disp(Gp::R10, foff);
         match slot {
             AbiSlot::Gp(r) => a.mov_rm(ty == Ty::I64, r, src),
@@ -2645,11 +2766,7 @@ pub fn emit_store_export_entry(
     a.jcc(Cond::Ne, lbl_done);
 
     // Pack Wasm return regs & overflow buffer into flat `rets_ptr` (`Rbx`).
-    for ((&ty, &slot), &foff) in result_tys
-        .iter()
-        .zip(&ret_layout.slots)
-        .zip(&ret_flat_offs)
-    {
+    for ((&ty, &slot), &foff) in result_tys.iter().zip(&ret_layout.slots).zip(&ret_flat_offs) {
         let dst = Mem::base_disp(Gp::Rbx, foff);
         match slot {
             AbiSlot::Gp(r) => {

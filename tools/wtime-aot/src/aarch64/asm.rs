@@ -156,6 +156,8 @@ pub enum A64RelocTarget {
     GuestCodeEnd,
     /// Virtual address of the 64-byte writable `GuardState` tail in `PT_LOAD 2` (`--guard-pages`).
     GuardState,
+    /// Virtual address of the `.rodata` GC `SafepointHeader` (populated when `uses_gc`).
+    GcSafepointHeader,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +201,7 @@ pub struct A64Asm {
     pub relocs: Vec<A64Reloc>,
     pub local_rodata: Vec<u8>,
     pub jump_tables: Vec<A64JumpTable>,
+    pub safepoints: Vec<crate::x64::asm::SafepointRecord>,
     labels: Vec<Option<usize>>,
     fixups: Vec<Fixup>,
     f32_pool: HashMap<u32, u32>,
@@ -219,12 +222,28 @@ impl A64Asm {
             relocs: Vec::new(),
             local_rodata: Vec::new(),
             jump_tables: Vec::new(),
+            safepoints: Vec::new(),
             labels: Vec::new(),
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
             v128_pool: HashMap::new(),
         }
+    }
+
+    /// Records a GC safepoint at the current code offset (immediately after a `bl` / `blr`).
+    pub fn record_safepoint(
+        &mut self,
+        frame_caller_ret_off: u32,
+        gc_slots: Vec<i32>,
+        ext_slots: Vec<i32>,
+    ) {
+        self.safepoints.push(crate::x64::asm::SafepointRecord {
+            code_off: self.code.len() as u32,
+            frame_caller_ret_off,
+            gc_slots,
+            ext_slots,
+        });
     }
 
     #[inline]
@@ -418,6 +437,7 @@ impl A64Asm {
             relocs,
             local_rodata,
             jump_tables,
+            safepoints: Vec::new(),
             labels,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
@@ -1155,24 +1175,149 @@ impl A64Asm {
         self.emit(0xd503_3f5f);
     }
 
-    /// 64-bit load-acquire: `ldar rt, [rn]`.
+    /// Inner-shareable full memory barrier: `dmb ish` (Wasm `atomic.fence`).
+    pub fn dmb_ish(&mut self) {
+        self.emit(0xd503_3bbf);
+    }
+
+    /// 8-bit load-acquire: `ldarb wt, [xn]`.
+    pub fn ldarb(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x08df_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 16-bit load-acquire: `ldarh wt, [xn]`.
+    pub fn ldarh(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x48df_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 32-bit load-acquire: `ldar wt, [xn]`.
+    pub fn ldar_w(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x88df_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit load-acquire: `ldar xt, [xn]`.
     pub fn ldar(&mut self, rt: Reg, rn: Reg) {
         self.emit(0xc8df_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
     }
 
-    /// 64-bit store-release: `stlr rt, [rn]`.
+    /// 8-bit store-release: `stlrb wt, [xn]`.
+    pub fn stlrb(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x089f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 16-bit store-release: `stlrh wt, [xn]`.
+    pub fn stlrh(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x489f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 32-bit store-release: `stlr wt, [xn]`.
+    pub fn stlr_w(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x889f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit store-release: `stlr xt, [xn]`.
     pub fn stlr(&mut self, rt: Reg, rn: Reg) {
         self.emit(0xc89f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
     }
 
-    /// 64-bit load-acquire exclusive: `ldaxr rt, [rn]`.
+    /// 8-bit load-acquire exclusive: `ldaxrb wt, [xn]`.
+    pub fn ldaxrb(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x085f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 16-bit load-acquire exclusive: `ldaxrh wt, [xn]`.
+    pub fn ldaxrh(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x485f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 32-bit load-acquire exclusive: `ldaxr wt, [xn]`.
+    pub fn ldaxr_w(&mut self, rt: Reg, rn: Reg) {
+        self.emit(0x885f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit load-acquire exclusive: `ldaxr xt, [xn]`.
     pub fn ldaxr(&mut self, rt: Reg, rn: Reg) {
         self.emit(0xc85f_fc00 | ((rn.0 as u32) << 5) | rt.0 as u32);
     }
 
-    /// 64-bit store-release exclusive: `stlxr ws, rt, [rn]`.
+    /// 8-bit store-release exclusive: `stlxrb ws, wt, [xn]`.
+    pub fn stlxrb(&mut self, rs: Reg, rt: Reg, rn: Reg) {
+        self.emit(0x0800_fc00 | ((rs.0 as u32) << 16) | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 16-bit store-release exclusive: `stlxrh ws, wt, [xn]`.
+    pub fn stlxrh(&mut self, rs: Reg, rt: Reg, rn: Reg) {
+        self.emit(0x4800_fc00 | ((rs.0 as u32) << 16) | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 32-bit store-release exclusive: `stlxr ws, wt, [xn]`.
+    pub fn stlxr_w(&mut self, rs: Reg, rt: Reg, rn: Reg) {
+        self.emit(0x8800_fc00 | ((rs.0 as u32) << 16) | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// 64-bit store-release exclusive: `stlxr ws, xt, [xn]`.
     pub fn stlxr(&mut self, rs: Reg, rt: Reg, rn: Reg) {
         self.emit(0xc800_fc00 | ((rs.0 as u32) << 16) | ((rn.0 as u32) << 5) | rt.0 as u32);
+    }
+
+    /// Bitwise test against low `k`-bit mask `(1 << k) - 1`: `tst rn, #((1<<k)-1)`.
+    pub fn tst_imm_low_bits(&mut self, is64: bool, rn: Reg, k: u8) {
+        debug_assert!(k >= 1 && k < if is64 { 64 } else { 32 });
+        let n = u32::from(is64) << 22;
+        self.emit(
+            Self::sf(is64)
+                | 0x7200_0000
+                | n
+                | (u32::from(k - 1) << 10)
+                | ((rn.0 as u32) << 5)
+                | Reg::XZR.0 as u32,
+        );
+    }
+
+    /// Bitwise AND with low `k`-bit mask `(1 << k) - 1`: `and rd, rn, #((1<<k)-1)`.
+    pub fn and_imm_low_bits(&mut self, is64: bool, rd: Reg, rn: Reg, k: u8) {
+        debug_assert!(k >= 1 && k < if is64 { 64 } else { 32 });
+        let n = u32::from(is64) << 22;
+        self.emit(
+            Self::sf(is64)
+                | 0x1200_0000
+                | n
+                | (u32::from(k - 1) << 10)
+                | ((rn.0 as u32) << 5)
+                | rd.0 as u32,
+        );
+    }
+
+    /// Bitwise OR with low `k`-bit mask `(1 << k) - 1`: `orr rd, rn, #((1<<k)-1)`.
+    pub fn orr_imm_low_bits(&mut self, is64: bool, rd: Reg, rn: Reg, k: u8) {
+        debug_assert!(k >= 1 && k < if is64 { 64 } else { 32 });
+        let n = u32::from(is64) << 22;
+        self.emit(
+            Self::sf(is64)
+                | 0x3200_0000
+                | n
+                | (u32::from(k - 1) << 10)
+                | ((rn.0 as u32) << 5)
+                | rd.0 as u32,
+        );
+    }
+
+    /// 32-bit `and wd, wn, #6` (extracts GC header kind bits `[2:1]`).
+    pub fn and_imm_6_w(&mut self, rd: Reg, rn: Reg) {
+        // sf=0, N=0, immr=31, imms=1 => ROR32(0b11, 31) = 0b110 = 6.
+        self.emit(0x121f_0400 | ((rn.0 as u32) << 5) | rd.0 as u32);
+    }
+
+    /// 64-bit `and xd, xn, #~7` (8-byte round-down alignment).
+    pub fn and_imm_align8(&mut self, rd: Reg, rn: Reg) {
+        // sf=1, N=1, immr=61, imms=60 => ROR64((1<<61)-1, 61) = !7u64.
+        self.emit(0x927d_f000 | ((rn.0 as u32) << 5) | rd.0 as u32);
+    }
+
+    /// 32-bit `orr wd, wn, #2` (sets GC array header kind bit).
+    pub fn orr_imm_2_w(&mut self, rd: Reg, rn: Reg) {
+        // sf=0, N=0, immr=31, imms=0 => ROR32(0b1, 31) = 0b10 = 2.
+        self.emit(0x321f_0000 | ((rn.0 as u32) << 5) | rd.0 as u32);
     }
 
     pub fn brk(&mut self, imm16: u16) {
@@ -1438,6 +1583,14 @@ impl A64Asm {
 
     pub fn ldp_q(&mut self, vt1: VReg, vt2: VReg, rn: Reg, off: i32) {
         self.ldp_stp(true, true, 0b010, vt1.0, vt2.0, rn, off);
+    }
+
+    pub fn stp_q_pre(&mut self, vt1: VReg, vt2: VReg, rn: Reg, off: i32) {
+        self.ldp_stp(true, false, 0b011, vt1.0, vt2.0, rn, off);
+    }
+
+    pub fn ldp_q_post(&mut self, vt1: VReg, vt2: VReg, rn: Reg, off: i32) {
+        self.ldp_stp(true, true, 0b001, vt1.0, vt2.0, rn, off);
     }
 
     // ---- Scalar IEEE-754 Floating-Point ----

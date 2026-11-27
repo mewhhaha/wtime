@@ -884,3 +884,60 @@ fn host_import_preserves_callee_saved_xmm8_13_across_c_abi() {
     // sum_{i=0..9} (2*i) = 90.0; 1.5+2.5+3.5+4.5+5.5+6.5 = 24.0; total = 114.0
     assert_eq!(res, 114.0);
 }
+
+#[test]
+fn large_byte_array_2gib_plus_16_survives_gc() {
+    use wtime_aot_host::{ArrayRef, ArrayRefPre, ArrayType, FieldType, Mutability, StorageType};
+
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+    let arr_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, StorageType::I8));
+    let pre = ArrayRefPre::new(&mut store, arr_ty);
+
+    let len: u32 = (1u32 << 31) + 16; // 2_147_483_664 bytes (> 2 GiB)
+    assert_eq!(len, 2_147_483_664);
+
+    let arr = ArrayRef::new(&mut store, &pre, &Val::I32(0), len)
+        .expect("2 GiB + 16 byte ArrayRef allocation must succeed in 8 GiB semi-space");
+    assert_eq!(arr.len(&store).unwrap(), len);
+
+    let raw_before = arr.to_anyref().to_raw(&mut store).unwrap();
+    assert_ne!(raw_before, 0, "live GC object raw handle must be nonzero");
+    assert_eq!(
+        raw_before & 1,
+        0,
+        "live GC object raw handle must have bit 0 == 0"
+    );
+
+    arr.set(&mut store, 16, Val::I32(0x5A)).unwrap();
+    arr.set(&mut store, len - 1, Val::I32(0xA5)).unwrap();
+
+    assert_eq!(arr.get(&mut store, 16).unwrap().i32(), Some(0x5A));
+    assert_eq!(arr.get(&mut store, len - 1).unwrap().i32(), Some(0xA5));
+    assert_eq!(arr.get(&mut store, 0).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, 15).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, 17).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, 1u32 << 30).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, len - 2).unwrap().i32(), Some(0));
+
+    // Trigger copying GC across the 8 GiB Space A <-> Space B boundary.
+    store.gc(None).unwrap();
+
+    let raw_after = arr.to_anyref().to_raw(&mut store).unwrap();
+    assert_ne!(raw_after, 0);
+    assert_eq!(raw_after & 1, 0);
+    assert_ne!(
+        raw_before & (1u32 << 31),
+        raw_after & (1u32 << 31),
+        "evacuation between Space A (< 8 GiB) and Space B (>= 8 GiB) must flip bit 31"
+    );
+
+    assert_eq!(arr.len(&store).unwrap(), len);
+    assert_eq!(arr.get(&mut store, 16).unwrap().i32(), Some(0x5A));
+    assert_eq!(arr.get(&mut store, len - 1).unwrap().i32(), Some(0xA5));
+    assert_eq!(arr.get(&mut store, 0).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, 15).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, 17).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, 1u32 << 30).unwrap().i32(), Some(0));
+    assert_eq!(arr.get(&mut store, len - 2).unwrap().i32(), Some(0));
+}

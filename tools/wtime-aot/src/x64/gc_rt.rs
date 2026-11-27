@@ -1905,11 +1905,7 @@ impl<'a> InitExprCtx<'a> {
             a.mov_ri64(Gp::Rcx, u64::from(gt.header_word()));
             a.mov_mr(true, Mem::base_disp(obj_reg, 0), Gp::Rcx);
         } else {
-            a.mov_mi32(
-                false,
-                Mem::base_disp(obj_reg, 0),
-                gt.header_word() as i32,
-            );
+            a.mov_mi32(false, Mem::base_disp(obj_reg, 0), gt.header_word() as i32);
         }
     }
 
@@ -2487,15 +2483,31 @@ pub fn emit_gc_const_inits(
     // Point `gc_init_roots_ptr` at `[rsp + 0]` with `len = 0` and `gc_walk_stop_rsp = 0`.
     if layout.is_store {
         a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_PTR));
+        a.mov_rm(
+            true,
+            Gp::Rax,
+            Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_PTR),
+        );
         a.mov_mr(true, Mem::base_disp(Gp::Rsp, save_off), Gp::Rax);
-        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_LEN));
+        a.mov_rm(
+            true,
+            Gp::Rax,
+            Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_LEN),
+        );
         a.mov_mr(true, Mem::base_disp(Gp::Rsp, save_off + 8), Gp::Rax);
         a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R11, GC_OFF_WALK_STOP_RSP));
         a.mov_mr(true, Mem::base_disp(Gp::Rsp, save_off + 16), Gp::Rax);
-        a.mov_mr(true, Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_PTR), Gp::Rsp);
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_PTR),
+            Gp::Rsp,
+        );
         a.xor_rr(false, Gp::Rax, Gp::Rax);
-        a.mov_mr(true, Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_LEN), Gp::Rax);
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_LEN),
+            Gp::Rax,
+        );
         a.mov_mr(true, Mem::base_disp(Gp::R11, GC_OFF_WALK_STOP_RSP), Gp::Rax);
     } else {
         a.mov_mr(
@@ -2543,7 +2555,11 @@ pub fn emit_gc_const_inits(
             if min_len > 0 {
                 let lp = a.new_label();
                 if layout.is_store {
-                    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+                    a.mov_rm(
+                        true,
+                        Gp::Rdi,
+                        Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+                    );
                     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, (*tbl as i32) * 8));
                     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, 0));
                 } else {
@@ -2583,7 +2599,11 @@ pub fn emit_gc_const_inits(
                 local_table_oob = true;
                 *need_table_oob = true;
                 // Runtime bounds check against `table_desc->cur_len` (imported tables may have grown).
-                a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+                a.mov_rm(
+                    true,
+                    Gp::Rdi,
+                    Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+                );
                 a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, (tbl as i32) * 8));
                 a.mov_rm(false, Gp::Rdx, Mem::base_disp(Gp::Rdi, 8)); // cur_len zero-ext to u64
                 if let Some(end) = dst_off.checked_add(ge.len() as u64) {
@@ -2610,7 +2630,11 @@ pub fn emit_gc_const_inits(
                 ictx.emit_eval(a, expr, false, 0, 0)?;
                 let slot_idx = dst_off + i as u64;
                 if layout.is_store {
-                    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS));
+                    a.mov_rm(
+                        true,
+                        Gp::Rdi,
+                        Mem::base_disp(Gp::R15, OFF_STORE_TABLE_DESCS),
+                    );
                     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, (tbl as i32) * 8));
                     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rdi, 0));
                     a.mov_ri64(Gp::Rcx, slot_idx);
@@ -2653,9 +2677,17 @@ pub fn emit_gc_const_inits(
         if layout.is_store {
             a.mov_rm(true, Gp::R11, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
             a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, save_off));
-            a.mov_mr(true, Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_PTR), Gp::Rax);
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_PTR),
+                Gp::Rax,
+            );
             a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, save_off + 8));
-            a.mov_mr(true, Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_LEN), Gp::Rax);
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R11, GC_OFF_INIT_ROOTS_LEN),
+                Gp::Rax,
+            );
             a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, save_off + 16));
             a.mov_mr(true, Mem::base_disp(Gp::R11, GC_OFF_WALK_STOP_RSP), Gp::Rax);
         } else {

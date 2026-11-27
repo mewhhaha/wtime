@@ -5878,3 +5878,549 @@ fn aarch64_final_stretch_outer_simd_pmovzxbd_and_sift_down_parity() {
     ];
     assert_aarch64_image_matches_oracle("aarch64 final stretch", &wasm, &calls, 16, &img);
 }
+
+fn verify_store_elf_and_desc(
+    label: &str,
+    img: &A64CompiledImage,
+) -> (
+    crate::x64::store_rt::StoreModuleMeta,
+    u32,
+    u64,
+    u64,
+    u64,
+    u64,
+) {
+    // 1. Validate ELF64 EM_AARCH64 (183) ET_DYN (3) header.
+    assert!(img.elf.len() >= 64, "{label}: ELF truncated");
+    assert_eq!(&img.elf[0..4], b"\x7fELF", "{label}: bad ELF magic");
+    assert_eq!(img.elf[4], 2, "{label}: expected ELFCLASS64");
+    assert_eq!(img.elf[5], 1, "{label}: expected little-endian ELF");
+    let e_type = u16::from_le_bytes(img.elf[16..18].try_into().unwrap());
+    let e_machine = u16::from_le_bytes(img.elf[18..20].try_into().unwrap());
+    assert_eq!(e_type, 3, "{label}: expected ET_DYN");
+    assert_eq!(e_machine, 183, "{label}: expected EM_AARCH64");
+
+    // 2. Verify every instruction disassembles cleanly with llvm-objdump.
+    verify_disasm_aarch64(label, &img.elf);
+
+    // 3. Execute `wt_store_get_desc` inside A64Vm and validate all 13 StoreModuleDesc fields!
+    assert_eq!(img.export_vaddrs.len(), 1);
+    assert_eq!(img.export_vaddrs[0].0, "wt_store_get_desc");
+    let get_desc_va = img.export_vaddrs[0].1;
+
+    let mut vm = A64Vm::new(img);
+    let desc_ptr = vm.alloc_seg(96);
+    vm.x[0] = desc_ptr;
+    vm.run_until_ret(get_desc_va, 10_000)
+        .unwrap_or_else(|e| panic!("{label}: wt_store_get_desc failed in A64Vm: {e}"));
+
+    let abi_version = vm.read_u32(desc_ptr).unwrap();
+    let flags = vm.read_u32(desc_ptr + 4).unwrap();
+    let ctx_total_bytes = vm.read_u64(desc_ptr + 8).unwrap();
+    let code_start = vm.read_u64(desc_ptr + 16).unwrap();
+    let code_end = vm.read_u64(desc_ptr + 24).unwrap();
+    let safepoint_hdr = vm.read_u64(desc_ptr + 32).unwrap();
+    let rodata_base = vm.read_u64(desc_ptr + 40).unwrap();
+    let meta_ptr = vm.read_u64(desc_ptr + 48).unwrap();
+    let meta_len = vm.read_u64(desc_ptr + 56).unwrap();
+    let init_fn = vm.read_u64(desc_ptr + 64).unwrap();
+    let def_fn_tbl = vm.read_u64(desc_ptr + 72).unwrap();
+    let host_tramp_tbl = vm.read_u64(desc_ptr + 80).unwrap();
+    let export_tramp_tbl = vm.read_u64(desc_ptr + 88).unwrap();
+
+    assert_eq!(abi_version, crate::x64::store_rt::STORE_ABI_VERSION);
+    assert_eq!(rodata_base, img.rodata_vaddr);
+    assert!(code_start >= img.text_vaddr && code_start <= code_end);
+    assert_eq!(code_end, img.text_vaddr + img.text.len() as u64);
+    assert!(init_fn >= img.text_vaddr && init_fn < code_end);
+    assert_eq!(init_fn & 15, 0, "{label}: init_instance_fn 16B aligned");
+
+    let meta_bytes = vm.read_bytes(meta_ptr, meta_len as usize).unwrap();
+    let meta = crate::x64::store_rt::decode_store_metadata(meta_bytes)
+        .unwrap_or_else(|e| panic!("{label}: decode_store_metadata failed: {e}"));
+    assert_eq!(meta.abi_version, crate::x64::store_rt::STORE_ABI_VERSION);
+    assert_eq!(meta.ctx_total_bytes, ctx_total_bytes);
+
+    // Verify all rel32 table entries resolve inside `.text` on 16-byte boundaries.
+    for i in 0..meta.n_defs as u64 {
+        let rel = vm.read_u32(def_fn_tbl + i * 4).unwrap() as i32;
+        let target = (def_fn_tbl as i64 + i64::from(rel)) as u64;
+        assert!(
+            target >= code_start && target < code_end && (target & 15) == 0,
+            "{label}: bad def_fn[{i}] target 0x{target:x}"
+        );
+    }
+    for i in 0..meta.host_tramp_sigs.len() as u64 {
+        let rel = vm.read_u32(host_tramp_tbl + i * 4).unwrap() as i32;
+        let target = (host_tramp_tbl as i64 + i64::from(rel)) as u64;
+        assert!(
+            target >= img.text_vaddr && target < code_start && (target & 15) == 0,
+            "{label}: bad host_tramp[{i}] target 0x{target:x}"
+        );
+    }
+    for i in 0..meta.export_tramp_sigs.len() as u64 {
+        let rel = vm.read_u32(export_tramp_tbl + i * 4).unwrap() as i32;
+        let target = (export_tramp_tbl as i64 + i64::from(rel)) as u64;
+        assert!(
+            target >= img.text_vaddr && target < code_start && (target & 15) == 0,
+            "{label}: bad export_tramp[{i}] target 0x{target:x}"
+        );
+    }
+
+    (meta, flags, code_start, code_end, safepoint_hdr, init_fn)
+}
+
+#[test]
+fn aarch64_store_cdylib_gc_structs_arrays_casts_safepoints() {
+    use crate::x64::tests_unit::{export_sec, func_sec, leb_u32, section, wasm_module};
+
+    // Types:
+    //   0: (sub (struct (field (mut i32))))
+    //   1: (sub final 0 (struct (field (mut i32)) (field (mut anyref))))
+    //   2: (array (mut i8))
+    //   3: (array (mut anyref))
+    //   4: (func (param i32 externref) (result i32))
+    let mut ty_body = Vec::new();
+    leb_u32(&mut ty_body, 5);
+    // type 0: non-final struct { mut i32 }
+    ty_body.extend_from_slice(&[0x50, 0x00, 0x5f, 0x01, 0x7f, 0x01]);
+    // type 1: final subtype of 0: struct { mut i32, mut anyref (0x6e) }
+    ty_body.extend_from_slice(&[0x4f, 0x01, 0x00, 0x5f, 0x02, 0x7f, 0x01, 0x6e, 0x01]);
+    // type 2: array (mut i8)
+    ty_body.extend_from_slice(&[0x5e, 0x78, 0x01]);
+    // type 3: array (mut anyref)
+    ty_body.extend_from_slice(&[0x5e, 0x6e, 0x01]);
+    // type 4: func (i32, externref) -> (i32)
+    ty_body.extend_from_slice(&[0x60, 0x02, 0x7f, 0x6f, 0x01, 0x7f]);
+
+    // Global 0: (global (mut (ref null 0)) (struct.new 0 (i32.const 7)))
+    let mut glob_body = Vec::new();
+    glob_body.extend_from_slice(&[
+        0x01, // 1 global
+        0x63, 0x00, 0x01, // (ref null 0), mut
+        0x41, 0x07, // i32.const 7
+        0xfb, 0x00, 0x00, // struct.new 0
+        0x0b,
+    ]);
+
+    // Passive element segment 0: (elem anyref (ref.i31 (i32.const 11)) (ref.i31 (i32.const 22)))
+    let mut elem_body = Vec::new();
+    elem_body.extend_from_slice(&[
+        0x01, // 1 elem seg
+        0x05, // flags=5 (passive + reftype + exprs)
+        0x6e, // anyref
+        0x02, // 2 exprs
+        0x41, 0x0b, 0xfb, 0x1c, 0x0b, // ref.i31(11)
+        0x41, 0x16, 0xfb, 0x1c, 0x0b, // ref.i31(22)
+    ]);
+
+    // DataCount section (section 12) = 1
+    let datacount = section(12, &[0x01]);
+    // Passive data segment 0: "hello_gc"
+    let mut data_body = Vec::new();
+    data_body.push(0x01); // 1 seg
+    data_body.push(0x01); // passive
+    leb_u32(&mut data_body, 8);
+    data_body.extend_from_slice(b"hello_gc");
+
+    // Function 0 body: exercises structs, arrays, bulk array ops, i31, extern/any conversions,
+    // ref.test/ref.cast, ref.eq, and keeps a live GC struct across a second allocation (safepoint!).
+    // Params: 0: i32, 1: externref
+    // Locals: 2: (ref null 1), 3: (ref null 2), 4: (ref null 3), 5: anyref
+    let mut f0 = Vec::new();
+    // local.set 5 = any.convert_extern(local.get 1)
+    f0.extend_from_slice(&[0x20, 1, 0xfb, 0x1a, 0x21, 5]);
+    // local.set 2 = struct.new 1 (local.get 0, local.get 5)
+    f0.extend_from_slice(&[0x20, 0, 0x20, 5, 0xfb, 0x00, 0x01, 0x21, 2]);
+    // struct.set 1 0 (local.get 2, i32.const 99)
+    f0.extend_from_slice(&[0x20, 2, 0x41, 99, 0xfb, 0x05, 0x01, 0x00]);
+    // Allocate a second object (`array.new_data 2 0 (0, 8)`) while local 2 is LIVE -> forces GC safepoint slot!
+    f0.extend_from_slice(&[0x41, 0, 0x41, 8, 0xfb, 0x09, 0x02, 0x00, 0x21, 3]);
+    // array.fill 2 (local 3, 1, 42, 2)
+    f0.extend_from_slice(&[0x20, 3, 0x41, 1, 0x41, 42, 0x41, 2, 0xfb, 0x10, 0x02]);
+    // array.copy 2 2 (local 3, 4, local 3, 0, 4)
+    f0.extend_from_slice(&[
+        0x20, 3, 0x41, 4, 0x20, 3, 0x41, 0, 0x41, 4, 0xfb, 0x11, 0x02, 0x02,
+    ]);
+    // array.init_data 2 0 (local 3, 0, 0, 4)
+    f0.extend_from_slice(&[0x20, 3, 0x41, 0, 0x41, 0, 0x41, 4, 0xfb, 0x12, 0x02, 0x00]);
+    // local.set 4 = array.new_elem 3 0 (0, 2)
+    f0.extend_from_slice(&[0x41, 0, 0x41, 2, 0xfb, 0x0a, 0x03, 0x00, 0x21, 4]);
+    // array.init_elem 3 0 (local 4, 0, 0, 2)
+    f0.extend_from_slice(&[0x20, 4, 0x41, 0, 0x41, 0, 0x41, 2, 0xfb, 0x13, 0x03, 0x00]);
+    // array.new_fixed 2 2 (1, 2) -> drop
+    f0.extend_from_slice(&[0x41, 1, 0x41, 2, 0xfb, 0x08, 0x02, 0x02, 0x1a]);
+    // array.new_default 2 (4) -> array.len -> drop
+    f0.extend_from_slice(&[0x41, 4, 0xfb, 0x07, 0x02, 0xfb, 0x0f, 0x1a]);
+    // struct.new_default 0 -> ref.test (ref 0) -> drop
+    f0.extend_from_slice(&[0xfb, 0x01, 0x00, 0xfb, 0x14, 0x00, 0x1a]);
+    // extern.convert_any(ref.i31(5)) -> drop
+    f0.extend_from_slice(&[0x41, 5, 0xfb, 0x1c, 0xfb, 0x1b, 0x1a]);
+    // Compute result using live local 2 (struct.get 1 0 after ref.cast 0), local 3 (array.get_u 2),
+    // local 4 (array.get 3 -> ref.cast i31 -> i31.get_s + i31.get_u), and ref.eq:
+    f0.extend_from_slice(&[
+        0x20, 2, 0xfb, 0x16, 0x00, // ref.cast (ref 0)
+        0xfb, 0x02, 0x00, 0x00, // struct.get 0 0
+        0x20, 3, 0x41, 0, 0xfb, 0x0d, 0x02, // array.get_u 2 (local 3, 0)
+        0x6a, // i32.add
+        0x20, 4, 0x41, 0, 0xfb, 0x0b, 0x03, // array.get 3 (local 4, 0)
+        0xfb, 0x16, 0x6c, // ref.cast (ref i31)
+        0xfb, 0x1d, // i31.get_s
+        0x6a, // i32.add
+        0x20, 2, 0x20, 2, 0xd3, // ref.eq
+        0x6a, // i32.add
+        0x23, 0, 0xfb, 0x02, 0x00, 0x00, // global.get 0 -> struct.get 0 0
+        0x6a, // i32.add
+    ]);
+
+    let mut body_bytes = Vec::new();
+    leb_u32(&mut body_bytes, 4); // 4 local decl groups
+    body_bytes.extend_from_slice(&[1, 0x63, 0x01]); // (ref null 1)
+    body_bytes.extend_from_slice(&[1, 0x63, 0x02]); // (ref null 2)
+    body_bytes.extend_from_slice(&[1, 0x63, 0x03]); // (ref null 3)
+    body_bytes.extend_from_slice(&[1, 0x6e]); // anyref
+    body_bytes.extend_from_slice(&f0);
+    body_bytes.push(0x0b);
+    let mut code_payload = Vec::new();
+    leb_u32(&mut code_payload, 1);
+    leb_u32(&mut code_payload, body_bytes.len() as u32);
+    code_payload.extend_from_slice(&body_bytes);
+
+    let wasm_gc = wasm_module(&[
+        section(1, &ty_body),
+        func_sec(&[4]),
+        section(6, &glob_body),
+        export_sec(&[("gc_ops", 0, 0)]),
+        section(9, &elem_body),
+        datacount,
+        section(10, &code_payload),
+        section(11, &data_body),
+    ]);
+
+    for opt in [false, true] {
+        let img = compile_wasm_to_aarch64_for_test(
+            &wasm_gc,
+            &A64CompileOptions {
+                target: X64Target::StoreCdylib,
+                optimize: opt,
+                ..Default::default()
+            },
+        )
+        .expect("aarch64 StoreCdylib GC compilation must succeed");
+
+        let label = if opt {
+            "a64_store_gc_opt"
+        } else {
+            "a64_store_gc_noopt"
+        };
+        let (meta, flags, code_start, code_end, sp_hdr, _init_fn) =
+            verify_store_elf_and_desc(label, &img);
+
+        assert_ne!(flags & 1, 0, "{label}: flags bit0 (uses_gc) must be set");
+        assert!(meta.uses_gc);
+        assert_eq!(meta.n_defs, 1);
+        assert_eq!(meta.exported_funcs.len(), 1);
+        assert_eq!(meta.exported_funcs[0].0, "gc_ops");
+        assert_eq!(meta.passive_gc_elem_ranges.len(), 1);
+        assert_ne!(sp_hdr, 0, "{label}: GC module must emit safepoint_header");
+
+        // Inspect SafepointHeader + sorted SafepointEntry table directly from `.rodata`!
+        let ro_off = (sp_hdr - img.rodata_vaddr) as usize;
+        let num_entries = u32::from_le_bytes(img.rodata[ro_off..ro_off + 4].try_into().unwrap());
+        let entries_rel =
+            i32::from_le_bytes(img.rodata[ro_off + 8..ro_off + 12].try_into().unwrap());
+        let slots_rel =
+            i32::from_le_bytes(img.rodata[ro_off + 12..ro_off + 16].try_into().unwrap());
+        assert!(
+            num_entries >= 4,
+            "{label}: expected multiple GC allocation safepoints, got {num_entries}"
+        );
+        assert_eq!(entries_rel, 16);
+        assert_eq!(slots_rel, 16 + (num_entries as i32) * 16);
+
+        let code_len = (code_end - code_start) as u32;
+        let mut prev_pc: Option<u32> = None;
+        let mut saw_live_root_slot = false;
+        for i in 0..num_entries as usize {
+            let eoff = ro_off + (entries_rel as usize) + i * 16;
+            let pc_rel = u32::from_le_bytes(img.rodata[eoff..eoff + 4].try_into().unwrap());
+            let frame_ret_off =
+                u32::from_le_bytes(img.rodata[eoff + 4..eoff + 8].try_into().unwrap());
+            let num_slots =
+                u32::from_le_bytes(img.rodata[eoff + 12..eoff + 16].try_into().unwrap());
+            assert!(pc_rel < code_len && (pc_rel & 3) == 0);
+            assert_eq!(
+                frame_ret_off & 15,
+                8,
+                "{label}: AArch64 frame_caller_ret_off must be frame_size - 8 (== 8 mod 16)"
+            );
+            if let Some(p) = prev_pc {
+                assert!(
+                    pc_rel > p,
+                    "{label}: safepoint table must be strictly sorted"
+                );
+            }
+            prev_pc = Some(pc_rel);
+            if num_slots > 0 {
+                saw_live_root_slot = true;
+            }
+        }
+        assert!(
+            saw_live_root_slot,
+            "{label}: expected live GC reference slot across allocation safepoint"
+        );
+    }
+}
+
+#[test]
+fn aarch64_store_cdylib_threads_atomics_and_disasm() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, section, type_sec, wasm_module,
+    };
+
+    // Shared memory: flags = 0x03 (has_max | shared), min = 1, max = 4
+    let mem_sec = section(5, &[0x01, 0x03, 0x01, 0x04]);
+
+    // f0(addr: i32, val: i32) -> i32: exercises atomic.fence, load/store (8/16/32/64),
+    // RMW add/sub/and/or/xor/xchg, cmpxchg (32 & 64), atomic.wait32/wait64, atomic.notify!
+    let mut f0 = Vec::new();
+    // atomic.fence (0xfe 0x03 0x00)
+    f0.extend_from_slice(&[0xfe, 0x03, 0x00]);
+    // i32.atomic.store (align=2, off=0)
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0xfe, 0x17, 0x02, 0x00]);
+    // i32.atomic.store8 (align=0, off=4)
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0xfe, 0x19, 0x00, 0x04]);
+    // i32.atomic.store16 (align=1, off=8)
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0xfe, 0x1a, 0x01, 0x08]);
+    // i64.atomic.store (align=3, off=16)
+    f0.extend_from_slice(&[0x20, 0, 0x42, 42, 0xfe, 0x18, 0x03, 0x10]);
+    // i32.atomic.rmw.add / sub / and / or / xor / xchg
+    for subop in [0x1eu8, 0x25, 0x2c, 0x33, 0x3a, 0x41] {
+        f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0xfe, subop, 0x02, 0x00, 0x1a]);
+    }
+    // i32.atomic.rmw8.add_u & rmw16.add_u
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0xfe, 0x20, 0x00, 0x04, 0x1a]);
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0xfe, 0x21, 0x01, 0x08, 0x1a]);
+    // i64.atomic.rmw.add
+    f0.extend_from_slice(&[0x20, 0, 0x42, 1, 0xfe, 0x1f, 0x03, 0x10, 0x1a]);
+    // i32.atomic.rmw.cmpxchg & i64.atomic.rmw.cmpxchg
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0x41, 7, 0xfe, 0x48, 0x02, 0x00, 0x1a]);
+    f0.extend_from_slice(&[0x20, 0, 0x42, 42, 0x42, 43, 0xfe, 0x49, 0x03, 0x10, 0x1a]);
+    // memory.atomic.wait32, memory.atomic.wait64, memory.atomic.notify
+    f0.extend_from_slice(&[0x20, 0, 0x20, 1, 0x42, 0, 0xfe, 0x01, 0x02, 0x00, 0x1a]);
+    f0.extend_from_slice(&[0x20, 0, 0x42, 0, 0x42, 0, 0xfe, 0x02, 0x03, 0x10, 0x1a]);
+    f0.extend_from_slice(&[0x20, 0, 0x41, 1, 0xfe, 0x00, 0x02, 0x00, 0x1a]);
+    // Return i32.atomic.load + i32.atomic.load8_u + i32.atomic.load16_u + i32.wrap_i64(i64.atomic.load)
+    f0.extend_from_slice(&[
+        0x20, 0, 0xfe, 0x10, 0x02, 0x00, // i32.atomic.load
+        0x20, 0, 0xfe, 0x12, 0x00, 0x04, // i32.atomic.load8_u
+        0x6a, // add
+        0x20, 0, 0xfe, 0x13, 0x01, 0x08, // i32.atomic.load16_u
+        0x6a, // add
+        0x20, 0, 0xfe, 0x11, 0x03, 0x10, // i64.atomic.load
+        0xa7, // i32.wrap_i64
+        0x6a, // add
+    ]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f, 0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        mem_sec,
+        export_sec(&[("atomic_ops", 0, 0), ("memory", 2, 0)]),
+        code_sec(&[enc_body(&[], &f0)]),
+    ]);
+
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            target: X64Target::StoreCdylib,
+            optimize: true,
+            ..Default::default()
+        },
+    )
+    .expect("aarch64 StoreCdylib Wasm Threads compilation must succeed");
+
+    let (meta, flags, _, _, sp_hdr, _) = verify_store_elf_and_desc("a64_store_threads", &img);
+    assert_ne!(flags & 4, 0, "flags bit2 (uses_threads) must be set");
+    assert_eq!(sp_hdr, 0, "non-GC module must have null safepoint_header");
+    assert!(meta.uses_threads);
+    assert_eq!(meta.defined_mems.len(), 1);
+    assert!(meta.defined_mems[0].5, "defined memory must be shared");
+
+    // Confirm real ARMv8-A atomic & barrier instructions appear in llvm-objdump output!
+    let dir = std::env::temp_dir().join(format!("wtime-a64-atomics-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("out.so");
+    std::fs::write(&path, &img.elf).unwrap();
+    let out = Command::new("llvm-objdump")
+        .args(["--triple=aarch64", "-d", path.to_str().unwrap()])
+        .output()
+        .expect("llvm-objdump required");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success());
+    let disasm = String::from_utf8_lossy(&out.stdout);
+    for mnemonic in ["dmb", "ldar", "stlr", "ldaxr", "stlxr", "clrex"] {
+        assert!(
+            disasm.contains(mnemonic),
+            "expected `{mnemonic}` in AArch64 Wasm Threads disassembly"
+        );
+    }
+}
+
+#[test]
+fn aarch64_store_cdylib_imports_exports_tables_mems_globals_eh() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_u32, section, type_sec, wasm_module,
+    };
+
+    // Types:
+    //   0: (func (param i32 i64 f32 f64 v128 i32 i32 i32 i32 i32) (result i32 i64 f32 f64 v128 i32 i32 i32 i32))
+    //      -> exercises stack args AND overflow return buffer in BOTH host & export trampolines!
+    //   1: (func (param i32) (result i32))
+    //   2: (func (param i32))  -- tag payload type
+    //   3: (func)              -- start func
+    let big_params: &[u8] = &[0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f];
+    let big_rets: &[u8] = &[0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7f, 0x7f, 0x7f, 0x7f];
+    let t_sec = type_sec(&[
+        (big_params, big_rets),
+        (&[0x7f], &[0x7f]),
+        (&[0x7f], &[]),
+        (&[], &[]),
+    ]);
+
+    // Imports (5 total: 1 func, 1 table, 1 mem, 1 global, 1 tag):
+    let mut imp_body = Vec::new();
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        leb_u32(buf, s.len() as u32);
+        buf.extend_from_slice(s.as_bytes());
+    };
+    leb_u32(&mut imp_body, 5);
+    // 1. func "env" "host_big" type 0
+    push_str(&mut imp_body, "env");
+    push_str(&mut imp_body, "host_big");
+    imp_body.extend_from_slice(&[0x00, 0x00]);
+    // 2. table "env" "imp_tbl" funcref min=2 max=8
+    push_str(&mut imp_body, "env");
+    push_str(&mut imp_body, "imp_tbl");
+    imp_body.extend_from_slice(&[0x01, 0x70, 0x01, 0x02, 0x08]);
+    // 3. memory "env" "imp_mem" min=1 max=4
+    push_str(&mut imp_body, "env");
+    push_str(&mut imp_body, "imp_mem");
+    imp_body.extend_from_slice(&[0x02, 0x01, 0x01, 0x04]);
+    // 4. global "env" "imp_glob" (mut i32)
+    push_str(&mut imp_body, "env");
+    push_str(&mut imp_body, "imp_glob");
+    imp_body.extend_from_slice(&[0x03, 0x7f, 0x01]);
+    // 5. tag "env" "imp_tag" type 2
+    push_str(&mut imp_body, "env");
+    push_str(&mut imp_body, "imp_tag");
+    imp_body.extend_from_slice(&[0x04, 0x00, 0x02]);
+
+    // Defined functions:
+    //   func 1 (def 0): type 0 -> calls imported func 0 (`host_big`)
+    //   func 2 (def 1): type 1 -> throws/catches with try_table + tag 1, calls table 0 via call_indirect, uses mem 0 & 1, global 0 & 1
+    //   func 3 (def 2): type 3 -> start func
+    let f_sec = func_sec(&[0, 1, 3]);
+    // Defined table 1: funcref min=1 max=4
+    let tbl_sec = section(4, &[0x01, 0x70, 0x01, 0x01, 0x04]);
+    // Defined memory 1: min=1 max=2
+    let mem_sec = section(5, &[0x01, 0x01, 0x01, 0x02]);
+    // Defined tag 1: type 2 (section 13)
+    let tag_sec = section(13, &[0x01, 0x00, 0x02]);
+    // Defined global 1: (mut i64) = 1234
+    let mut glob_body = Vec::new();
+    glob_body.extend_from_slice(&[0x01, 0x7e, 0x01, 0x42, 0xd2, 0x09, 0x0b]);
+    let glob_sec = section(6, &glob_body);
+    // Start section (section 8): func 3
+    let start_sec = section(8, &[0x03]);
+    // Active element segment placing func 2 into table 0 slot 0
+    let elem_sec = section(9, &[0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x02]);
+
+    // Export func, mem, table, global, tag
+    let exp_sec = export_sec(&[
+        ("call_big", 0, 1),
+        ("eh_and_misc", 0, 2),
+        ("def_tbl", 1, 1),
+        ("def_mem", 2, 1),
+        ("def_glob", 3, 1),
+        ("def_tag", 4, 1),
+    ]);
+
+    // func 1 body: forward all 10 params to imported func 0
+    let mut b1 = Vec::new();
+    for i in 0..10u8 {
+        b1.extend_from_slice(&[0x20, i]);
+    }
+    b1.extend_from_slice(&[0x10, 0x00]); // call 0
+
+    // func 2 body: try_table catching tag 1 (throws param 0), reads imp_glob, touches mem 1
+    let mut b2 = Vec::new();
+    b2.extend_from_slice(&[
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, // try_table (empty result)
+        0x01, // 1 catch clause
+        0x00, 0x01, 0x00, // catch tag=1 -> label 0 (outer block expects i32!)
+        0x20, 0, // local.get 0
+        0x08, 0x01, // throw tag 1
+        0x0b, // end try_table
+        0x41, 0x00, // fallback i32.const 0
+        0x0b, // end block
+        0x23, 0x00, // global.get 0 (imported global)
+        0x6a, // i32.add
+        0x3f, 0x01, // memory.size 1 (multi-memory)
+        0x6a, // i32.add
+        0xfc, 0x10, 0x01, // table.size 1
+        0x6a, // i32.add
+        0x20, 0, 0x45, // if param == 0 -> call_indirect table 0 type 1
+        0x04, 0x40, 0x41, 0x01, 0x41, 0x00, 0x11, 0x01, 0x00, 0x1a, 0x0b,
+    ]);
+
+    // func 3 (start): bump imported global 0 by 1
+    let b3 = vec![0x23, 0x00, 0x41, 0x01, 0x6a, 0x24, 0x00];
+
+    let wasm = wasm_module(&[
+        t_sec,
+        section(2, &imp_body),
+        f_sec,
+        tbl_sec,
+        mem_sec,
+        tag_sec,
+        glob_sec,
+        exp_sec,
+        start_sec,
+        elem_sec,
+        code_sec(&[enc_body(&[], &b1), enc_body(&[], &b2), enc_body(&[], &b3)]),
+    ]);
+
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            target: X64Target::StoreCdylib,
+            optimize: true,
+            ..Default::default()
+        },
+    )
+    .expect("aarch64 StoreCdylib full imports/exports/EH compilation must succeed");
+
+    let (meta, flags, _, _, _, _) = verify_store_elf_and_desc("a64_store_full_eh", &img);
+    assert_ne!(flags & 2, 0, "flags bit1 (uses_exceptions) must be set");
+    assert!(meta.uses_exceptions);
+    assert_eq!(meta.start_func, Some(3));
+    assert_eq!(meta.imported_funcs.len(), 1);
+    assert_eq!(meta.imported_tables.len(), 1);
+    assert_eq!(meta.imported_mems.len(), 1);
+    assert_eq!(meta.imported_globals.len(), 1);
+    assert_eq!(meta.imported_tags.len(), 1);
+    assert_eq!(meta.defined_mems.len(), 1);
+    assert_eq!(meta.defined_tables.len(), 1);
+    assert_eq!(meta.defined_globals.len(), 1);
+    assert_eq!(meta.defined_tags.len(), 1);
+    assert_eq!(meta.all_tag_layouts.len(), 2);
+    assert_eq!(meta.exported_funcs.len(), 2);
+    assert_eq!(meta.exported_tables.len(), 1);
+    assert_eq!(meta.exported_mems.len(), 1);
+    assert_eq!(meta.exported_globals.len(), 1);
+    assert_eq!(meta.exported_tags.len(), 1);
+    assert!(meta.host_tramp_sigs.len() >= 3);
+    assert_eq!(meta.host_tramp_sigs.len(), meta.export_tramp_sigs.len());
+}

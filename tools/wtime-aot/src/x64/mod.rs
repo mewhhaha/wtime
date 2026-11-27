@@ -1029,7 +1029,8 @@ fn build_shared_rodata(
             let Some(fty) = module.func_type(*fi) else {
                 continue;
             };
-            let (Some(ak), Some(rk)) = (export_val_kind(&fty.params), export_val_kind(&fty.results))
+            let (Some(ak), Some(rk)) =
+                (export_val_kind(&fty.params), export_val_kind(&fty.results))
             else {
                 continue;
             };
@@ -3600,10 +3601,12 @@ fn compile_wasm_to_x64_so_inner(
         }
         // 6e3. Patch `StoreCdylib` defined-function, host-trampoline, and export-trampoline rel32 tables.
         if let Some(ref sro) = store_ro_info {
-            let mut patch_rel32_table = |ro_off: u32, text_offs: &[u64]| -> Result<(), X64CompileError> {
-                let base_va = ro_vaddr
-                    .checked_add(u64::from(ro_off))
-                    .ok_or_else(|| X64CompileError::Failed("x64: store table vaddr overflow".into()))?;
+            let mut patch_rel32_table = |ro_off: u32,
+                                         text_offs: &[u64]|
+             -> Result<(), X64CompileError> {
+                let base_va = ro_vaddr.checked_add(u64::from(ro_off)).ok_or_else(|| {
+                    X64CompileError::Failed("x64: store table vaddr overflow".into())
+                })?;
                 for (i, &t_off) in text_offs.iter().enumerate() {
                     let target_va = tx_vaddr.checked_add(t_off).ok_or_else(|| {
                         X64CompileError::Failed("x64: store target vaddr overflow".into())

@@ -1161,8 +1161,11 @@ impl<'a> Lower<'a> {
                     self.asm.jcc(Cond::B, oob);
                 }
             }
-            self.asm
-                .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS));
+            self.asm.mov_rm(
+                true,
+                SCRATCH_GP1,
+                Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS),
+            );
             self.asm.mov_rm(
                 true,
                 SCRATCH_GP1,
@@ -1279,8 +1282,11 @@ impl<'a> Lower<'a> {
             if self.layout.is_store && self.module.memory_shared {
                 let lbl_ok = self.asm.new_label();
                 self.asm.jcc(Cond::Be, lbl_ok);
-                self.asm
-                    .mov_rm(true, Gp::R13, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+                self.asm.mov_rm(
+                    true,
+                    Gp::R13,
+                    Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+                );
                 self.asm.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R13, 8));
                 self.asm.cmp_rr(true, addr, Gp::R13);
                 self.asm.jcc(Cond::A, oob);
@@ -1322,8 +1328,11 @@ impl<'a> Lower<'a> {
             if self.layout.is_store && self.module.memory_shared {
                 let lbl_ok = self.asm.new_label();
                 self.asm.jcc(Cond::Be, lbl_ok);
-                self.asm
-                    .mov_rm(true, Gp::R13, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+                self.asm.mov_rm(
+                    true,
+                    Gp::R13,
+                    Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+                );
                 self.asm.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R13, 8));
                 self.asm.cmp_rr(true, SCRATCH_GP1, Gp::R13);
                 self.asm.jcc(Cond::A, oob);
@@ -1346,8 +1355,11 @@ impl<'a> Lower<'a> {
         if self.layout.is_store && self.module.memory_shared {
             let lbl_ok = self.asm.new_label();
             self.asm.jcc(Cond::Be, lbl_ok);
-            self.asm
-                .mov_rm(true, Gp::R13, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+            self.asm.mov_rm(
+                true,
+                Gp::R13,
+                Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+            );
             self.asm.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R13, 8));
             self.asm.cmp_rr(true, SCRATCH_GP1, Gp::R13);
             self.asm.jcc(Cond::A, oob);
@@ -1728,8 +1740,11 @@ impl<'a> Lower<'a> {
                         .mov_rm(true, Gp::R13, Mem::base_disp(SCRATCH_GP1, 8));
                 }
             } else {
-                self.asm
-                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS));
+                self.asm.mov_rm(
+                    true,
+                    SCRATCH_GP1,
+                    Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS),
+                );
                 self.asm.mov_rm(
                     true,
                     SCRATCH_GP1,
@@ -1749,18 +1764,12 @@ impl<'a> Lower<'a> {
             return;
         }
         if mem == 0 {
-            self.asm.cmp_rm(
-                true,
-                SCRATCH_GP2,
-                Mem::base_disp(Gp::R15, OFF_MEM_LEN),
-            );
+            self.asm
+                .cmp_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
         } else {
             let desc_off = self.layout.mem_desc_off(mem);
-            self.asm.cmp_rm(
-                true,
-                SCRATCH_GP2,
-                Mem::base_disp(Gp::R15, desc_off + 8),
-            );
+            self.asm
+                .cmp_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, desc_off + 8));
         }
         self.asm.jcc(Cond::A, trap_oob);
         if self.layout.spectre_mitigations {
@@ -1817,8 +1826,11 @@ impl<'a> Lower<'a> {
                 GcCompositeInfo::Array { .. } => GC_HDR_KIND_ARRAY,
                 GcCompositeInfo::Func => unreachable!(),
             };
-            self.asm
-                .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP));
+            self.asm.mov_rm(
+                true,
+                SCRATCH_GP1,
+                Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP),
+            );
             self.asm.mov_rm(
                 false,
                 SCRATCH_GP1,
@@ -1833,11 +1845,8 @@ impl<'a> Lower<'a> {
             self.asm
                 .mov_mr(true, Mem::base_disp(obj_reg, 0), SCRATCH_GP1);
         } else {
-            self.asm.mov_mi32(
-                false,
-                Mem::base_disp(obj_reg, 0),
-                gt.header_word() as i32,
-            );
+            self.asm
+                .mov_mi32(false, Mem::base_disp(obj_reg, 0), gt.header_word() as i32);
         }
     }
 
@@ -2247,8 +2256,11 @@ impl<'a> Lower<'a> {
                     Mem::base_disp(SCRATCH_GP2, (target_depth as i32) * 4),
                 );
             }
-            self.asm
-                .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP));
+            self.asm.mov_rm(
+                true,
+                SCRATCH_GP1,
+                Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP),
+            );
             self.asm.cmp_rm(
                 false,
                 SCRATCH_GP2,
@@ -2315,10 +2327,16 @@ impl<'a> Lower<'a> {
             .expect("store_saved_r15_off missing");
         self.asm
             .mov_mr(true, Mem::base_disp(Gp::Rsp, slot), Gp::R15);
-        self.asm
-            .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_FUNC_REFS));
-        self.asm
-            .mov_rm(true, SCRATCH_GP1, Mem::base_disp(SCRATCH_GP1, (f as i32) * 8));
+        self.asm.mov_rm(
+            true,
+            SCRATCH_GP1,
+            Mem::base_disp(Gp::R15, OFF_STORE_FUNC_REFS),
+        );
+        self.asm.mov_rm(
+            true,
+            SCRATCH_GP1,
+            Mem::base_disp(SCRATCH_GP1, (f as i32) * 8),
+        );
         self.asm
             .mov_rm(true, Gp::R15, Mem::base_disp(SCRATCH_GP1, 8));
         self.asm
@@ -2433,8 +2451,11 @@ impl<'a> Lower<'a> {
             self.asm
                 .mov_rm(false, Gp::Rax, Mem::base_disp(SCRATCH_GP2, 16));
             if exp_gt.is_final {
-                self.asm
-                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP));
+                self.asm.mov_rm(
+                    true,
+                    SCRATCH_GP1,
+                    Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP),
+                );
                 self.asm.cmp_rm(
                     false,
                     Gp::Rax,
@@ -2470,8 +2491,11 @@ impl<'a> Lower<'a> {
                         Mem::base_disp(Gp::Rax, (exp_gt.depth as i32) * 4),
                     );
                 }
-                self.asm
-                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP));
+                self.asm.mov_rm(
+                    true,
+                    SCRATCH_GP1,
+                    Mem::base_disp(Gp::R15, OFF_STORE_CANON_MAP),
+                );
                 self.asm.cmp_rm(
                     false,
                     Gp::Rax,
@@ -5295,8 +5319,7 @@ impl<'a> Lower<'a> {
                         self.asm
                             .mov_rm(true, SCRATCH_GP1, Mem::base_disp(SCRATCH_GP1, 0));
                     } else {
-                        self.asm
-                            .cmp_rm(false, ir, Mem::base_disp(SCRATCH_GP1, 8));
+                        self.asm.cmp_rm(false, ir, Mem::base_disp(SCRATCH_GP1, 8));
                         self.asm.jcc(Cond::Ae, toob);
                         self.emit_speculation_barrier();
                         self.asm.mov_rr(false, SCRATCH_GP2, ir);
@@ -5398,8 +5421,7 @@ impl<'a> Lower<'a> {
                         self.asm
                             .add_rm(true, SCRATCH_GP2, Mem::base_disp(SCRATCH_GP1, 0));
                     } else {
-                        self.asm
-                            .cmp_rm(false, ir, Mem::base_disp(SCRATCH_GP1, 8));
+                        self.asm.cmp_rm(false, ir, Mem::base_disp(SCRATCH_GP1, 8));
                         self.asm.jcc(Cond::Ae, toob);
                         self.emit_speculation_barrier();
                         self.asm.mov_rr(false, SCRATCH_GP2, ir);
@@ -5750,8 +5772,11 @@ impl<'a> Lower<'a> {
                 let r = res.unwrap();
                 let d = self.gp_write_reg(r);
                 if self.layout.is_store {
-                    self.asm
-                        .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS));
+                    self.asm.mov_rm(
+                        true,
+                        SCRATCH_GP1,
+                        Mem::base_disp(Gp::R15, OFF_STORE_MEM_DESCS),
+                    );
                     self.asm.mov_rm(
                         true,
                         SCRATCH_GP1,
@@ -9068,8 +9093,11 @@ impl<'a> Lower<'a> {
                 let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
                 let field_specs: Vec<(Ty, i32)> = fields.clone();
                 if self.layout.is_store {
-                    self.asm
-                        .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_TAG_IDS));
+                    self.asm.mov_rm(
+                        true,
+                        SCRATCH_GP1,
+                        Mem::base_disp(Gp::R15, OFF_STORE_TAG_IDS),
+                    );
                     self.asm.mov_rm(
                         false,
                         SCRATCH_GP1,
@@ -9147,11 +9175,8 @@ impl<'a> Lower<'a> {
                 if self.layout.is_store {
                     self.asm
                         .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-                    self.asm.mov_mr(
-                        true,
-                        Mem::base_disp(SCRATCH_GP2, STORE_OFF_EXN_ACTIVE),
-                        hr,
-                    );
+                    self.asm
+                        .mov_mr(true, Mem::base_disp(SCRATCH_GP2, STORE_OFF_EXN_ACTIVE), hr);
                 } else {
                     let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                     self.asm.mov_mr(true, Mem::base_disp(Gp::R15, exn_off), hr);
@@ -9163,11 +9188,8 @@ impl<'a> Lower<'a> {
                 if self.layout.is_store {
                     self.asm
                         .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-                    self.asm.mov_rm(
-                        true,
-                        d,
-                        Mem::base_disp(SCRATCH_GP1, STORE_OFF_EXN_ACTIVE),
-                    );
+                    self.asm
+                        .mov_rm(true, d, Mem::base_disp(SCRATCH_GP1, STORE_OFF_EXN_ACTIVE));
                 } else {
                     let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
                     self.asm.mov_rm(true, d, Mem::base_disp(Gp::R15, exn_off));
@@ -9207,8 +9229,11 @@ impl<'a> Lower<'a> {
             }
             Op::TagId(tag) => {
                 let r = res.unwrap();
-                self.asm
-                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_TAG_IDS));
+                self.asm.mov_rm(
+                    true,
+                    SCRATCH_GP1,
+                    Mem::base_disp(Gp::R15, OFF_STORE_TAG_IDS),
+                );
                 let d = self.gp_write_reg(r);
                 self.asm
                     .mov_rm(false, d, Mem::base_disp(SCRATCH_GP1, (tag as i32) * 4));
@@ -9216,8 +9241,11 @@ impl<'a> Lower<'a> {
             }
             Op::FuncRef(func) => {
                 let r = res.unwrap();
-                self.asm
-                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_FUNC_REFS));
+                self.asm.mov_rm(
+                    true,
+                    SCRATCH_GP1,
+                    Mem::base_disp(Gp::R15, OFF_STORE_FUNC_REFS),
+                );
                 let d = self.gp_write_reg(r);
                 self.asm
                     .mov_rm(true, d, Mem::base_disp(SCRATCH_GP1, (func as i32) * 8));
@@ -10648,10 +10676,12 @@ impl<'a> Lower<'a> {
                                 self.asm.lock_cmpxchg_mr16(Mem::base(SCRATCH_GP1), Gp::Rcx)
                             }
                             AtomicWidth::B4 => {
-                                self.asm.lock_cmpxchg_mr(false, Mem::base(SCRATCH_GP1), Gp::Rcx)
+                                self.asm
+                                    .lock_cmpxchg_mr(false, Mem::base(SCRATCH_GP1), Gp::Rcx)
                             }
                             AtomicWidth::B8 => {
-                                self.asm.lock_cmpxchg_mr(true, Mem::base(SCRATCH_GP1), Gp::Rcx)
+                                self.asm
+                                    .lock_cmpxchg_mr(true, Mem::base(SCRATCH_GP1), Gp::Rcx)
                             }
                         }
                         self.asm.jcc(Cond::Ne, lp);
@@ -10701,7 +10731,8 @@ impl<'a> Lower<'a> {
                     .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
                 match width {
                     AtomicWidth::B1 => {
-                        self.asm.lock_cmpxchg_mr8(Mem::base(SCRATCH_GP1), SCRATCH_GP2);
+                        self.asm
+                            .lock_cmpxchg_mr8(Mem::base(SCRATCH_GP1), SCRATCH_GP2);
                         self.asm.movzx_rr8(Gp::Rax, Gp::Rax);
                     }
                     AtomicWidth::B2 => {
@@ -10754,8 +10785,7 @@ impl<'a> Lower<'a> {
                     self.asm
                         .mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
                     self.asm.mov_ri32(Gp::Rcx, u32::from(is_64));
-                    self.asm
-                        .call_reloc(RelocTarget::Helper(HELPER_ATOMIC_WAIT));
+                    self.asm.call_reloc(RelocTarget::Helper(HELPER_ATOMIC_WAIT));
                     let d = self.gp_write_reg(r);
                     if d != Gp::Rax {
                         self.asm.mov_rr(false, d, Gp::Rax);
