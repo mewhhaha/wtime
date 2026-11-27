@@ -4,7 +4,7 @@ members = ["crates/*", "tools/wtime-conformance"]
 default-members = ["crates/wtime-types", "crates/wtime-decode", "crates/wtime-validate", "crates/wtime-runtime", "crates/wtime-cli"]
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.99"
@@ -15,10 +15,10 @@ keywords = ["webassembly", "wasm", "interpreter", "runtime"]
 categories = ["wasm", "compilers"]
 
 [workspace.dependencies]
-wtime-types = { version = "0.1.11", path = "crates/wtime-types" }
-wtime-decode = { version = "0.1.11", path = "crates/wtime-decode" }
-wtime-validate = { version = "0.1.11", path = "crates/wtime-validate" }
-wtime-runtime = { version = "0.1.11", path = "crates/wtime-runtime" }
+wtime-types = { version = "0.1.12", path = "crates/wtime-types" }
+wtime-decode = { version = "0.1.12", path = "crates/wtime-decode" }
+wtime-validate = { version = "0.1.12", path = "crates/wtime-validate" }
+wtime-runtime = { version = "0.1.12", path = "crates/wtime-runtime" }
 
 [profile.dev]
 debug = 1

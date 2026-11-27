@@ -2,6 +2,51 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.12] - 2026-11-27
+
+Full AArch64 `StoreCdylib`, Wasm GC, Wasm Threads, 8 GiB GC semi-space, and
+cross-architecture `wtime-aot-host` CI release. Core crates (`wtime-types`,
+`wtime-decode`, `wtime-validate`, `wtime-runtime`) and `wtime-cli` remain
+`#![forbid(unsafe_code)]` with zero external production dependencies, and
+`tools/wtime-aot` remains `#![forbid(unsafe_code)]` with zero external
+production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Full AArch64 `StoreCdylib` + Wasm GC + Wasm Threads (`--backend aarch64`)**:
+  - Exported `compile_wasm_to_aarch64_so` supporting `X64Target::StoreCdylib`
+    with `wt_store_get_desc` (96-byte `StoreModuleDesc`), `WTST0001` metadata,
+    sorted `SafepointHeader`/`SafepointEntry` `.rodata` tables, and unified
+    `(FP, LR)` GC stack walking matching `x86_64`.
+  - Lowered all Wasm GC instructions (`struct.*`, `array.*`, `i31.*`,
+    `ref.test`/`ref.cast`, `ref.eq`, `any.convert_extern`/`extern.convert_any`),
+    all Wasm Threads atomics (`dmb ish`, `ldar*`, `stlr*`, `ldaxr*`/`stlxr*`
+    RMW/cmpxchg, `atomic.wait`/`notify`), and multi-module imports, exports,
+    tables, memories, globals, tags, and exceptions on AArch64.
+  - Preserved callee-saved `X19..X28` and full 128-bit `Q8..Q15` across
+    deduplicated Store host trampolines and bumped AArch64 incremental cache
+    `FORMAT_VERSION` to `16`.
+  - Added AArch64 `StoreCdylib` codegen, `llvm-objdump` disassembly, and
+    `A64Vm` verification tests.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- **Native AArch64 support**:
+  - Dispatched `Module` native compilation per `target_arch` (`x86_64` /
+    `aarch64`), included `std::env::consts::ARCH` in compatibility/version
+    digests, enlarged `SigJmpBuf` (`#[repr(C, align(16))]` 320 bytes), and
+    wired AArch64 `uc_mcontext.pc` + `SIGTRAP` fault handling.
+- **8 GiB GC semi-space reserve (`>2 GiB` `ArrayRef` support)**:
+  - Expanded each Cheney semi-space reserve from `1 GiB` to `8 GiB` (`16 GiB`
+    `MAP_NORESERVE` arena) using `(off >> 2)` 32-bit raw handles (bit 31 flips
+    across Space A ↔ Space B), `MADV_DONTNEED` on semi-space flip, and
+    lazy-zero allocation for large zero-initialized arrays.
+  - Added `large_byte_array_2gib_plus_16_survives_gc` integration test.
+
+### CI (`.github/workflows/ci.yml`)
+- Added `tools/wtime-aot/host` `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  and `cargo test --locked` to both `ubuntu-24.04` (`x86_64`) and
+  `ubuntu-24.04-arm` (`aarch64`) CI runners, and fixed `tools/wtime-aot`
+  formatting drift.
+
 ## [0.1.11] - 2026-11-27
 
 Multi-module Wasm GC, Threads/atomics, and host runtime release for `wtime-aot`
