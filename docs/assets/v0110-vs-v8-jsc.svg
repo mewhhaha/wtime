@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="c" viewBox="0 0 820 634" width="820" height="634" role="img" aria-labelledby="title desc">
+<title id="title">v0.1.10 Scalar &amp; SIMD Kernels vs. Node V8 &amp; Bun JSC</title>
+<desc id="desc">speedup vs. Node V8 v26.5.0 (log scale, right of 1× is faster; median of 5 interleaved trials on CPU 0, bit-exact parity)</desc>
+<style>
+.c { font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+.bg { fill:#fcfcfb; stroke:#e6e4dc; stroke-width:1; }
+.t { fill:#111110; font-size:15px; font-weight:600; letter-spacing:-0.01em; }
+.st { fill:#575652; font-size:12px; }
+.lb { fill:#111110; font-size:12px; font-weight:500; }
+.lg { fill:#575652; font-size:11.5px; }
+.grp { fill:#575652; font-size:10.5px; font-weight:600; letter-spacing:.06em; }
+.v { fill:#575652; font-size:11px; font-variant-numeric:tabular-nums; }
+.v-hi { fill:#111110; font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; }
+.tick { fill:#898781; font-size:11px; font-variant-numeric:tabular-nums; }
+.grid { stroke:#e6e4dc; stroke-width:1; }
+.ax { stroke:#c4c2b8; stroke-width:1.5; }
+.x64 { fill:#2563eb; }
+.x64sw { fill:#0284c7; }
+.jsc { fill:#ea580c; }
+@media (prefers-color-scheme: dark) {
+  .bg { fill:#161615; stroke:#2b2b28; }
+  .t, .lb, .v-hi { fill:#f2f1ed; }
+  .st, .lg, .grp, .v { fill:#b8b6ad; }
+  .tick { fill:#85837c; }
+  .grid { stroke:#292926; }
+  .ax { stroke:#3f3f3a; }
+  .x64 { fill:#3b82f6; }
+  .x64sw { fill:#38bdf8; }
+  .jsc { fill:#f97316; }
+}
+</style>
+<rect class="bg" x="0.5" y="0.5" width="819" height="633" rx="10"/>
+<text class="t" x="20" y="30">v0.1.10 Scalar &amp; SIMD Kernels vs. Node V8 &amp; Bun JSC</text>
+<text class="st" x="20" y="49">speedup vs. Node V8 v26.5.0 (log scale, right of 1× is faster; median of 5 interleaved trials, CPU 0, bit-exact parity)</text>
+<rect class="x64" x="20" y="64" width="11" height="11" rx="3"/>
+<text class="lg" x="36" y="73.5">wtime-aot x64 (--guard-pages)</text>
+<rect class="x64sw" x="242" y="64" width="11" height="11" rx="3"/>
+<text class="lg" x="258" y="73.5">wtime-aot x64 (default, 0 signals)</text>
+<rect class="jsc" x="497" y="64" width="11" height="11" rx="3"/>
+<text class="lg" x="513" y="73.5">Bun JSC 1.4.5</text>
+<line class="grid" x1="172.0" x2="172.0" y1="94" y2="596.0"/>
+<text class="tick" x="172.0" y="614.0" text-anchor="middle">0.8×</text>
+<line class="ax" x1="212.0" x2="212.0" y1="94" y2="596.0"/>
+<text class="tick" x="212.0" y="614.0" text-anchor="middle">1× (V8)</text>
+<line class="grid" x1="284.7" x2="284.7" y1="94" y2="596.0"/>
+<text class="tick" x="284.7" y="614.0" text-anchor="middle">1.5×</text>
+<line class="grid" x1="336.3" x2="336.3" y1="94" y2="596.0"/>
+<text class="tick" x="336.3" y="614.0" text-anchor="middle">2×</text>
+<line class="grid" x1="500.6" x2="500.6" y1="94" y2="596.0"/>
+<text class="tick" x="500.6" y="614.0" text-anchor="middle">5×</text>
+<line class="grid" x1="624.9" x2="624.9" y1="94" y2="596.0"/>
+<text class="tick" x="624.9" y="614.0" text-anchor="middle">10×</text>
+<text class="grp" x="20" y="111.0">OVERALL (6 KERNELS)</text>
+<text class="lb" x="160" y="148.0" text-anchor="end">6-kernel geomean</text>
+<g><title>6-kernel geomean — wtime-aot x64 (--guard-pages): 1.89× (0.236 ms)</title>
+<path class="x64" d="M212.0,124.0H323.0Q326.5,124.0 326.5,127.5V131.5Q326.5,135.0 323.0,135.0H212.0Z"/>
+<text class="v-hi" x="333.5" y="133.5" text-anchor="start">1.89× (0.236 ms)</text></g>
+<g><title>6-kernel geomean — wtime-aot x64 (default, 0 signals): 1.74× (0.257 ms)</title>
+<path class="x64sw" d="M212.0,138.5H307.7Q311.2,138.5 311.2,142.0V146.0Q311.2,149.5 307.7,149.5H212.0Z"/>
+<text class="v" x="318.2" y="148.0" text-anchor="start">1.74× (0.257 ms)</text></g>
+<g><title>6-kernel geomean — Bun JSC 1.4.5: 0.97× (0.462 ms)</title>
+<path class="jsc" d="M212.0,153.0H209.0Q205.9,153.0 205.9,156.0V161.0Q205.9,164.0 209.0,164.0H212.0Z"/>
+<text class="v" x="219.0" y="162.5" text-anchor="start">0.97× (0.462 ms)</text></g>
+<text class="lb" x="160" y="204.0" text-anchor="end">6-kernel total</text>
+<g><title>6-kernel total — wtime-aot x64 (--guard-pages): 2.03× (4.46 ms)</title>
+<path class="x64" d="M212.0,180.0H335.4Q338.9,180.0 338.9,183.5V187.5Q338.9,191.0 335.4,191.0H212.0Z"/>
+<text class="v-hi" x="345.9" y="189.5" text-anchor="start">2.03× (4.46 ms)</text></g>
+<g><title>6-kernel total — wtime-aot x64 (default, 0 signals): 1.89× (4.80 ms)</title>
+<path class="x64sw" d="M212.0,194.5H322.3Q325.8,194.5 325.8,198.0V202.0Q325.8,205.5 322.3,205.5H212.0Z"/>
+<text class="v" x="332.8" y="204.0" text-anchor="start">1.89× (4.80 ms)</text></g>
+<g><title>6-kernel total — Bun JSC 1.4.5: 0.96× (9.47 ms)</title>
+<path class="jsc" d="M212.0,209.0H207.3Q203.8,209.0 203.8,212.5V216.5Q203.8,220.0 207.3,220.0H212.0Z"/>
+<text class="v" x="219.0" y="218.5" text-anchor="start">0.96× (9.47 ms)</text></g>
+<text class="grp" x="20" y="247.0">PER KERNEL</text>
+<text class="lb" x="160" y="284.0" text-anchor="end">mandelbrot_f32</text>
+<g><title>mandelbrot_f32 — wtime-aot x64 (--guard-pages): 10.8× (0.287 ms)</title>
+<path class="x64" d="M212.0,260.0H634.6Q638.1,260.0 638.1,263.5V267.5Q638.1,271.0 634.6,271.0H212.0Z"/>
+<text class="v-hi" x="645.1" y="269.5" text-anchor="start">10.8× (0.287 ms)</text></g>
+<g><title>mandelbrot_f32 — wtime-aot x64 (default, 0 signals): 10.8× (0.287 ms)</title>
+<path class="x64sw" d="M212.0,274.5H634.6Q638.1,274.5 638.1,278.0V282.0Q638.1,285.5 634.6,285.5H212.0Z"/>
+<text class="v-hi" x="645.1" y="284.0" text-anchor="start">10.8× (0.287 ms)</text></g>
+<g><title>mandelbrot_f32 — Bun JSC 1.4.5: 1.00× (3.07 ms)</title>
+<path class="jsc" d="M212.0,289.0H213.0Q214.0,289.0 214.0,290.0V299.0Q214.0,300.0 213.0,300.0H212.0Z"/>
+<text class="v" x="219.9" y="298.5" text-anchor="start">1.00× (3.07 ms)</text></g>
+<text class="lb" x="160" y="340.0" text-anchor="end">prime_sieve</text>
+<g><title>prime_sieve — wtime-aot x64 (--guard-pages): 1.66× (0.058 ms)</title>
+<path class="x64" d="M212.0,316.0H299.7Q303.2,316.0 303.2,319.5V323.5Q303.2,327.0 299.7,327.0H212.0Z"/>
+<text class="v-hi" x="310.2" y="325.5" text-anchor="start">1.66× (0.058 ms)</text></g>
+<g><title>prime_sieve — wtime-aot x64 (default, 0 signals): 1.64× (0.059 ms)</title>
+<path class="x64sw" d="M212.0,330.5H297.3Q300.8,330.5 300.8,334.0V338.0Q300.8,341.5 297.3,341.5H212.0Z"/>
+<text class="v" x="307.8" y="340.0" text-anchor="start">1.64× (0.059 ms)</text></g>
+<g><title>prime_sieve — Bun JSC 1.4.5: 0.95× (0.102 ms)</title>
+<path class="jsc" d="M212.0,345.0H206.3Q202.8,345.0 202.8,348.5V352.5Q202.8,356.0 206.3,356.0H212.0Z"/>
+<text class="v" x="219.0" y="354.5" text-anchor="start">0.95× (0.102 ms)</text></g>
+<text class="lb" x="160" y="396.0" text-anchor="end">merge_sort</text>
+<g><title>merge_sort — wtime-aot x64 (--guard-pages): 1.47× (3.28 ms)</title>
+<path class="x64" d="M212.0,372.0H277.1Q280.6,372.0 280.6,375.5V379.5Q280.6,383.0 277.1,383.0H212.0Z"/>
+<text class="v-hi" x="287.6" y="381.5" text-anchor="start">1.47× (3.28 ms)</text></g>
+<g><title>merge_sort — wtime-aot x64 (default, 0 signals): 1.38× (3.49 ms)</title>
+<path class="x64sw" d="M212.0,386.5H266.1Q269.6,386.5 269.6,390.0V394.0Q269.6,397.5 266.1,397.5H212.0Z"/>
+<text class="v" x="276.6" y="396.0" text-anchor="start">1.38× (3.49 ms)</text></g>
+<g><title>merge_sort — Bun JSC 1.4.5: 0.91× (5.27 ms)</title>
+<path class="jsc" d="M212.0,401.0H199.3Q195.8,401.0 195.8,404.5V408.5Q195.8,412.0 199.3,412.0H212.0Z"/>
+<text class="v" x="219.0" y="410.5" text-anchor="start">0.91× (5.27 ms)</text></g>
+<text class="lb" x="160" y="452.0" text-anchor="end">particle_spark_simd</text>
+<g><title>particle_spark_simd — wtime-aot x64 (--guard-pages): 1.45× (0.472 ms)</title>
+<path class="x64" d="M212.0,428.0H275.4Q278.9,428.0 278.9,431.5V435.5Q278.9,439.0 275.4,439.0H212.0Z"/>
+<text class="v-hi" x="285.9" y="437.5" text-anchor="start">1.45× (0.472 ms)</text></g>
+<g><title>particle_spark_simd — wtime-aot x64 (default, 0 signals): 1.15× (0.596 ms)</title>
+<path class="x64sw" d="M212.0,442.5H233.5Q237.0,442.5 237.0,446.0V450.0Q237.0,453.5 233.5,453.5H212.0Z"/>
+<text class="v" x="244.0" y="452.0" text-anchor="start">1.15× (0.596 ms)</text></g>
+<g><title>particle_spark_simd — Bun JSC 1.4.5: 1.06× (0.644 ms)</title>
+<path class="jsc" d="M212.0,457.0H219.5Q223.0,457.0 223.0,460.5V464.5Q223.0,468.0 219.5,468.0H212.0Z"/>
+<text class="v" x="230.0" y="466.5" text-anchor="start">1.06× (0.644 ms)</text></g>
+<text class="lb" x="160" y="508.0" text-anchor="end">matmul_64</text>
+<g><title>matmul_64 — wtime-aot x64 (--guard-pages): 1.19× (19.5 µs)</title>
+<path class="x64" d="M212.0,484.0H239.7Q243.2,484.0 243.2,487.5V491.5Q243.2,495.0 239.7,495.0H212.0Z"/>
+<text class="v-hi" x="250.2" y="493.5" text-anchor="start">1.19× (19.5 µs)</text></g>
+<g><title>matmul_64 — wtime-aot x64 (default, 0 signals): 0.97× (23.9 µs)</title>
+<path class="x64sw" d="M212.0,498.5H209.4Q206.7,498.5 206.7,501.2V506.8Q206.7,509.5 209.4,509.5H212.0Z"/>
+<text class="v" x="219.0" y="508.0" text-anchor="start">0.97× (23.9 µs)</text></g>
+<g><title>matmul_64 — Bun JSC 1.4.5: 0.92× (25.2 µs)</title>
+<path class="jsc" d="M212.0,513.0H200.7Q197.2,513.0 197.2,516.5V520.5Q197.2,524.0 200.7,524.0H212.0Z"/>
+<text class="v" x="219.0" y="522.5" text-anchor="start">0.92× (25.2 µs)</text></g>
+<text class="lb" x="160" y="564.0" text-anchor="end">lcg_recurrence</text>
+<g><title>lcg_recurrence — wtime-aot x64 (--guard-pages): 1.02× (0.338 ms)</title>
+<path class="x64" d="M212.0,540.0H213.6Q215.2,540.0 215.2,541.6V549.4Q215.2,551.0 213.6,551.0H212.0Z"/>
+<text class="v-hi" x="222.2" y="549.5" text-anchor="start">1.02× (0.338 ms)</text></g>
+<g><title>lcg_recurrence — wtime-aot x64 (default, 0 signals): 1.02× (0.339 ms)</title>
+<path class="x64sw" d="M212.0,554.5H213.4Q214.7,554.5 214.7,555.9V564.1Q214.7,565.5 213.4,565.5H212.0Z"/>
+<text class="v-hi" x="221.7" y="564.0" text-anchor="start">1.02× (0.339 ms)</text></g>
+<g><title>lcg_recurrence — Bun JSC 1.4.5: 0.95× (0.360 ms)</title>
+<path class="jsc" d="M212.0,569.0H207.2Q203.7,569.0 203.7,572.5V576.5Q203.7,580.0 207.2,580.0H212.0Z"/>
+<text class="v" x="219.0" y="578.5" text-anchor="start">0.95× (0.360 ms)</text></g>
+</svg>

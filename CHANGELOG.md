@@ -2,6 +2,54 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.10] - 2026-11-27
+
+AOT vectorization, SIMD lowering, and binary-heap optimization release for
+`wtime-aot` (`--backend x64` SSE2/AVX2/AVX-512 and `--backend aarch64` NEON):
+pure nested-loop outer SIMD vectorization (`Op::SimdOuterLoop`), constant-immediate
+SIMD lane shifts, `pmovzxbd`/`vpmovzxbd` zero-extension fusion with DOM-GVN
+deduplication, wrap-safe variable-stride 4× counted-loop unrolling, and algebraic
+binary-heap `sift_down` reassociation + hole-sift store sinking — sweeping all 12
+benchmark kernels across both suites against Wasmtime `49.0.3`, Node V8 `v26.5.0`,
+and Bun JSC `1.4.5` with 100% bit-exact output parity. Core crates remain
+`#![forbid(unsafe_code)]` with zero external production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Pure nested-loop outer SIMD vectorization (`Op::SimdOuterLoop`)**:
+  - Added `vectorize_pure_outer_loops` (disabled under `--spectre-mitigations`)
+    converting pure counted outer loops with early-exit `f32` inner loops into
+    predicated multi-lane SIMD execution with exact partial-lane tail masking,
+    horizontal `i32` wrapping accumulation, and dynamic-bound guard fallbacks.
+  - Lowered `Op::SimdOuterLoop` natively across 16-wide AVX-512 (`zmm` + `k1`
+    opmask), 8-wide AVX2 (`ymm`), 4-wide SSE2 (`xmm`), and 4-wide AArch64 NEON
+    using NaN-exact quiet unordered FP comparisons (`vcmpnlt_uqps` / `vcmpnle_uqps`)
+    and full `Xmm8..Xmm13` callee-save & `vzeroupper` accounting.
+  - Remapped `Op::SimdOuterLoop` / `Op::SlpWideChain` `args: ValRange` across
+    counted-loop BCE versioning passes, refreshed `def_op` across multi-loop
+    rewrites, and tightened raw-`Val` escape checks.
+- **Immediate SIMD shifts, `vpmovzxbd` fusion, & variable-stride 4× unrolling**:
+  - Lowered constant-immediate SIMD shifts (`0xfd8b..=0xfd8d`, `0xfdab..=0xfdad`,
+    `0xfdcb`, `0xfdcd`) to single immediate `psll*/psrl*/psra*` / `vpsll*/vpsrl*/vpsra*`
+    instructions with exact modulo masking and shift-0 elision.
+  - Added `V128_UN_I32X4_EXTEND_LOW_I8X16_U` (`pmovzxbd`/`vpmovzxbd` on x64,
+    `2× uxtl` on AArch64), DOM-GVN `GvnKey::V128Un` deduplication, and 4-lane
+    `i8x16.extract_lane_u` + `i32x4.splat/replace_lane` chain fusion.
+  - Extended `unroll_counted_loops_4x` with wrap-safe 4-guard variable-stride
+    `UnrollStep::VarInc(Val)` dynamic-stride unrolling.
+- **Binary-heap `sift_down` reassociation & hole-sift store sinking**:
+  - Added `optimize_sift_down_loops` rewriting BCE-versioned `i32`/`i64`
+    max-heap and min-heap sift loops into a rotated 2-child hot loop (parallel
+    `a[left]`/`a[left+1]` loads, speculative `2*left+1`/`2*left+3` indices,
+    1 `cmp` + 3 `cmov`s, 1 store per level, cold 1-child leaf exit, and a
+    0-swap-guarded sunk exit store with single-predecessor branch-fact checking).
+- **Incremental cache & tests**:
+  - Bumped incremental cache `FORMAT_VERSION` (`x64`: `19 -> 20`, `aarch64`:
+    `14 -> 15`).
+  - Added comprehensive IR, disassembly, native oracle, AArch64 NEON, and
+    soundness-audit regression tests (`x64_final_stretch_p1_*`, `p2_*`, `p3_*`,
+    `x64_final_stretch_audit_regressions`, and
+    `aarch64_final_stretch_outer_simd_pmovzxbd_and_sift_down_parity`).
+
 ## [0.1.9] - 2026-11-27
 
 Scalar codegen and loop-optimization release for `wtime-aot` (`--backend x64`,

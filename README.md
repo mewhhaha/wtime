@@ -27,13 +27,13 @@ Every chart below verifies **bit-exact output parity** across all engines. Full 
 
 ### Scalar & SIMD Kernels (vs. Node V8 & Bun JSC)
 
-In `v0.1.9`, pure-Rust `--backend x64` averages **1.17× faster than V8** and **1.19× faster than Bun JSC** with `--guard-pages` — and **1.10× / 1.12× faster** with default software bounds checks.
+In `v0.1.10`, pure-Rust `--backend x64` sweeps **all 6 kernels** — averaging **1.89× faster than V8** and **1.96× faster than Bun JSC** with `--guard-pages` (**2.03× / 2.12×** total time), and **1.74× / 1.80× faster** with default software bounds checks.
 
-![v0.1.9 scalar and SIMD kernels vs Node V8 and Bun JSC](docs/assets/v019-vs-v8-jsc.svg)
+![v0.1.10 scalar and SIMD kernels vs Node V8 and Bun JSC](docs/assets/v0110-vs-v8-jsc.svg)
 
 ### Wasm Kernels (vs. Wasmtime & V8)
 
-Pure-Rust `--backend x64` beats Wasmtime on all 6 kernels (**6.69×** geomean) and V8 (**5.18×** geomean).
+Pure-Rust `--backend x64` sweeps all 6 kernels over Wasmtime (**7.18×** geomean) and V8 (**5.55×** geomean), including `heapsort_i32` (**24.8 µs** vs. `31.1 µs` V8 and `32.0 µs` Wasmtime).
 
 ![Execution time on Wasm kernels comparing wtime-aot backends, Wasmtime, and V8](tools/wtime-aot/charts/runtime-kernels.svg)
 
@@ -45,7 +45,7 @@ Across 18 real workloads, `--backend rust` runs **1.3–13× faster than Wasmtim
 
 ### Compile Time, Incremental Rebuilds, & Warm Load
 
-On a 4,523-function (`5.91 MiB`) SIMD app, pure-Rust `--backend x64` compiles **2.49× faster cold** (`151 ms`), rebuilds 1-function edits **15.9× faster** (`23 ms`), and loads **54× faster** (`0.034 ms`) than Wasmtime.
+On a 4,572-function (`6.39 MiB`) Wasm app, pure-Rust `--backend x64` compiles **2.44× faster cold** (`178 ms`), rebuilds 1-function edits **18.0× faster** (`24 ms`), and loads **60× faster** (`0.033 ms`) than Wasmtime.
 
 ![Cold compilation time comparing wtime-aot backends and Wasmtime](tools/wtime-aot/charts/compile-cold.svg)
 
@@ -96,4 +96,4 @@ tools/wtime-aot/target/release/wtime-aot build module.wasm --cache /tmp/aot
 - **Performance** — [Benchmarks & methodology](docs/benchmarks.md) · [Goose & interpreter benchmarks](tools/wtime-goose/README.md)
 - **Using `wtime`** — [Embedding guide](docs/embedding.md) · [Native examples](examples/README.md) · [CLI, crates, & testing](docs/development.md)
 - **AOT Compiler** — [`wtime-aot` guide & threat model](tools/wtime-aot/README.md) · [x64 ABI & safety contract](docs/wtime-aot/x64-abi.md)
-- **Architecture & Release** — [Spec scope](docs/architecture/scope.md) · [API contract](docs/architecture/api.md) · [Security model](docs/architecture/security-model.md) · [Release readiness (`v0.1.9`)](docs/release-readiness.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+- **Architecture & Release** — [Spec scope](docs/architecture/scope.md) · [API contract](docs/architecture/api.md) · [Security model](docs/architecture/security-model.md) · [Release readiness (`v0.1.10`)](docs/release-readiness.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
