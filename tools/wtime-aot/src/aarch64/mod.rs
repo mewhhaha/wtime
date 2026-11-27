@@ -267,6 +267,8 @@ fn build_val_body_entry(raw_body_hash: [u8; 32], admit: BodyAdmitSummary) -> Val
         uses_exceptions: admit.uses_exceptions,
         uses_bulk_data: admit.uses_bulk_data,
         uses_bulk_elem: admit.uses_bulk_elem,
+        uses_gc: admit.uses_gc,
+        uses_threads: admit.uses_threads,
         dyn_table_ops: admit.dyn_table_ops,
         sig_arity: admit.sig_arity as u32,
         br_table_entries: admit.br_table_entries as u32,
@@ -796,6 +798,21 @@ fn compile_wasm_to_aarch64_detailed(
         inc_enabled,
     )
     .map_err(X64CompileError::AdmissionRejected)?;
+    if opts.target == X64Target::StoreCdylib {
+        return Err(X64CompileError::AdmissionRejected(
+            "aarch64: StoreCdylib target is not yet supported".into(),
+        ));
+    }
+    if module.uses_gc {
+        return Err(X64CompileError::AdmissionRejected(
+            "aarch64: Wasm GC is not yet supported".into(),
+        ));
+    }
+    if module.uses_threads {
+        return Err(X64CompileError::AdmissionRejected(
+            "aarch64: Wasm Threads / shared memory is not yet supported".into(),
+        ));
+    }
 
     // 1. Build shared `.rodata` tables (trap messages, call_indirect slots BEFORE data segments
     //    so edits to data segments do not shift `ci_tables` offsets).
@@ -1065,7 +1082,11 @@ fn compile_wasm_to_aarch64_detailed(
                         x64_mod::X64ConstVal::F64(b) => b,
                         x64_mod::X64ConstVal::RefNull => 0,
                         x64_mod::X64ConstVal::FuncRef(f) => u64::from(f) + 1,
-                        x64_mod::X64ConstVal::V128(_) => continue,
+                        x64_mod::X64ConstVal::I31(enc) => u64::from(enc),
+                        x64_mod::X64ConstVal::ExternI31(enc) => {
+                            x64_mod::GC_EXT_I31_TAG_HI | u64::from(enc)
+                        }
+                        x64_mod::X64ConstVal::V128(_) | x64_mod::X64ConstVal::RuntimeGc => continue,
                     };
                     get_global_items.push((noff, nlen, kind, 1u8, 0i32, bits));
                 }
@@ -1235,6 +1256,8 @@ fn compile_wasm_to_aarch64_detailed(
                             uses_exceptions: false,
                             uses_bulk_data: false,
                             uses_bulk_elem: false,
+                            uses_gc: false,
+                            uses_threads: false,
                             dyn_table_ops: Vec::new(),
                             sig_arity: 0,
                             br_table_entries: 0,
@@ -1634,6 +1657,8 @@ fn compile_wasm_to_aarch64_detailed(
                                     uses_exceptions: false,
                                     uses_bulk_data: false,
                                     uses_bulk_elem: false,
+                                    uses_gc: false,
+                            uses_threads: false,
                                     dyn_table_ops: Vec::new(),
                                     sig_arity: 0,
                                     br_table_entries: 0,
@@ -1740,6 +1765,7 @@ fn compile_wasm_to_aarch64_detailed(
                 );
             }
         }
+        X64Target::StoreCdylib => unreachable!("StoreCdylib rejected at aarch64 admission"),
     }
 
     let (export_asms, standalone_asm) = match opts.target {
@@ -1754,6 +1780,7 @@ fn compile_wasm_to_aarch64_detailed(
                     .map_err(X64CompileError::Failed)?,
             ),
         ),
+        X64Target::StoreCdylib => unreachable!("StoreCdylib rejected at aarch64 admission"),
     };
 
     // 4. Append all per-function / import / helper / export local `.rodata` slices into `.rodata`.
@@ -1815,6 +1842,7 @@ fn compile_wasm_to_aarch64_detailed(
         X64Target::StandaloneExec => {
             PlannedElf::Exec(A64ElfExecLayout::plan(rodata.len()).map_err(X64CompileError::Failed)?)
         }
+        X64Target::StoreCdylib => unreachable!("StoreCdylib rejected at aarch64 admission"),
     };
     let (rodata_vaddr, text_vaddr) = match &planned {
         PlannedElf::So(p) => (p.rodata_vaddr as u64, p.text_vaddr as u64),

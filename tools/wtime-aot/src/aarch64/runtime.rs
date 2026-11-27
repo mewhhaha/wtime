@@ -510,6 +510,15 @@ pub fn emit_a64_helpers(
                     a.mov_imm64(SGP1, u64::from(f) + 1);
                     emit_store_off(&mut a, Ty::I64, Some(SGP1), None, CTX_REG, off, SGP3);
                 }
+                X64ConstVal::I31(enc) => {
+                    a.mov_imm64(SGP1, u64::from(enc));
+                    emit_store_off(&mut a, Ty::I64, Some(SGP1), None, CTX_REG, off, SGP3);
+                }
+                X64ConstVal::ExternI31(enc) => {
+                    a.mov_imm64(SGP1, crate::x64::module::GC_EXT_I31_TAG_HI | u64::from(enc));
+                    emit_store_off(&mut a, Ty::I64, Some(SGP1), None, CTX_REG, off, SGP3);
+                }
+                X64ConstVal::RuntimeGc => {}
                 X64ConstVal::F32(bits) => {
                     a.mov_imm32(SGP1, bits);
                     emit_store_off(&mut a, Ty::I32, Some(SGP1), None, CTX_REG, off, SGP3);

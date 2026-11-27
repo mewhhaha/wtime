@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 20;
+const FORMAT_VERSION: u32 = 22;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -246,6 +246,7 @@ pub fn compute_abi_hash(
         match module.target {
             super::module::X64Target::BlotCdylib => 0,
             super::module::X64Target::StandaloneExec => 1,
+            super::module::X64Target::StoreCdylib => 2,
         },
     ]);
     hash_u32(&mut h, module.imports.len() as u32);
@@ -270,9 +271,14 @@ pub fn compute_abi_hash(
     for em in &module.extra_memories {
         hash_u64(&mut h, em.min_pages);
         hash_u64(&mut h, em.max_pages);
-        h.update(&[u8::from(em.memory64)]);
+        h.update(&[u8::from(em.memory64), u8::from(em.shared)]);
     }
-    h.update(&[u8::from(module.uses_exceptions)]);
+    h.update(&[
+        u8::from(module.memory_shared),
+        u8::from(module.uses_exceptions),
+        u8::from(module.uses_gc),
+        u8::from(module.uses_threads),
+    ]);
     hash_u32(&mut h, module.tags.len() as u32);
     for &t in &module.tags {
         hash_u32(&mut h, t);
@@ -326,6 +332,15 @@ pub fn compute_abi_hash(
                 h.update(&[7]);
                 hash_u32(&mut h, f);
             }
+            Some(X64ConstVal::I31(enc)) => {
+                h.update(&[8]);
+                hash_u32(&mut h, enc);
+            }
+            Some(X64ConstVal::ExternI31(enc)) => {
+                h.update(&[9]);
+                hash_u32(&mut h, enc);
+            }
+            Some(X64ConstVal::RuntimeGc) => h.update(&[10]),
         }
     }
     match layout.pinned_global {
@@ -1469,6 +1484,7 @@ fn write_cached_fn(
             RelocTarget::GuestCodeStart => (4u8, 0),
             RelocTarget::GuestCodeEnd => (5u8, 0),
             RelocTarget::GuardState => (6u8, 0),
+            RelocTarget::GcSafepointHeader => (7u8, 0),
         };
         w.write_u8(kind);
         w.write_u32(val);
@@ -1757,7 +1773,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
 // ============================================================================
 
 const VIDX_MAGIC: &[u8; 8] = b"WTX64VID";
-const VIDX_VERSION: u32 = 4;
+const VIDX_VERSION: u32 = 6;
 const MAX_VIDX_FILE_BYTES: usize = 32 << 20;
 
 /// Per-body cached validation and `x64` admission summary for incremental validation skip.
@@ -1771,6 +1787,8 @@ pub struct ValBodyEntry {
     pub uses_exceptions: bool,
     pub uses_bulk_data: bool,
     pub uses_bulk_elem: bool,
+    pub uses_gc: bool,
+    pub uses_threads: bool,
     pub dyn_table_ops: Vec<u32>,
     pub sig_arity: u32,
     pub br_table_entries: u32,
@@ -1840,6 +1858,7 @@ pub fn scan_wasm_shell_and_body_spans(
         match target {
             super::module::X64Target::BlotCdylib => 0,
             super::module::X64Target::StandaloneExec => 1,
+            super::module::X64Target::StoreCdylib => 2,
         },
     ]);
     let mut pos = 8usize;
@@ -1991,6 +2010,8 @@ pub fn load_val_index(
         let uses_exceptions = r.read_u8()? != 0;
         let uses_bulk_data = r.read_u8()? != 0;
         let uses_bulk_elem = r.read_u8()? != 0;
+        let uses_gc = r.read_u8()? != 0;
+        let uses_threads = r.read_u8()? != 0;
         let n_dyn = r.read_u32()? as usize;
         if n_dyn > 65_536 {
             return None;
@@ -2026,6 +2047,8 @@ pub fn load_val_index(
             uses_exceptions,
             uses_bulk_data,
             uses_bulk_elem,
+            uses_gc,
+            uses_threads,
             dyn_table_ops,
             sig_arity,
             br_table_entries,
@@ -2090,6 +2113,8 @@ pub fn save_val_index(cache_dir: &Path, data: &ValIndexData) {
         out.push(u8::from(b.uses_exceptions));
         out.push(u8::from(b.uses_bulk_data));
         out.push(u8::from(b.uses_bulk_elem));
+        out.push(u8::from(b.uses_gc));
+        out.push(u8::from(b.uses_threads));
         out.extend_from_slice(&(b.dyn_table_ops.len() as u32).to_le_bytes());
         for &t in &b.dyn_table_ops {
             out.extend_from_slice(&t.to_le_bytes());

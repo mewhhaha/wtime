@@ -5823,6 +5823,45 @@ impl<'a> LowerA64<'a> {
                 self.asm.bind(lbl_done);
                 self.gp_commit(r, d);
             }
+            Op::GcNull
+            | Op::ExternNull
+            | Op::GcConstI31(_)
+            | Op::ExternConstI31(_)
+            | Op::FuncRef(_)
+            | Op::TagId(_)
+            | Op::RefEq(_, _)
+            | Op::RefI31(_)
+            | Op::I31GetS(_)
+            | Op::I31GetU(_)
+            | Op::AnyConvertExtern(_)
+            | Op::ExternConvertAny(_)
+            | Op::StructNew { .. }
+            | Op::StructNewDefault(_)
+            | Op::StructGet { .. }
+            | Op::StructSet { .. }
+            | Op::ArrayNew { .. }
+            | Op::ArrayNewDefault { .. }
+            | Op::ArrayNewFixed { .. }
+            | Op::ArrayNewData { .. }
+            | Op::ArrayNewElem { .. }
+            | Op::ArrayGet { .. }
+            | Op::ArraySet { .. }
+            | Op::ArrayLen(_)
+            | Op::ArrayFill { .. }
+            | Op::ArrayCopy { .. }
+            | Op::ArrayInitData { .. }
+            | Op::ArrayInitElem { .. }
+            | Op::RefTest { .. }
+            | Op::RefCast { .. }
+            | Op::AtomicFence
+            | Op::AtomicLoad { .. }
+            | Op::AtomicStore { .. }
+            | Op::AtomicRmw { .. }
+            | Op::AtomicCmpxchg { .. }
+            | Op::AtomicWait { .. }
+            | Op::AtomicNotify { .. } => {
+                unreachable!("aarch64: GC modules rejected at admission: {op:?}");
+            }
             Op::Trap(code) => {
                 let lbl = match code {
                     TRAP_UNREACHABLE => self.trap_unreach_lbl(),

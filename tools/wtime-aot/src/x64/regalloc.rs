@@ -22,8 +22,10 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use super::asm::{Gp, Xmm};
-use super::ir::{IntBinOp, IrFunc, Op, Term, Ty, Val};
-use super::module::{CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS};
+use super::ir::{IntBinOp, IrFunc, Op, Term, Ty, Val, ValRefKind};
+use super::module::{
+    CompileBudget, GC_EXT_I31_TAG_HI, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS,
+};
 
 /// Pure scalar constant value that can be rematerialized cheaply at use sites with zero stack slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -74,6 +76,10 @@ pub struct AllocConfig {
     pub has_bmi2: bool,
     /// True when AVX-512VL (`x64-v4`) is enabled, unlocking `Xmm16..Xmm31` (30 allocatable XMM regs).
     pub allow_xmm16_31: bool,
+    /// True when compiling for multi-module `X64Target::StoreCdylib`.
+    pub is_store: bool,
+    /// Number of imported functions (`0..n_imports`), used to identify cross-module calls in `StoreCdylib`.
+    pub n_imports: usize,
 }
 
 impl AllocConfig {
@@ -418,6 +424,21 @@ pub fn layout_rets(tys: &[Ty]) -> Result<AbiLayout, String> {
     Ok(AbiLayout { slots, stack_bytes })
 }
 
+/// Precise GC stack map plan for a single safepoint inside a function.
+///
+/// Keyed by `(block_id, inst_idx)` where `inst_idx == u32::MAX` denotes the block's terminator
+/// (`CallCatch`, `CallIndirectCatch`, or non-tail fallback `ReturnCall`/`ReturnCallIndirect`).
+/// Offsets are relative to `rsp` while executing inside the function's frame (`[rsp + off]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SafepointPlan {
+    pub block_id: u32,
+    pub inst_idx: u32,
+    /// Sorted unique frame offsets holding live `ValRefKind::GcRef` values (`anyref`/`eqref`/`struct`/`array`).
+    pub gc_slots: Vec<i32>,
+    /// Sorted unique frame offsets holding live `ValRefKind::ExternRef` values.
+    pub ext_slots: Vec<i32>,
+}
+
 pub struct AllocResult {
     pub locs: Vec<Loc>,
     /// Block order emitted linearly (reachable blocks in RPO order).
@@ -438,10 +459,24 @@ pub struct AllocResult {
     pub ret_buf_bytes: i32,
     /// Frame slot (`[rsp + off]`) saving incoming `[r15 + OFF_RET_SPILL_PTR]` when THIS function has overflow returns.
     pub saved_ret_ptr_off: Option<i32>,
+    /// Frame slot (`[rsp + off]`) saving caller's `R15` (`Ctx*`) across cross-module/indirect calls in `StoreCdylib`.
+    pub store_saved_r15_off: Option<i32>,
     /// Per-block (`block_id`-indexed) bitmask of GP registers live-in at block entry (excluding `block.params`).
     pub block_live_in_gp: Vec<u16>,
     /// Per-block (`block_id`-indexed) bitmask of XMM registers live-in at block entry (excluding `block.params`).
     pub block_live_in_xmm: Vec<u32>,
+    /// Sorted by `(block_id, inst_idx)` precise GC safepoint root plans (empty when `!ir.uses_gc`).
+    pub safepoints: Vec<SafepointPlan>,
+}
+
+impl AllocResult {
+    /// Looks up the precise GC safepoint plan for `(block_id, inst_idx)` (`u32::MAX` for terminator).
+    pub fn safepoint_for(&self, block_id: u32, inst_idx: u32) -> Option<&SafepointPlan> {
+        self.safepoints
+            .binary_search_by_key(&(block_id, inst_idx), |sp| (sp.block_id, sp.inst_idx))
+            .ok()
+            .map(|i| &self.safepoints[i])
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -752,7 +787,11 @@ pub fn allocate_with_config_and_scratch(
                             unchecked_mem = true;
                         }
                     }
-                    Op::StoreMem { .. } | Op::V128StoreLaneMem { .. } => {
+                    Op::StoreMem { .. }
+                    | Op::V128StoreLaneMem { .. }
+                    | Op::AtomicStore { .. }
+                    | Op::AtomicRmw { .. }
+                    | Op::AtomicCmpxchg { .. } => {
                         store = true;
                         unchecked_mem = true;
                     }
@@ -761,6 +800,9 @@ pub fn allocate_with_config_and_scratch(
                     }
                     Op::Load { checked: false, .. }
                     | Op::LoadMem { .. }
+                    | Op::AtomicLoad { .. }
+                    | Op::AtomicWait { .. }
+                    | Op::AtomicNotify { .. }
                     | Op::V128LoadLane { checked: false, .. }
                     | Op::V128LoadLaneMem { .. }
                     | Op::BoundsCheck { .. }
@@ -990,8 +1032,20 @@ pub fn allocate_with_config_and_scratch(
     let val_remat_addr = &mut scratch.val_remat_addr;
     let clobbers = &mut scratch.clobbers;
     let mut slp_bcast_avoid_xmm0: Vec<u32> = Vec::new();
+    let mut gc_safepoint_pos: Vec<u32> = Vec::new();
+    let mut gc_safepoint_blocks: Vec<bool> = if ir.uses_gc {
+        vec![false; n_ord]
+    } else {
+        Vec::new()
+    };
+    let mut used_by_gc_alloc: Vec<bool> = if ir.uses_gc {
+        vec![false; n_vals]
+    } else {
+        Vec::new()
+    };
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
+    let mut needs_store_saved_r15 = false;
     let self_param_stack_bytes =
         layout_args_stack_bytes(ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]))?;
 
@@ -1019,6 +1073,7 @@ pub fn allocate_with_config_and_scratch(
             }
             let pos_use = tick;
             let pos_def = tick + 1;
+            let is_gc_alloc = ir.uses_gc && inst.op.is_gc_alloc();
             inst.op.for_each_use(&ir.val_pool, |v| {
                 let vi = v.0 as usize;
                 if def_block[vi] != oi as u32 {
@@ -1027,9 +1082,29 @@ pub fn allocate_with_config_and_scratch(
                 if pos_use > last_use[vi] {
                     last_use[vi] = pos_use;
                 }
+                if is_gc_alloc {
+                    used_by_gc_alloc[vi] = true;
+                }
             });
+            if is_gc_alloc {
+                gc_safepoint_pos.push(pos_use);
+                gc_safepoint_blocks[oi] = true;
+            }
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
+                    if cfg.is_store
+                        && match inst.op {
+                            Op::Call { func, .. } => (func as usize) < cfg.n_imports,
+                            Op::CallIndirect { .. } => true,
+                            _ => false,
+                        }
+                    {
+                        needs_store_saved_r15 = true;
+                    }
+                    if ir.uses_gc {
+                        gc_safepoint_pos.push(pos_use);
+                        gc_safepoint_blocks[oi] = true;
+                    }
                     clobbers.push(Clobber {
                         pos: pos_use,
                         gp_mask: MASK_GP_CALLER,
@@ -1065,12 +1140,44 @@ pub fn allocate_with_config_and_scratch(
                 | Op::TableInit { .. }
                 | Op::TableCopy { .. }
                 | Op::TableGrow { .. }
-                | Op::TableFill { .. } => {
+                | Op::TableFill { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemCopy);
                     clobbers.push(Clobber {
                         pos: pos_use,
                         gp_mask,
                         xmm_mask,
+                    });
+                }
+                Op::AtomicRmw { op, .. } => {
+                    let gp_mask = match op {
+                        super::ir::AtomicRmwOp::And
+                        | super::ir::AtomicRmwOp::Or
+                        | super::ir::AtomicRmwOp::Xor => {
+                            (1u16 << Gp::Rax.id()) | (1u16 << Gp::Rcx.id())
+                        }
+                        _ => 1u16 << Gp::Rax.id(),
+                    };
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask,
+                        xmm_mask: 0,
+                    });
+                }
+                Op::AtomicCmpxchg { .. } => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: 1u16 << Gp::Rax.id(),
+                        xmm_mask: 0,
                     });
                 }
                 Op::MemFill { .. } | Op::MemFillIdx { .. } => {
@@ -1190,6 +1297,14 @@ pub fn allocate_with_config_and_scratch(
                         slp_bcast_avoid_xmm0.push(bv.0);
                     }
                 }
+                Op::ExnAlloc { .. } if cfg.is_store => {
+                    // `HELPER_STORE_EXN_ALLOC` is preserve-all, but still requires 16B stack alignment before `call`.
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: 0,
+                        xmm_mask: 0,
+                    });
+                }
                 _ => {}
             }
             if let Some(res) = inst.res {
@@ -1204,6 +1319,11 @@ pub fn allocate_with_config_and_scratch(
                     Op::ConstI64(c) => Some(RematConst::I64(c)),
                     Op::ConstF32(b) => Some(RematConst::F32(b)),
                     Op::ConstF64(b) => Some(RematConst::F64(b)),
+                    Op::GcNull | Op::ExternNull => Some(RematConst::I64(0)),
+                    Op::GcConstI31(enc) => Some(RematConst::I64(i64::from(enc))),
+                    Op::ExternConstI31(enc) => {
+                        Some(RematConst::I64((GC_EXT_I31_TAG_HI | u64::from(enc)) as i64))
+                    }
                     _ => None,
                 };
                 val_remat_addr[vi] = match inst.op {
@@ -1221,11 +1341,15 @@ pub fn allocate_with_config_and_scratch(
         let pos_term = tick;
         match bb.term {
             Term::CallCatch {
+                func,
                 args,
                 ok_bb,
                 catch_args,
                 ..
             } => {
+                if cfg.is_store && (func as usize) < cfg.n_imports {
+                    needs_store_saved_r15 = true;
+                }
                 for &v in ir.pool_slice(args) {
                     let vi = v.0 as usize;
                     if def_block[vi] != oi as u32 {
@@ -1249,6 +1373,10 @@ pub fn allocate_with_config_and_scratch(
                     gp_mask: MASK_GP_CALLER,
                     xmm_mask: MASK_XMM_CALLER,
                 });
+                if ir.uses_gc {
+                    gc_safepoint_pos.push(pos_term);
+                    gc_safepoint_blocks[oi] = true;
+                }
                 let arg_stack_bytes = layout_args_stack_bytes(
                     ir.pool_slice(args)
                         .iter()
@@ -1274,6 +1402,9 @@ pub fn allocate_with_config_and_scratch(
                 catch_args,
                 ..
             } => {
+                if cfg.is_store {
+                    needs_store_saved_r15 = true;
+                }
                 {
                     let vi = idx.0 as usize;
                     if def_block[vi] != oi as u32 {
@@ -1306,6 +1437,10 @@ pub fn allocate_with_config_and_scratch(
                     gp_mask: MASK_GP_CALLER,
                     xmm_mask: MASK_XMM_CALLER,
                 });
+                if ir.uses_gc {
+                    gc_safepoint_pos.push(pos_term);
+                    gc_safepoint_blocks[oi] = true;
+                }
                 let arg_stack_bytes = layout_args_stack_bytes(
                     ir.pool_slice(args)
                         .iter()
@@ -1339,12 +1474,25 @@ pub fn allocate_with_config_and_scratch(
                         .iter()
                         .map(|&av| ir.val_tys[av.0 as usize]),
                 )?;
-                if arg_stack_bytes > self_param_stack_bytes {
+                let store_forced_fallback = cfg.is_store
+                    && match bb.term {
+                        Term::ReturnCall { func, .. } => (func as usize) < cfg.n_imports,
+                        Term::ReturnCallIndirect { .. } => true,
+                        _ => false,
+                    };
+                if store_forced_fallback {
+                    needs_store_saved_r15 = true;
+                }
+                if arg_stack_bytes > self_param_stack_bytes || store_forced_fallback {
                     clobbers.push(Clobber {
                         pos: pos_term,
                         gp_mask: MASK_GP_CALLER,
                         xmm_mask: MASK_XMM_CALLER,
                     });
+                    if ir.uses_gc {
+                        gc_safepoint_pos.push(pos_term);
+                        gc_safepoint_blocks[oi] = true;
+                    }
                     if arg_stack_bytes > max_outgoing_arg_bytes {
                         max_outgoing_arg_bytes = arg_stack_bytes;
                     }
@@ -1410,7 +1558,10 @@ pub fn allocate_with_config_and_scratch(
     let mut cb_extra_vecs: Vec<Vec<(u32, u32)>> = Vec::new();
     let mut cb_seg_overflow: Vec<bool> = Vec::new();
     let mut saved_live_in: Vec<u64> = Vec::new();
+    let mut saved_live_out: Vec<u64> = Vec::new();
     let mut saved_live_words: usize = 0;
+    let mut saved_sparse_live_in: Vec<Vec<u32>> = Vec::new();
+    let mut saved_sparse_live_out: Vec<Vec<u32>> = Vec::new();
     let mut has_exact_segs = false;
     if n_cb > 0 {
         let words = n_cb.div_ceil(64);
@@ -1428,11 +1579,355 @@ pub fn allocate_with_config_and_scratch(
             .checked_add(hull_and_scratch_bytes)
             .ok_or("x64: liveness memory size overflow")?;
         if base_bytes > MAX_LIVENESS_BYTES {
-            return Err(format!(
-                "x64: function {} liveness matrix ({base_bytes} B) exceeds cap {MAX_LIVENESS_BYTES} B",
-                ir.func_index
-            ));
-        }
+            // Giant functions (e.g., multi-MB Wasm-GC runtime dispatchers with tens of thousands
+            // of blocks and SSA values, where only a few dozen values are live at any block edge):
+            // solve exact cross-block liveness using a sparse sorted-Vec<u32> predecessor worklist!
+            let mut s_use: Vec<Vec<u32>> = (0..n_ord).map(|_| Vec::new()).collect();
+            let mut s_def: Vec<Vec<u32>> = (0..n_ord).map(|_| Vec::new()).collect();
+            let mut def_stamp: Vec<u32> = vec![0u32; n_cb];
+            let mut use_stamp: Vec<u32> = vec![0u32; n_cb];
+            let mut stamp: u32 = 0;
+            let mut def_use_steps: usize = 0;
+            for (oi, &bid) in block_order.iter().enumerate() {
+                stamp = stamp.wrapping_add(1);
+                if stamp == 0 {
+                    def_stamp.fill(0);
+                    use_stamp.fill(0);
+                    stamp = 1;
+                }
+                let bb = &ir.blocks[bid as usize];
+                for &p in &bb.params {
+                    let c = cb_id[p.0 as usize];
+                    if c != u32::MAX && def_stamp[c as usize] != stamp {
+                        def_stamp[c as usize] = stamp;
+                        s_def[oi].push(c);
+                    }
+                }
+                for inst in &bb.insts {
+                    def_use_steps += 1;
+                    if let Some(bg) = budget
+                        && (def_use_steps & 4095) == 0
+                    {
+                        bg.check_deadline()?;
+                    }
+                    inst.op.for_each_use(&ir.val_pool, |v| {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX
+                            && def_stamp[c as usize] != stamp
+                            && use_stamp[c as usize] != stamp
+                        {
+                            use_stamp[c as usize] = stamp;
+                            s_use[oi].push(c);
+                        }
+                    });
+                    if let Some(r) = inst.res {
+                        let c = cb_id[r.0 as usize];
+                        if c != u32::MAX && def_stamp[c as usize] != stamp {
+                            def_stamp[c as usize] = stamp;
+                            s_def[oi].push(c);
+                        }
+                    }
+                    match inst.op {
+                        Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                            for &r in ir.pool_slice(rets) {
+                                let c = cb_id[r.0 as usize];
+                                if c != u32::MAX && def_stamp[c as usize] != stamp {
+                                    def_stamp[c as usize] = stamp;
+                                    s_def[oi].push(c);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    let c = cb_id[v.0 as usize];
+                    if c != u32::MAX
+                        && def_stamp[c as usize] != stamp
+                        && use_stamp[c as usize] != stamp
+                    {
+                        use_stamp[c as usize] = stamp;
+                        s_use[oi].push(c);
+                    }
+                });
+                s_use[oi].sort_unstable();
+                s_def[oi].sort_unstable();
+            }
+
+            // Build predecessor adjacency in `block_order` space.
+            let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+            for (oi, &bid) in block_order.iter().enumerate() {
+                let ss = succ_offs[bid as usize] as usize;
+                let se = succ_offs[bid as usize + 1] as usize;
+                for &sid in &succ_data[ss..se] {
+                    let soi = block_pos_in_order[sid as usize];
+                    if soi != u32::MAX {
+                        preds[soi as usize].push(oi as u32);
+                    }
+                }
+            }
+
+            // Seed worklist in reverse RPO order (exact 1-pass convergence on DAGs).
+            let mut s_live_in: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+            let mut s_live_out: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+            let mut wl: std::collections::VecDeque<u32> = std::collections::VecDeque::with_capacity(n_ord);
+            let mut in_wl = vec![false; n_ord];
+            for &bid_u32 in rpo.iter().rev() {
+                let oi = block_pos_in_order[bid_u32 as usize];
+                if oi != u32::MAX && !in_wl[oi as usize] {
+                    in_wl[oi as usize] = true;
+                    wl.push_back(oi);
+                }
+            }
+            let mut tmp_out: Vec<u32> = Vec::new();
+            let mut tmp_in: Vec<u32> = Vec::new();
+            let mut tmp_merge: Vec<u32> = Vec::new();
+            let mut steps: usize = 0;
+            let mut total_elems: usize = 0;
+            const MAX_SPARSE_ELEMS: usize = 64_000_000;
+            while let Some(oi_u32) = wl.pop_front() {
+                steps += 1;
+                if let Some(bg) = budget
+                    && (steps & 1023) == 0
+                {
+                    bg.check_deadline()?;
+                }
+                let oi = oi_u32 as usize;
+                in_wl[oi] = false;
+                let bid = block_order[oi] as usize;
+                let ss = succ_offs[bid] as usize;
+                let se = succ_offs[bid + 1] as usize;
+                tmp_out.clear();
+                for &sid in &succ_data[ss..se] {
+                    let soi = block_pos_in_order[sid as usize];
+                    if soi == u32::MAX {
+                        continue;
+                    }
+                    let sin = &s_live_in[soi as usize];
+                    if sin.is_empty() {
+                        continue;
+                    }
+                    if tmp_out.is_empty() {
+                        tmp_out.extend_from_slice(sin);
+                    } else {
+                        tmp_merge.clear();
+                        let (mut a, mut b) = (0usize, 0usize);
+                        while a < tmp_out.len() && b < sin.len() {
+                            match tmp_out[a].cmp(&sin[b]) {
+                                std::cmp::Ordering::Less => {
+                                    tmp_merge.push(tmp_out[a]);
+                                    a += 1;
+                                }
+                                std::cmp::Ordering::Greater => {
+                                    tmp_merge.push(sin[b]);
+                                    b += 1;
+                                }
+                                std::cmp::Ordering::Equal => {
+                                    tmp_merge.push(tmp_out[a]);
+                                    a += 1;
+                                    b += 1;
+                                }
+                            }
+                        }
+                        tmp_merge.extend_from_slice(&tmp_out[a..]);
+                        tmp_merge.extend_from_slice(&sin[b..]);
+                        std::mem::swap(&mut tmp_out, &mut tmp_merge);
+                    }
+                }
+                // tmp_in = s_use[oi] ∪ (tmp_out \ s_def[oi])
+                tmp_in.clear();
+                let u = &s_use[oi];
+                let d = &s_def[oi];
+                let (mut iu, mut io, mut id) = (0usize, 0usize, 0usize);
+                while iu < u.len() || io < tmp_out.len() {
+                    // Advance `io` past elements in `d`.
+                    while io < tmp_out.len() {
+                        while id < d.len() && d[id] < tmp_out[io] {
+                            id += 1;
+                        }
+                        if id < d.len() && d[id] == tmp_out[io] {
+                            io += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    match (u.get(iu).copied(), tmp_out.get(io).copied()) {
+                        (Some(uv), Some(ov)) => match uv.cmp(&ov) {
+                            std::cmp::Ordering::Less => {
+                                tmp_in.push(uv);
+                                iu += 1;
+                            }
+                            std::cmp::Ordering::Greater => {
+                                tmp_in.push(ov);
+                                io += 1;
+                            }
+                            std::cmp::Ordering::Equal => {
+                                tmp_in.push(uv);
+                                iu += 1;
+                                io += 1;
+                            }
+                        },
+                        (Some(uv), None) => {
+                            tmp_in.push(uv);
+                            iu += 1;
+                        }
+                        (None, Some(ov)) => {
+                            tmp_in.push(ov);
+                            io += 1;
+                        }
+                        (None, None) => break,
+                    }
+                }
+                if tmp_out != s_live_out[oi] {
+                    total_elems = total_elems
+                        .saturating_sub(s_live_out[oi].len())
+                        .saturating_add(tmp_out.len());
+                    s_live_out[oi].clear();
+                    s_live_out[oi].extend_from_slice(&tmp_out);
+                }
+                if tmp_in != s_live_in[oi] {
+                    total_elems = total_elems
+                        .saturating_sub(s_live_in[oi].len())
+                        .saturating_add(tmp_in.len());
+                    if total_elems > MAX_SPARSE_ELEMS {
+                        return Err(format!(
+                            "x64: function {} sparse liveness ({total_elems} elems) exceeds cap {MAX_SPARSE_ELEMS}",
+                            ir.func_index
+                        ));
+                    }
+                    s_live_in[oi].clear();
+                    s_live_in[oi].extend_from_slice(&tmp_in);
+                    for &p_oi in &preds[oi] {
+                        if !in_wl[p_oi as usize] {
+                            in_wl[p_oi as usize] = true;
+                            wl.push_back(p_oi);
+                        }
+                    }
+                }
+            }
+
+            // Compute exact `cb_hull` from sparse `s_live_in`, `s_live_out`, and `s_def`.
+            reset_fill(&mut scratch.cb_hull, n_cb, (u32::MAX, 0u32));
+            reset_fill(&mut scratch.last_use_in_blk, n_cb, (u32::MAX, 0u32));
+            let cb_hull = &mut scratch.cb_hull;
+            let last_use_in_blk = &mut scratch.last_use_in_blk;
+            let mut out_stamp = vec![0u32; n_cb];
+            let mut seen_stamp = vec![0u32; n_cb];
+            let mut blk_stamp: u32 = 0;
+            for (oi, &bid) in block_order.iter().enumerate() {
+                let oi_u32 = oi as u32;
+                let bb = &ir.blocks[bid as usize];
+                let bs = block_start[oi];
+                let be = block_end[oi];
+                let mut t = bs + 2;
+                for inst in &bb.insts {
+                    inst.op.for_each_use(&ir.val_pool, |v| {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX {
+                            last_use_in_blk[c as usize] = (oi_u32, t);
+                        }
+                    });
+                    t += 2;
+                }
+                let pos_term = t;
+                match bb.term {
+                    Term::CallCatch {
+                        args, catch_args, ..
+                    } => {
+                        for &v in ir.pool_slice(args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                            }
+                        }
+                        for &v in ir.pool_slice(catch_args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
+                            }
+                        }
+                    }
+                    Term::CallIndirectCatch {
+                        idx,
+                        args,
+                        catch_args,
+                        ..
+                    } => {
+                        let ci = cb_id[idx.0 as usize];
+                        if ci != u32::MAX {
+                            last_use_in_blk[ci as usize] = (oi_u32, pos_term);
+                        }
+                        for &v in ir.pool_slice(args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                            }
+                        }
+                        for &v in ir.pool_slice(catch_args) {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
+                            }
+                        }
+                    }
+                    _ => {
+                        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                            let c = cb_id[v.0 as usize];
+                            if c != u32::MAX {
+                                last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                            }
+                        });
+                    }
+                }
+                blk_stamp = blk_stamp.wrapping_add(1);
+                if blk_stamp == 0 {
+                    out_stamp.fill(0);
+                    seen_stamp.fill(0);
+                    blk_stamp = 1;
+                }
+                for &c in &s_live_out[oi] {
+                    out_stamp[c as usize] = blk_stamp;
+                }
+                for list in [&s_live_in[oi], &s_live_out[oi], &s_def[oi]] {
+                    for &c_u32 in list {
+                        let c = c_u32 as usize;
+                        if seen_stamp[c] == blk_stamp {
+                            continue;
+                        }
+                        seen_stamp[c] = blk_stamp;
+                        let vi = cb_vals[c] as usize;
+                        let s = if def_block[vi] == oi_u32 {
+                            def_pos[vi]
+                        } else {
+                            bs
+                        };
+                        let is_out = out_stamp[c] == blk_stamp;
+                        let e = if is_out {
+                            be
+                        } else if last_use_in_blk[c].0 == oi_u32 {
+                            last_use_in_blk[c].1.max(s + 1)
+                        } else {
+                            s + 1
+                        };
+                        if s < cb_hull[c].0 {
+                            cb_hull[c].0 = s;
+                        }
+                        if e > cb_hull[c].1 {
+                            cb_hull[c].1 = e;
+                        }
+                    }
+                }
+            }
+            saved_sparse_live_in = s_live_in;
+            if ir.uses_gc && !gc_safepoint_pos.is_empty() {
+                for (oi, out_v) in s_live_out.iter_mut().enumerate() {
+                    if !gc_safepoint_blocks[oi] {
+                        *out_v = Vec::new();
+                    }
+                }
+                saved_sparse_live_out = s_live_out;
+            }
+        } else {
         // Budget exact live-range hole storage strictly inside the remaining `MAX_LIVENESS_BYTES`
         // headroom (at most 2 MiB) so parallel workers can never exceed the documented 16 MiB/fn
         // or 256 MiB aggregate liveness caps. First segment lives inline in `cb_seg_first` (zero
@@ -1764,11 +2259,14 @@ pub fn allocate_with_config_and_scratch(
         if live_def.capacity() <= SCRATCH_RECYCLE_CAP {
             scratch.live_def = live_def;
         }
-        if live_out.capacity() <= SCRATCH_RECYCLE_CAP {
+        if ir.uses_gc && !gc_safepoint_pos.is_empty() {
+            saved_live_out = live_out;
+        } else if live_out.capacity() <= SCRATCH_RECYCLE_CAP {
             scratch.live_out = live_out;
         }
         saved_live_in = live_in;
         saved_live_words = words;
+        }
     }
 
     // 4. Build O(log C) segment tree over clobbers and build exact intervals.
@@ -2348,6 +2846,35 @@ pub fn allocate_with_config_and_scratch(
                 let (cg, cx) = query_clobbers(lo, hi);
                 (s, e, 0, 0, u64::from((e - s).max(1)), cg, cx)
             };
+        let has_gc_safepoints = ir.uses_gc && !gc_safepoint_pos.is_empty();
+        let range_crosses_sp = |s: u32, e: u32| -> bool {
+            let lo = gc_safepoint_pos.partition_point(|&p| p <= s);
+            let hi = gc_safepoint_pos.partition_point(|&p| p < e);
+            lo < hi
+        };
+        let mut clob_gp = clob_gp;
+        if has_gc_safepoints
+            && val_remat[vi].is_none()
+            && ir.val_ref_kind(Val(vi as u32)).is_traced()
+        {
+            let needs_spill = if used_by_gc_alloc[vi] {
+                true
+            } else if seg_len > 0 {
+                segs_pool[seg_off as usize..seg_off as usize + seg_len as usize]
+                    .iter()
+                    .any(|&(s, e)| range_crosses_sp(s, e))
+            } else if c != u32::MAX && cb_hull[c as usize].0 != u32::MAX {
+                range_crosses_sp(start, end)
+            } else {
+                range_crosses_sp(start, last_use[vi].max(start))
+            };
+            if needs_spill {
+                // Force traced non-remat GC/extern refs live across any GC safepoint (or consumed
+                // by an allocating GC op) into a spill slot so the precise copying GC can relocate
+                // them directly in `[rsp + off]`.
+                clob_gp = u16::MAX;
+            }
+        }
         let clob_xmm = clob_xmm | val_clob_xmm[vi];
         val_clob_gp[vi] = clob_gp;
         val_clob_xmm[vi] = clob_xmm;
@@ -3143,11 +3670,24 @@ pub fn allocate_with_config_and_scratch(
     } else {
         None
     };
+    let store_saved_r15_off = if needs_store_saved_r15 {
+        raw_frame = raw_frame
+            .checked_add(7)
+            .ok_or("x64: stack frame size overflow")?
+            & !7;
+        let off = raw_frame;
+        raw_frame = raw_frame
+            .checked_add(8)
+            .ok_or("x64: stack frame size overflow")?;
+        Some(off)
+    } else {
+        None
+    };
 
     // On function entry, `call` pushed an 8-byte return address so `rsp % 16 == 8`.
     // Pushing `k` callee-saved regs shifts `rsp` by `8*k`. We want `(8 + 8*k + frame_size) % 16 == 0`.
     let pushes_bytes = (1 + used_callee_gp.len()) as i32 * 8;
-    let frame_size = if raw_frame == 0 && clobbers.is_empty() {
+    let frame_size = if raw_frame == 0 && clobbers.is_empty() && gc_safepoint_pos.is_empty() {
         0
     } else {
         let total = pushes_bytes
@@ -3201,9 +3741,229 @@ pub fn allocate_with_config_and_scratch(
             block_live_in_gp[bid as usize] = gp_m;
             block_live_in_xmm[bid as usize] = xmm_m;
         }
+    } else if !saved_sparse_live_in.is_empty() {
+        for (oi, &bid) in block_order.iter().enumerate() {
+            let mut gp_m = 0u16;
+            let mut xmm_m = 0u32;
+            for &c in &saved_sparse_live_in[oi] {
+                let vi = cb_vals[c as usize] as usize;
+                if assigned[vi] {
+                    match locs[vi] {
+                        Loc::Gp(g) => gp_m |= 1u16 << g.id(),
+                        Loc::Xmm(x) => xmm_m |= 1u32 << x.id(),
+                        Loc::RematAddr { base_reg, .. } => gp_m |= 1u16 << base_reg.id(),
+                        Loc::Spill(_) | Loc::Remat(_) => {}
+                    }
+                }
+            }
+            block_live_in_gp[bid as usize] = gp_m;
+            block_live_in_xmm[bid as usize] = xmm_m;
+        }
+    }
+    // 6b. Build exact per-safepoint GC stack maps via reverse intra-block liveness from exact `saved_live_out`.
+    let mut safepoints: Vec<SafepointPlan> = Vec::new();
+    if ir.uses_gc && !gc_safepoint_pos.is_empty() {
+        let mut live_stamp = vec![0u32; n_vals];
+        let mut stamp = 0u32;
+        let mut live_vals: Vec<u32> = Vec::new();
+        let insert_traced =
+            |v: Val, live_stamp: &mut [u32], cur_stamp: u32, live_vals: &mut Vec<u32>| {
+                let vi = v.0 as usize;
+                if ir.val_ref_kind(v).is_traced()
+                    && val_remat[vi].is_none()
+                    && live_stamp[vi] != cur_stamp
+                {
+                    live_stamp[vi] = cur_stamp;
+                    live_vals.push(v.0);
+                }
+            };
+        let snapshot_plan = |block_id: u32,
+                             inst_idx: u32,
+                             live_vals: &mut Vec<u32>,
+                             live_stamp: &[u32],
+                             cur_stamp: u32,
+                             locs: &[Loc],
+                             out: &mut Vec<SafepointPlan>|
+         -> Result<(), String> {
+            let mut gc_slots = Vec::new();
+            let mut ext_slots = Vec::new();
+            live_vals.retain(|&vi| live_stamp[vi as usize] == cur_stamp);
+            for &vi in live_vals.iter() {
+                let kind = ir.val_ref_kind(Val(vi));
+                let off = match locs[vi as usize] {
+                    Loc::Spill(off) => off,
+                    other => {
+                        return Err(format!(
+                            "x64: GC safepoint fn {} bb{block_id} inst {inst_idx}: live traced v{vi} ({kind:?}) in {other:?}",
+                            ir.func_index
+                        ));
+                    }
+                };
+                match kind {
+                    ValRefKind::GcRef => gc_slots.push(off),
+                    ValRefKind::ExternRef => ext_slots.push(off),
+                    ValRefKind::None => {}
+                }
+            }
+            gc_slots.sort_unstable();
+            gc_slots.dedup();
+            ext_slots.sort_unstable();
+            ext_slots.dedup();
+            out.push(SafepointPlan {
+                block_id,
+                inst_idx,
+                gc_slots,
+                ext_slots,
+            });
+            Ok(())
+        };
+
+        for (oi, &bid) in block_order.iter().enumerate() {
+            if !gc_safepoint_blocks[oi] {
+                continue;
+            }
+            stamp = stamp.wrapping_add(1);
+            if stamp == 0 {
+                live_stamp.fill(0);
+                stamp = 1;
+            }
+            live_vals.clear();
+            if saved_live_words > 0 {
+                let base = oi * saved_live_words;
+                for w in 0..saved_live_words {
+                    let mut bits = saved_live_out[base + w];
+                    while bits != 0 {
+                        let tz = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let c = (w << 6) + tz;
+                        let vi = cb_vals[c];
+                        insert_traced(Val(vi), &mut live_stamp, stamp, &mut live_vals);
+                    }
+                }
+            } else if !saved_sparse_live_out.is_empty() {
+                for &c in &saved_sparse_live_out[oi] {
+                    let vi = cb_vals[c as usize];
+                    insert_traced(Val(vi), &mut live_stamp, stamp, &mut live_vals);
+                }
+            }
+            let bb = &ir.blocks[bid as usize];
+            match bb.term {
+                Term::CallCatch {
+                    args, catch_args, ..
+                } => {
+                    for &v in ir.pool_slice(catch_args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                    snapshot_plan(
+                        bid,
+                        u32::MAX,
+                        &mut live_vals,
+                        &live_stamp,
+                        stamp,
+                        &locs,
+                        &mut safepoints,
+                    )?;
+                    for &v in ir.pool_slice(args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                }
+                Term::CallIndirectCatch {
+                    idx,
+                    args,
+                    catch_args,
+                    ..
+                } => {
+                    for &v in ir.pool_slice(catch_args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                    snapshot_plan(
+                        bid,
+                        u32::MAX,
+                        &mut live_vals,
+                        &live_stamp,
+                        stamp,
+                        &locs,
+                        &mut safepoints,
+                    )?;
+                    insert_traced(idx, &mut live_stamp, stamp, &mut live_vals);
+                    for &v in ir.pool_slice(args) {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    }
+                }
+                Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                    let arg_stack_bytes = layout_args_stack_bytes(
+                        ir.pool_slice(args)
+                            .iter()
+                            .map(|&av| ir.val_tys[av.0 as usize]),
+                    )?;
+                    let store_forced_fallback = cfg.is_store
+                        && match bb.term {
+                            Term::ReturnCall { func, .. } => (func as usize) < cfg.n_imports,
+                            Term::ReturnCallIndirect { .. } => true,
+                            _ => false,
+                        };
+                    if arg_stack_bytes > self_param_stack_bytes || store_forced_fallback {
+                        safepoints.push(SafepointPlan {
+                            block_id: bid,
+                            inst_idx: u32::MAX,
+                            gc_slots: Vec::new(),
+                            ext_slots: Vec::new(),
+                        });
+                    }
+                    bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    });
+                }
+                _ => {
+                    bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                    });
+                }
+            }
+            for (ii, inst) in bb.insts.iter().enumerate().rev() {
+                if let Some(r) = inst.res {
+                    live_stamp[r.0 as usize] = 0;
+                }
+                match inst.op {
+                    Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                        for &rv in ir.pool_slice(rets) {
+                            live_stamp[rv.0 as usize] = 0;
+                        }
+                        snapshot_plan(
+                            bid,
+                            ii as u32,
+                            &mut live_vals,
+                            &live_stamp,
+                            stamp,
+                            &locs,
+                            &mut safepoints,
+                        )?;
+                    }
+                    _ => {}
+                }
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    insert_traced(v, &mut live_stamp, stamp, &mut live_vals);
+                });
+                if inst.op.is_gc_alloc() {
+                    snapshot_plan(
+                        bid,
+                        ii as u32,
+                        &mut live_vals,
+                        &live_stamp,
+                        stamp,
+                        &locs,
+                        &mut safepoints,
+                    )?;
+                }
+            }
+        }
+        safepoints.sort_unstable_by_key(|sp| (sp.block_id, sp.inst_idx));
     }
     if saved_live_in.capacity() <= SCRATCH_RECYCLE_CAP {
         scratch.live_in = saved_live_in;
+    }
+    if !saved_live_out.is_empty() && saved_live_out.capacity() <= SCRATCH_RECYCLE_CAP {
+        scratch.live_out = saved_live_out;
     }
     if segs_pool.capacity() <= SCRATCH_RECYCLE_CAP {
         scratch.segs_pool = segs_pool;
@@ -3220,7 +3980,9 @@ pub fn allocate_with_config_and_scratch(
         ret_buf_off,
         ret_buf_bytes,
         saved_ret_ptr_off,
+        store_saved_r15_off,
         block_live_in_gp,
         block_live_in_xmm,
+        safepoints,
     })
 }

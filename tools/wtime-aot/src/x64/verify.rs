@@ -13,10 +13,10 @@ use std::collections::HashSet;
 use wtime_types::ValType;
 
 use super::ir::{
-    CmpBranchKind, FloatBinOp, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange, VecElemKind,
-    VecReduceKind,
+    CmpBranchKind, FloatBinOp, GcFieldLoadKind, GcHeapTarget, IntBinOp, IrFunc, Op, Term, Ty, Val,
+    ValRange, ValRefKind, VecElemKind, VecReduceKind,
 };
-use super::module::{MAX_FRAME_BYTES, X64Module};
+use super::module::{GcCompositeInfo, MAX_FRAME_BYTES, X64Module};
 use super::regalloc::{
     AllocConfig, AllocResult, HelperKind, Loc, MASK_GP_CALLER, MASK_RAX_RDX, MASK_RCX,
     MASK_XMM_CALLER, RematConst, XMM_CALLEE_SAVED, helper_clobbers, layout_args, layout_rets,
@@ -84,6 +84,16 @@ fn check_edge(
                 ir.func_index
             ));
         }
+        if ir.uses_gc {
+            let ark = ir.val_ref_kind(a);
+            let prk = ir.val_ref_kind(p);
+            if ark != ValRefKind::None && prk != ValRefKind::None && ark != prk {
+                return Err(format!(
+                    "verify_ir fn {} bb{from_bb}: {ctx} edge to bb{target_bb} arg {idx} ref-kind mismatch ({ark:?} vs {prk:?})",
+                    ir.func_index
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -91,6 +101,14 @@ fn check_edge(
 /// Verifies SSA structure, CFG edge arities/types, dominator validity, and opcode type soundness.
 /// Independently recomputes predecessors from terminators instead of trusting `bb.preds`.
 pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
+    if ir.uses_gc && ir.val_ref_kinds.len() != ir.val_tys.len() {
+        return Err(format!(
+            "verify_ir fn {}: val_ref_kinds.len() ({}) != val_tys.len() ({})",
+            ir.func_index,
+            ir.val_ref_kinds.len(),
+            ir.val_tys.len()
+        ));
+    }
     if ir.blocks.is_empty() {
         return Err(format!(
             "verify_ir fn {}: function has zero basic blocks",
@@ -2020,6 +2038,24 @@ fn verify_inst_types(
             expect_res(ir, bi, res, Ty::I32, "ExnGetTag")?;
             expect_ty(ir, bi, h, Ty::I64, "ExnGetTag")?;
         }
+        Op::TagId(tag) => {
+            expect_res(ir, bi, res, Ty::I32, "TagId")?;
+            if (tag as usize) >= module.tags.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: TagId {tag} out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::FuncRef(func) => {
+            expect_res(ir, bi, res, Ty::I64, "FuncRef")?;
+            if (func as usize) >= module.func_type_idx.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: FuncRef {func} out of range",
+                    ir.func_index
+                ));
+            }
+        }
         Op::ExnGetPayload {
             handle,
             tag,
@@ -2090,6 +2126,480 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
+        }
+        Op::GcNull | Op::GcConstI31(_) => expect_res(ir, bi, res, Ty::I64, "GcNull/GcConstI31")?,
+        Op::ExternNull | Op::ExternConstI31(_) => {
+            expect_res(ir, bi, res, Ty::I64, "ExternNull/ExternConstI31")?
+        }
+        Op::RefEq(a, b) => {
+            expect_res(ir, bi, res, Ty::I32, "RefEq")?;
+            expect_ty(ir, bi, a, Ty::I64, "RefEq.a")?;
+            expect_ty(ir, bi, b, Ty::I64, "RefEq.b")?;
+        }
+        Op::RefI31(x) => {
+            expect_res(ir, bi, res, Ty::I64, "RefI31")?;
+            expect_ty(ir, bi, x, Ty::I32, "RefI31")?;
+        }
+        Op::I31GetS(r) | Op::I31GetU(r) => {
+            expect_res(ir, bi, res, Ty::I32, "I31Get")?;
+            expect_ty(ir, bi, r, Ty::I64, "I31Get")?;
+        }
+        Op::AnyConvertExtern(v) | Op::ExternConvertAny(v) => {
+            expect_res(ir, bi, res, Ty::I64, "ConvertExternAny")?;
+            expect_ty(ir, bi, v, Ty::I64, "ConvertExternAny")?;
+        }
+        Op::StructNew { ty, fields } => {
+            expect_res(ir, bi, res, Ty::I64, "StructNew")?;
+            check_val_range(ir, fields, "StructNew.fields")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: StructNew type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Struct {
+                fields: ref fdefs, ..
+            } = module.gc_canon_types[cid].composite
+            else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: StructNew type {ty} is not a struct",
+                    ir.func_index
+                ));
+            };
+            let vals = ir.pool_slice(fields);
+            if vals.len() != fdefs.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: StructNew field count {} != {}",
+                    ir.func_index,
+                    vals.len(),
+                    fdefs.len()
+                ));
+            }
+            for (&v, fd) in vals.iter().zip(fdefs) {
+                expect_ty(
+                    ir,
+                    bi,
+                    v,
+                    X64Module::storage_to_ty(fd.storage),
+                    "StructNew.field",
+                )?;
+            }
+        }
+        Op::StructNewDefault(ty) => {
+            expect_res(ir, bi, res, Ty::I64, "StructNewDefault")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: StructNewDefault type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            if !matches!(
+                module.gc_canon_types[cid].composite,
+                GcCompositeInfo::Struct { .. }
+            ) {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: StructNewDefault type {ty} is not a struct",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::StructGet {
+            ty,
+            field,
+            kind,
+            obj,
+        } => {
+            expect_res(ir, bi, res, kind.ty(), "StructGet")?;
+            expect_ty(ir, bi, obj, Ty::I64, "StructGet.obj")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: StructGet type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Struct {
+                fields: ref fdefs, ..
+            } = module.gc_canon_types[cid].composite
+            else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: StructGet type {ty} is not a struct",
+                    ir.func_index
+                ));
+            };
+            let fd = fdefs.get(field as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: StructGet field {field} out of range",
+                    ir.func_index
+                )
+            })?;
+            let expected_ty = match kind {
+                GcFieldLoadKind::Val(_) => X64Module::storage_to_ty(fd.storage),
+                GcFieldLoadKind::I8S
+                | GcFieldLoadKind::I8U
+                | GcFieldLoadKind::I16S
+                | GcFieldLoadKind::I16U => Ty::I32,
+            };
+            if kind.ty() != expected_ty {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: StructGet load kind mismatch",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::StructSet {
+            ty,
+            field,
+            obj,
+            val,
+        } => {
+            expect_no_res(ir, bi, res, "StructSet")?;
+            expect_ty(ir, bi, obj, Ty::I64, "StructSet.obj")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: StructSet type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Struct {
+                fields: ref fdefs, ..
+            } = module.gc_canon_types[cid].composite
+            else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: StructSet type {ty} is not a struct",
+                    ir.func_index
+                ));
+            };
+            let fd = fdefs.get(field as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: StructSet field {field} out of range",
+                    ir.func_index
+                )
+            })?;
+            expect_ty(
+                ir,
+                bi,
+                val,
+                X64Module::storage_to_ty(fd.storage),
+                "StructSet.val",
+            )?;
+        }
+        Op::ArrayNew { ty, init, len } => {
+            expect_res(ir, bi, res, Ty::I64, "ArrayNew")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayNew.len")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ArrayNew type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Array { elem, .. } = module.gc_canon_types[cid].composite else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayNew type {ty} is not an array",
+                    ir.func_index
+                ));
+            };
+            expect_ty(
+                ir,
+                bi,
+                init,
+                X64Module::storage_to_ty(elem),
+                "ArrayNew.init",
+            )?;
+        }
+        Op::ArrayNewDefault { ty, len } => {
+            expect_res(ir, bi, res, Ty::I64, "ArrayNewDefault")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayNewDefault.len")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ArrayNewDefault type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            if !matches!(
+                module.gc_canon_types[cid].composite,
+                GcCompositeInfo::Array { .. }
+            ) {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayNewDefault type {ty} is not an array",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::ArrayNewFixed { ty, elems } => {
+            expect_res(ir, bi, res, Ty::I64, "ArrayNewFixed")?;
+            check_val_range(ir, elems, "ArrayNewFixed.elems")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ArrayNewFixed type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Array { elem, .. } = module.gc_canon_types[cid].composite else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayNewFixed type {ty} is not an array",
+                    ir.func_index
+                ));
+            };
+            let ety = X64Module::storage_to_ty(elem);
+            for &v in ir.pool_slice(elems) {
+                expect_ty(ir, bi, v, ety, "ArrayNewFixed.elem")?;
+            }
+        }
+        Op::ArrayNewData { ty, data, src, len } => {
+            expect_res(ir, bi, res, Ty::I64, "ArrayNewData")?;
+            expect_ty(ir, bi, src, Ty::I32, "ArrayNewData.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayNewData.len")?;
+            if (ty as usize) >= module.type_canon.len() || (data as usize) >= module.data_seg_count
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayNewData index out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::ArrayNewElem { ty, elem, src, len } => {
+            expect_res(ir, bi, res, Ty::I64, "ArrayNewElem")?;
+            expect_ty(ir, bi, src, Ty::I32, "ArrayNewElem.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayNewElem.len")?;
+            if (ty as usize) >= module.type_canon.len() || (elem as usize) >= module.elem_segs.len()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayNewElem index out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::ArrayGet { ty, kind, arr, idx } => {
+            expect_res(ir, bi, res, kind.ty(), "ArrayGet")?;
+            expect_ty(ir, bi, arr, Ty::I64, "ArrayGet.arr")?;
+            expect_ty(ir, bi, idx, Ty::I32, "ArrayGet.idx")?;
+            if (ty as usize) >= module.type_canon.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayGet type {ty} out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::ArraySet { ty, arr, idx, val } => {
+            expect_no_res(ir, bi, res, "ArraySet")?;
+            expect_ty(ir, bi, arr, Ty::I64, "ArraySet.arr")?;
+            expect_ty(ir, bi, idx, Ty::I32, "ArraySet.idx")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ArraySet type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Array { elem, .. } = module.gc_canon_types[cid].composite else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArraySet type {ty} is not an array",
+                    ir.func_index
+                ));
+            };
+            expect_ty(ir, bi, val, X64Module::storage_to_ty(elem), "ArraySet.val")?;
+        }
+        Op::ArrayLen(arr) => {
+            expect_res(ir, bi, res, Ty::I32, "ArrayLen")?;
+            expect_ty(ir, bi, arr, Ty::I64, "ArrayLen.arr")?;
+        }
+        Op::ArrayFill {
+            ty,
+            arr,
+            dst,
+            val,
+            len,
+        } => {
+            expect_no_res(ir, bi, res, "ArrayFill")?;
+            expect_ty(ir, bi, arr, Ty::I64, "ArrayFill.arr")?;
+            expect_ty(ir, bi, dst, Ty::I32, "ArrayFill.dst")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayFill.len")?;
+            let cid = *module.type_canon.get(ty as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ArrayFill type {ty} out of range",
+                    ir.func_index
+                )
+            })? as usize;
+            let GcCompositeInfo::Array { elem, .. } = module.gc_canon_types[cid].composite else {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayFill type {ty} is not an array",
+                    ir.func_index
+                ));
+            };
+            expect_ty(ir, bi, val, X64Module::storage_to_ty(elem), "ArrayFill.val")?;
+        }
+        Op::ArrayCopy {
+            dst_ty,
+            src_ty,
+            dst,
+            dst_off,
+            src,
+            src_off,
+            len,
+        } => {
+            expect_no_res(ir, bi, res, "ArrayCopy")?;
+            expect_ty(ir, bi, dst, Ty::I64, "ArrayCopy.dst")?;
+            expect_ty(ir, bi, dst_off, Ty::I32, "ArrayCopy.dst_off")?;
+            expect_ty(ir, bi, src, Ty::I64, "ArrayCopy.src")?;
+            expect_ty(ir, bi, src_off, Ty::I32, "ArrayCopy.src_off")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayCopy.len")?;
+            if (dst_ty as usize) >= module.type_canon.len()
+                || (src_ty as usize) >= module.type_canon.len()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayCopy type out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::ArrayInitData {
+            ty,
+            data,
+            arr,
+            dst,
+            src,
+            len,
+        } => {
+            expect_no_res(ir, bi, res, "ArrayInitData")?;
+            expect_ty(ir, bi, arr, Ty::I64, "ArrayInitData.arr")?;
+            expect_ty(ir, bi, dst, Ty::I32, "ArrayInitData.dst")?;
+            expect_ty(ir, bi, src, Ty::I32, "ArrayInitData.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayInitData.len")?;
+            if (ty as usize) >= module.type_canon.len() || (data as usize) >= module.data_seg_count
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayInitData index out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::ArrayInitElem {
+            ty,
+            elem,
+            arr,
+            dst,
+            src,
+            len,
+        } => {
+            expect_no_res(ir, bi, res, "ArrayInitElem")?;
+            expect_ty(ir, bi, arr, Ty::I64, "ArrayInitElem.arr")?;
+            expect_ty(ir, bi, dst, Ty::I32, "ArrayInitElem.dst")?;
+            expect_ty(ir, bi, src, Ty::I32, "ArrayInitElem.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "ArrayInitElem.len")?;
+            if (ty as usize) >= module.type_canon.len() || (elem as usize) >= module.elem_segs.len()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ArrayInitElem index out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::RefTest { val, heap, .. } => {
+            expect_res(ir, bi, res, Ty::I32, "RefTest")?;
+            expect_ty(ir, bi, val, Ty::I64, "RefTest.val")?;
+            if let GcHeapTarget::Concrete { canon_id, .. } = heap
+                && (canon_id as usize) >= module.gc_canon_types.len()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: RefTest canon_id {canon_id} out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::RefCast { val, heap, .. } => {
+            expect_res(ir, bi, res, Ty::I64, "RefCast")?;
+            expect_ty(ir, bi, val, Ty::I64, "RefCast.val")?;
+            if let GcHeapTarget::Concrete { canon_id, .. } = heap
+                && (canon_id as usize) >= module.gc_canon_types.len()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: RefCast canon_id {canon_id} out of range",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::AtomicFence => {
+            expect_no_res(ir, bi, res, "AtomicFence")?;
+        }
+        Op::AtomicLoad {
+            mem, res_ty, addr, ..
+        } => {
+            expect_res(ir, bi, res, res_ty, "AtomicLoad")?;
+            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            expect_ty(ir, bi, addr, addr_ty, "AtomicLoad.addr")?;
+        }
+        Op::AtomicStore {
+            mem,
+            width,
+            addr,
+            val,
+            ..
+        } => {
+            expect_no_res(ir, bi, res, "AtomicStore")?;
+            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            expect_ty(ir, bi, addr, addr_ty, "AtomicStore.addr")?;
+            let vty = ir.val_tys[val.0 as usize];
+            if !matches!(vty, Ty::I32 | Ty::I64)
+                || (width == super::ir::AtomicWidth::B8 && vty != Ty::I64)
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: invalid AtomicStore val type {vty:?}",
+                    ir.func_index
+                ));
+            }
+        }
+        Op::AtomicRmw {
+            mem,
+            res_ty,
+            addr,
+            val,
+            ..
+        } => {
+            expect_res(ir, bi, res, res_ty, "AtomicRmw")?;
+            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            expect_ty(ir, bi, addr, addr_ty, "AtomicRmw.addr")?;
+            expect_ty(ir, bi, val, res_ty, "AtomicRmw.val")?;
+        }
+        Op::AtomicCmpxchg {
+            mem,
+            res_ty,
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            expect_res(ir, bi, res, res_ty, "AtomicCmpxchg")?;
+            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            expect_ty(ir, bi, addr, addr_ty, "AtomicCmpxchg.addr")?;
+            expect_ty(ir, bi, expected, res_ty, "AtomicCmpxchg.expected")?;
+            expect_ty(ir, bi, replacement, res_ty, "AtomicCmpxchg.replacement")?;
+        }
+        Op::AtomicWait {
+            mem,
+            is_64,
+            addr,
+            expected,
+            timeout,
+            ..
+        } => {
+            expect_res(ir, bi, res, Ty::I32, "AtomicWait")?;
+            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            expect_ty(ir, bi, addr, addr_ty, "AtomicWait.addr")?;
+            expect_ty(
+                ir,
+                bi,
+                expected,
+                if is_64 { Ty::I64 } else { Ty::I32 },
+                "AtomicWait.expected",
+            )?;
+            expect_ty(ir, bi, timeout, Ty::I64, "AtomicWait.timeout")?;
+        }
+        Op::AtomicNotify {
+            mem, addr, count, ..
+        } => {
+            expect_res(ir, bi, res, Ty::I32, "AtomicNotify")?;
+            let addr_ty = if module.mem_is_64(mem) { Ty::I64 } else { Ty::I32 };
+            expect_ty(ir, bi, addr, addr_ty, "AtomicNotify.addr")?;
+            expect_ty(ir, bi, count, Ty::I32, "AtomicNotify.count")?;
         }
         Op::Trap(_) => expect_no_res(ir, bi, res, "Trap")?,
     }
@@ -2240,6 +2750,21 @@ pub fn verify_alloc_with_config(
             ));
         }
     }
+    if let Some(r15_off) = alloc.store_saved_r15_off {
+        let min_r15_off = if let Some(rp) = alloc.saved_ret_ptr_off {
+            rp + 8
+        } else if !alloc.used_callee_xmm.is_empty() {
+            alloc.saved_xmm_base + saved_xmm_bytes
+        } else {
+            spill_base
+        };
+        if r15_off < min_r15_off || r15_off + 8 > alloc.frame_size || (r15_off & 7) != 0 {
+            return Err(format!(
+                "verify_alloc fn {}: invalid store_saved_r15_off {r15_off} (min={min_r15_off}, frame={})",
+                ir.func_index, alloc.frame_size
+            ));
+        }
+    }
 
     // Check every block reachable from bb0 is present in block_order and build succs.
     let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
@@ -2288,6 +2813,11 @@ pub fn verify_alloc_with_config(
                     Op::ConstI64(c) => Some(RematConst::I64(c)),
                     Op::ConstF32(b) => Some(RematConst::F32(b)),
                     Op::ConstF64(b) => Some(RematConst::F64(b)),
+                    Op::GcNull | Op::ExternNull => Some(RematConst::I64(0)),
+                    Op::GcConstI31(enc) => Some(RematConst::I64(i64::from(enc))),
+                    Op::ExternConstI31(enc) => Some(RematConst::I64(
+                        (super::module::GC_EXT_I31_TAG_HI | u64::from(enc)) as i64,
+                    )),
                     _ => None,
                 };
                 expected_remat_addr[r.0 as usize] = match inst.op {
@@ -2342,7 +2872,24 @@ pub fn verify_alloc_with_config(
                 | Op::TableCopy { .. }
                 | Op::TableGrow { .. }
                 | Op::TableFill { .. }
-                | Op::Trunc(_, _) => {
+                | Op::Trunc(_, _)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::AnyConvertExtern(_)
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. } => {
+                    has_any_clobber_or_call = true;
+                }
+                Op::ExnAlloc { .. } if cfg.is_store => {
                     has_any_clobber_or_call = true;
                 }
                 _ => {}
@@ -2383,7 +2930,13 @@ pub fn verify_alloc_with_config(
                     .map(|&v| ir.val_tys[v.0 as usize])
                     .collect();
                 let arg_layout = layout_args(&arg_tys)?;
-                if arg_layout.stack_bytes > self_param_stack_bytes {
+                let store_forced_fallback = cfg.is_store
+                    && match bb.term {
+                        Term::ReturnCall { func, .. } => (func as usize) < cfg.n_imports,
+                        Term::ReturnCallIndirect { .. } => true,
+                        _ => false,
+                    };
+                if arg_layout.stack_bytes > self_param_stack_bytes || store_forced_fallback {
                     has_any_clobber_or_call = true;
                     if arg_layout.stack_bytes > alloc.outgoing_arg_bytes {
                         return Err(format!(
@@ -2495,26 +3048,215 @@ pub fn verify_alloc_with_config(
     }
 
     // Independently compute exact live-in/live-out sets (over ALL values) on reachable blocks
-    // using compact word bitsets (`O(n_ord * words)` per sweep).
+    // using compact word bitsets for normal functions and a sparse sorted-Vec worklist for giant
+    // functions (> 16 MiB dense bitset).
     let n_ord = alloc.block_order.len();
     let words = n_vals.div_ceil(64);
-    let bitset_len = n_ord.checked_mul(words).ok_or_else(|| {
-        format!(
-            "verify_alloc fn {}: liveness bitset overflow",
-            ir.func_index
-        )
-    })?;
-    let mut blk_use = vec![0u64; bitset_len];
-    let mut blk_def = vec![0u64; bitset_len];
-    for (oi, &b) in alloc.block_order.iter().enumerate() {
-        let bb = &ir.blocks[b as usize];
-        let base = oi * words;
-        for &p in &bb.params {
-            let v = p.0 as usize;
-            blk_def[base + (v >> 6)] |= 1u64 << (v & 63);
+    let bitset_len = n_ord.saturating_mul(words);
+    let use_sparse = bitset_len.saturating_mul(32) > 16 << 20;
+    let mut live_out: Vec<u64> = Vec::new();
+    let mut sparse_live_out: Vec<Vec<u32>> = Vec::new();
+    if use_sparse {
+        let mut s_use: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+        let mut s_def: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+        let mut d_st = vec![0u32; n_vals];
+        let mut u_st = vec![0u32; n_vals];
+        let mut st = 0u32;
+        for (oi, &b) in alloc.block_order.iter().enumerate() {
+            st = st.wrapping_add(1);
+            if st == 0 {
+                d_st.fill(0);
+                u_st.fill(0);
+                st = 1;
+            }
+            let bb = &ir.blocks[b as usize];
+            for &p in &bb.params {
+                let v = p.0 as usize;
+                if d_st[v] != st {
+                    d_st[v] = st;
+                    s_def[oi].push(p.0);
+                }
+            }
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, |val| {
+                    let v = val.0 as usize;
+                    if d_st[v] != st && u_st[v] != st {
+                        u_st[v] = st;
+                        s_use[oi].push(val.0);
+                    }
+                });
+                if let Some(r) = inst.res {
+                    let v = r.0 as usize;
+                    if d_st[v] != st {
+                        d_st[v] = st;
+                        s_def[oi].push(r.0);
+                    }
+                }
+                match inst.op {
+                    Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                        for &rv in ir.pool_slice(rets) {
+                            let v = rv.0 as usize;
+                            if d_st[v] != st {
+                                d_st[v] = st;
+                                s_def[oi].push(rv.0);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |val| {
+                let v = val.0 as usize;
+                if d_st[v] != st && u_st[v] != st {
+                    u_st[v] = st;
+                    s_use[oi].push(val.0);
+                }
+            });
+            s_use[oi].sort_unstable();
+            s_def[oi].sort_unstable();
         }
-        for inst in &bb.insts {
-            inst.op.for_each_use(&ir.val_pool, |val| {
+        let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+        for (oi, &b) in alloc.block_order.iter().enumerate() {
+            for &s in &succs[b as usize] {
+                let soi = block_to_ord[s] as usize;
+                preds[soi].push(oi as u32);
+            }
+        }
+        let mut s_live_in: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+        sparse_live_out = vec![Vec::new(); n_ord];
+        let mut wl: std::collections::VecDeque<u32> = (0..n_ord as u32).rev().collect();
+        let mut in_wl = vec![true; n_ord];
+        let mut tmp_out: Vec<u32> = Vec::new();
+        let mut tmp_in: Vec<u32> = Vec::new();
+        let mut tmp_m: Vec<u32> = Vec::new();
+        while let Some(oi_u32) = wl.pop_front() {
+            let oi = oi_u32 as usize;
+            in_wl[oi] = false;
+            let bi = alloc.block_order[oi] as usize;
+            tmp_out.clear();
+            for &s in &succs[bi] {
+                let sin = &s_live_in[block_to_ord[s] as usize];
+                if sin.is_empty() {
+                    continue;
+                }
+                if tmp_out.is_empty() {
+                    tmp_out.extend_from_slice(sin);
+                } else {
+                    tmp_m.clear();
+                    let (mut a, mut b) = (0usize, 0usize);
+                    while a < tmp_out.len() && b < sin.len() {
+                        match tmp_out[a].cmp(&sin[b]) {
+                            std::cmp::Ordering::Less => {
+                                tmp_m.push(tmp_out[a]);
+                                a += 1;
+                            }
+                            std::cmp::Ordering::Greater => {
+                                tmp_m.push(sin[b]);
+                                b += 1;
+                            }
+                            std::cmp::Ordering::Equal => {
+                                tmp_m.push(tmp_out[a]);
+                                a += 1;
+                                b += 1;
+                            }
+                        }
+                    }
+                    tmp_m.extend_from_slice(&tmp_out[a..]);
+                    tmp_m.extend_from_slice(&sin[b..]);
+                    std::mem::swap(&mut tmp_out, &mut tmp_m);
+                }
+            }
+            tmp_in.clear();
+            let u = &s_use[oi];
+            let d = &s_def[oi];
+            let (mut iu, mut io, mut id) = (0usize, 0usize, 0usize);
+            while iu < u.len() || io < tmp_out.len() {
+                while io < tmp_out.len() {
+                    while id < d.len() && d[id] < tmp_out[io] {
+                        id += 1;
+                    }
+                    if id < d.len() && d[id] == tmp_out[io] {
+                        io += 1;
+                    } else {
+                        break;
+                    }
+                }
+                match (u.get(iu).copied(), tmp_out.get(io).copied()) {
+                    (Some(uv), Some(ov)) => match uv.cmp(&ov) {
+                        std::cmp::Ordering::Less => {
+                            tmp_in.push(uv);
+                            iu += 1;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            tmp_in.push(ov);
+                            io += 1;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            tmp_in.push(uv);
+                            iu += 1;
+                            io += 1;
+                        }
+                    },
+                    (Some(uv), None) => {
+                        tmp_in.push(uv);
+                        iu += 1;
+                    }
+                    (None, Some(ov)) => {
+                        tmp_in.push(ov);
+                        io += 1;
+                    }
+                    (None, None) => break,
+                }
+            }
+            if tmp_out != sparse_live_out[oi] {
+                sparse_live_out[oi].clear();
+                sparse_live_out[oi].extend_from_slice(&tmp_out);
+            }
+            if tmp_in != s_live_in[oi] {
+                s_live_in[oi].clear();
+                s_live_in[oi].extend_from_slice(&tmp_in);
+                for &p in &preds[oi] {
+                    if !in_wl[p as usize] {
+                        in_wl[p as usize] = true;
+                        wl.push_back(p);
+                    }
+                }
+            }
+        }
+    } else {
+        let mut blk_use = vec![0u64; bitset_len];
+        let mut blk_def = vec![0u64; bitset_len];
+        for (oi, &b) in alloc.block_order.iter().enumerate() {
+            let bb = &ir.blocks[b as usize];
+            let base = oi * words;
+            for &p in &bb.params {
+                let v = p.0 as usize;
+                blk_def[base + (v >> 6)] |= 1u64 << (v & 63);
+            }
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, |val| {
+                    let v = val.0 as usize;
+                    let w = v >> 6;
+                    let bit = 1u64 << (v & 63);
+                    if (blk_def[base + w] & bit) == 0 {
+                        blk_use[base + w] |= bit;
+                    }
+                });
+                if let Some(r) = inst.res {
+                    let v = r.0 as usize;
+                    blk_def[base + (v >> 6)] |= 1u64 << (v & 63);
+                }
+                match inst.op {
+                    Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                        for &rv in ir.pool_slice(rets) {
+                            let v = rv.0 as usize;
+                            blk_def[base + (v >> 6)] |= 1u64 << (v & 63);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |val| {
                 let v = val.0 as usize;
                 let w = v >> 6;
                 let bit = 1u64 << (v & 63);
@@ -2522,49 +3264,28 @@ pub fn verify_alloc_with_config(
                     blk_use[base + w] |= bit;
                 }
             });
-            if let Some(r) = inst.res {
-                let v = r.0 as usize;
-                blk_def[base + (v >> 6)] |= 1u64 << (v & 63);
-            }
-            match inst.op {
-                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
-                    for &rv in ir.pool_slice(rets) {
-                        let v = rv.0 as usize;
-                        blk_def[base + (v >> 6)] |= 1u64 << (v & 63);
-                    }
-                }
-                _ => {}
-            }
         }
-        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |val| {
-            let v = val.0 as usize;
-            let w = v >> 6;
-            let bit = 1u64 << (v & 63);
-            if (blk_def[base + w] & bit) == 0 {
-                blk_use[base + w] |= bit;
-            }
-        });
-    }
 
-    let mut live_in = vec![0u64; bitset_len];
-    let mut live_out = vec![0u64; bitset_len];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for oi in (0..n_ord).rev() {
-            let bi = alloc.block_order[oi] as usize;
-            let base = oi * words;
-            for w in 0..words {
-                let mut out_w = 0u64;
-                for &s in &succs[bi] {
-                    let soi = block_to_ord[s] as usize;
-                    out_w |= live_in[soi * words + w];
-                }
-                let in_w = blk_use[base + w] | (out_w & !blk_def[base + w]);
-                if out_w != live_out[base + w] || in_w != live_in[base + w] {
-                    live_out[base + w] = out_w;
-                    live_in[base + w] = in_w;
-                    changed = true;
+        let mut live_in = vec![0u64; bitset_len];
+        live_out = vec![0u64; bitset_len];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for oi in (0..n_ord).rev() {
+                let bi = alloc.block_order[oi] as usize;
+                let base = oi * words;
+                for w in 0..words {
+                    let mut out_w = 0u64;
+                    for &s in &succs[bi] {
+                        let soi = block_to_ord[s] as usize;
+                        out_w |= live_in[soi * words + w];
+                    }
+                    let in_w = blk_use[base + w] | (out_w & !blk_def[base + w]);
+                    if out_w != live_out[base + w] || in_w != live_in[base + w] {
+                        live_out[base + w] = out_w;
+                        live_in[base + w] = in_w;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -2593,6 +3314,70 @@ pub fn verify_alloc_with_config(
         func_index: usize,
     }
     impl LiveTracker {
+        fn check_gc_safepoint(
+            &self,
+            ir: &IrFunc,
+            alloc: &AllocResult,
+            expected_remat: &[Option<RematConst>],
+            bb: u32,
+            inst_idx: u32,
+        ) -> Result<(), String> {
+            let Some(plan) = alloc.safepoint_for(bb, inst_idx) else {
+                return Err(format!(
+                    "verify_alloc fn {} bb{bb} inst {inst_idx}: missing GC SafepointPlan",
+                    self.func_index
+                ));
+            };
+            // Verify zero live non-remat traced values reside in any GP register or RematAddr.
+            for gid in 0..16 {
+                if let Some(vi) = self.gp_owner[gid]
+                    && ir.val_ref_kind(Val(vi)).is_traced()
+                    && expected_remat[vi as usize].is_none()
+                {
+                    return Err(format!(
+                        "verify_alloc fn {} bb{bb} inst {inst_idx}: live traced v{vi} in GP id {gid} at GC safepoint",
+                        self.func_index
+                    ));
+                }
+                if self.remat_gp_refs[gid] > 0
+                    && let Some(vi) = self.remat_gp_base[gid]
+                    && ir.val_ref_kind(Val(vi)).is_traced()
+                    && expected_remat[vi as usize].is_none()
+                {
+                    return Err(format!(
+                        "verify_alloc fn {} bb{bb} inst {inst_idx}: live traced v{vi} in RematAddr GP id {gid} at GC safepoint",
+                        self.func_index
+                    ));
+                }
+            }
+            // Collect exact expected spilled GC / Extern root offsets from live spill slots.
+            let mut exp_gc: Vec<i32> = Vec::new();
+            let mut exp_ext: Vec<i32> = Vec::new();
+            for &s in &self.dirty_spills {
+                if let Some(vi) = self.spill_owner[s] {
+                    if expected_remat[vi as usize].is_some() {
+                        continue;
+                    }
+                    let off = self.spill_base + (s as i32) * 8;
+                    match ir.val_ref_kind(Val(vi)) {
+                        ValRefKind::GcRef => exp_gc.push(off),
+                        ValRefKind::ExternRef => exp_ext.push(off),
+                        ValRefKind::None => {}
+                    }
+                }
+            }
+            exp_gc.sort_unstable();
+            exp_gc.dedup();
+            exp_ext.sort_unstable();
+            exp_ext.dedup();
+            if plan.gc_slots != exp_gc || plan.ext_slots != exp_ext {
+                return Err(format!(
+                    "verify_alloc fn {} bb{bb} inst {inst_idx}: SafepointPlan mismatch: got gc={:?} ext={:?}, expected gc={:?} ext={:?}",
+                    self.func_index, plan.gc_slots, plan.ext_slots, exp_gc, exp_ext
+                ));
+            }
+            Ok(())
+        }
         fn reset(&mut self) {
             self.stamp = self.stamp.wrapping_add(1);
             if self.stamp == 0 {
@@ -2775,6 +3560,26 @@ pub fn verify_alloc_with_config(
         func_index: ir.func_index,
     };
 
+    // Verify safepoints list ordering and emptiness for non-GC functions.
+    if !ir.uses_gc && !alloc.safepoints.is_empty() {
+        return Err(format!(
+            "verify_alloc fn {}: non-GC function has {} safepoints",
+            ir.func_index,
+            alloc.safepoints.len()
+        ));
+    }
+    if alloc
+        .safepoints
+        .windows(2)
+        .any(|w| (w[0].block_id, w[0].inst_idx) >= (w[1].block_id, w[1].inst_idx))
+    {
+        return Err(format!(
+            "verify_alloc fn {}: safepoints not strictly sorted by (block_id, inst_idx)",
+            ir.func_index
+        ));
+    }
+    let mut expected_safepoint_count: usize = 0;
+
     // Walk backward through each block verifying disjointness and clobber safety at every point.
     let mut defs: Vec<u32> = Vec::with_capacity(8);
     for (oi, &b) in alloc.block_order.iter().enumerate() {
@@ -2787,14 +3592,20 @@ pub fn verify_alloc_with_config(
             }
         }
         tracker.reset();
-        let base = oi * words;
-        for w in 0..words {
-            let mut bits = live_out[base + w];
-            while bits != 0 {
-                let tz = bits.trailing_zeros() as usize;
-                let vi = ((w << 6) + tz) as u32;
+        if use_sparse {
+            for &vi in &sparse_live_out[oi] {
                 tracker.insert(vi, ir, alloc, b, "live_out", None)?;
-                bits &= bits - 1;
+            }
+        } else {
+            let base = oi * words;
+            for w in 0..words {
+                let mut bits = live_out[base + w];
+                while bits != 0 {
+                    let tz = bits.trailing_zeros() as usize;
+                    let vi = ((w << 6) + tz) as u32;
+                    tracker.insert(vi, ir, alloc, b, "live_out", None)?;
+                    bits &= bits - 1;
+                }
             }
         }
         match bb.term {
@@ -2823,6 +3634,10 @@ pub fn verify_alloc_with_config(
                         "verify_alloc fn {} bb{b} term: live value v{vi} in XMM id {xid} clobbered by CallCatch",
                         ir.func_index
                     ));
+                }
+                if ir.uses_gc {
+                    expected_safepoint_count += 1;
+                    tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX)?;
                 }
                 for &v in ir.pool_slice(args) {
                     tracker.insert(v.0, ir, alloc, b, "term.args", None)?;
@@ -2857,9 +3672,45 @@ pub fn verify_alloc_with_config(
                         ir.func_index
                     ));
                 }
+                if ir.uses_gc {
+                    expected_safepoint_count += 1;
+                    tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX)?;
+                }
                 tracker.insert(idx.0, ir, alloc, b, "term.idx", None)?;
                 for &v in ir.pool_slice(args) {
                     tracker.insert(v.0, ir, alloc, b, "term.args", None)?;
+                }
+            }
+            Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                if ir.uses_gc {
+                    let arg_tys: Vec<Ty> = ir
+                        .pool_slice(args)
+                        .iter()
+                        .map(|&v| ir.val_tys[v.0 as usize])
+                        .collect();
+                    let store_forced_fallback = cfg.is_store
+                        && match bb.term {
+                            Term::ReturnCall { func, .. } => (func as usize) < cfg.n_imports,
+                            Term::ReturnCallIndirect { .. } => true,
+                            _ => false,
+                        };
+                    if layout_args(&arg_tys)?.stack_bytes > self_param_stack_bytes
+                        || store_forced_fallback
+                    {
+                        expected_safepoint_count += 1;
+                        tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX)?;
+                    }
+                }
+                let mut term_err: Option<String> = None;
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    if term_err.is_none()
+                        && let Err(e) = tracker.insert(v.0, ir, alloc, b, "term", None)
+                    {
+                        term_err = Some(e);
+                    }
+                });
+                if let Some(e) = term_err {
+                    return Err(e);
                 }
             }
             _ => {
@@ -2906,7 +3757,29 @@ pub fn verify_alloc_with_config(
                 | Op::TableInit { .. }
                 | Op::TableCopy { .. }
                 | Op::TableGrow { .. }
-                | Op::TableFill { .. } => helper_clobbers(HelperKind::MemCopy),
+                | Op::TableFill { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. } => helper_clobbers(HelperKind::MemCopy),
+                Op::AtomicRmw { op, .. } => {
+                    let gp = match op {
+                        super::ir::AtomicRmwOp::And
+                        | super::ir::AtomicRmwOp::Or
+                        | super::ir::AtomicRmwOp::Xor => {
+                            (1u16 << super::asm::Gp::Rax.id()) | (1u16 << super::asm::Gp::Rcx.id())
+                        }
+                        _ => 1u16 << super::asm::Gp::Rax.id(),
+                    };
+                    (gp, 0)
+                }
+                Op::AtomicCmpxchg { .. } => (1u16 << super::asm::Gp::Rax.id(), 0),
                 Op::MemFill { .. } | Op::MemFillIdx { .. } => helper_clobbers(HelperKind::MemFill),
                 Op::MemGrow(_) | Op::MemGrowIdx { .. } => helper_clobbers(HelperKind::MemGrow),
                 Op::Trunc(_, _) => helper_clobbers(HelperKind::Trunc),
@@ -2994,6 +3867,10 @@ pub fn verify_alloc_with_config(
                     ir.func_index, inst.op
                 ));
             }
+            if ir.uses_gc && matches!(inst.op, Op::Call { .. } | Op::CallIndirect { .. }) {
+                expected_safepoint_count += 1;
+                tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, ii as u32)?;
+            }
             let mut use_err: Option<String> = None;
             inst.op.for_each_use(&ir.val_pool, |v| {
                 if use_err.is_none()
@@ -3005,11 +3882,22 @@ pub fn verify_alloc_with_config(
             if let Some(e) = use_err {
                 return Err(e);
             }
+            if ir.uses_gc && inst.op.is_gc_alloc() {
+                expected_safepoint_count += 1;
+                tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, ii as u32)?;
+            }
         }
         // At block entry, all params + live_in must be mutually disjoint.
         for &p in &bb.params {
             tracker.insert(p.0, ir, alloc, b, "entry", None)?;
         }
+    }
+    if ir.uses_gc && alloc.safepoints.len() != expected_safepoint_count {
+        return Err(format!(
+            "verify_alloc fn {}: safepoints.len() ({}) != expected ({expected_safepoint_count})",
+            ir.func_index,
+            alloc.safepoints.len()
+        ));
     }
 
     Ok(())

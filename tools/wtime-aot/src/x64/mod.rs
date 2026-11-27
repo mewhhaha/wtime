@@ -3,6 +3,7 @@
 
 pub mod asm;
 pub mod elf;
+pub mod gc_rt;
 pub mod inc_cache;
 pub mod ir;
 pub mod lower;
@@ -12,6 +13,7 @@ pub mod regalloc;
 pub mod runtime;
 pub mod simd_lower;
 pub mod standalone_rt;
+pub mod store_rt;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod tests_abi_faults;
 #[cfg(test)]
@@ -108,8 +110,43 @@ pub const OFF_EXEC_POLICY_PTR: i32 = 232;
 /// Standalone clock policy quantum in nanoseconds (`0` = full resolution, `u64::MAX` = deny,
 /// `1..u64::MAX` = truncate timestamps down to multiples of this quantum).
 pub const OFF_EXEC_CLOCK_QUANTUM: i32 = 240;
+// ---- Multi-module `StoreCdylib` `Ctx` header offsets (reusing `OFF_EXEC_*`, unused by StoreCdylib) ----
+/// Pointer to shared `StoreState` (`*mut StoreState`).
+pub const OFF_STORE_PTR: i32 = 144;
+/// Pointer to `u32` map `local_canon_id -> global_canon_id`.
+pub const OFF_STORE_CANON_MAP: i32 = 152;
+/// Pointer to `*const StoreFuncRef` array (`0..n_imports + n_defs`).
+pub const OFF_STORE_FUNC_REFS: i32 = 160;
+/// Pointer to `*mut StoreMemDesc` array (`0..total_mems`).
+pub const OFF_STORE_MEM_DESCS: i32 = 168;
+/// Pointer to `u32` map `local_tag -> global_tag_id`.
+pub const OFF_STORE_TAG_IDS: i32 = 176;
+/// Pointer to this instance's passive GC element buffer (`*mut u64`, or `0`).
+pub const OFF_STORE_ELEM_BUF_PTR: i32 = 184;
+/// Byte length of this instance's passive GC element buffer.
+pub const OFF_STORE_ELEM_BUF_BYTES: i32 = 192;
+/// Pointer to `*mut StoreTableDesc` array (`0..total_tables`).
+pub const OFF_STORE_TABLE_DESCS: i32 = 200;
+/// Instance index within `Store::instances`.
+pub const OFF_STORE_INSTANCE_ID: i32 = 208;
 /// 16-byte aligned header size (`240 + 8` padded to `256` so subsequent `v128` globals stay aligned).
 pub const CTX_HEADER_BYTES: usize = 256;
+
+// ---- Shared `StoreState` (`#[repr(C)]`, 208 bytes) byte offsets ----
+// `+0..+112` is identical to `gc_rt::GC_OFF_*` (`GcState`).
+pub const STORE_OFF_TYPE_DESCS_PTR: i32 = 112;
+pub const STORE_OFF_TYPE_DESCS_LEN: i32 = 120;
+pub const STORE_OFF_EXN_ACTIVE: i32 = 128;
+pub const STORE_OFF_GC_COLLECT_FN: i32 = 136;
+pub const STORE_OFF_MEM_GROW_FN: i32 = 144;
+pub const STORE_OFF_ATOMIC_WAIT_FN: i32 = 152;
+pub const STORE_OFF_ATOMIC_NOTIFY_FN: i32 = 160;
+pub const STORE_OFF_EXN_ALLOC_FN: i32 = 168;
+pub const STORE_OFF_TABLE_GROW_FN: i32 = 176;
+pub const STORE_OFF_HOST_CALL_FN: i32 = 184;
+pub const STORE_OFF_RET_SPILL_PTR: i32 = 192;
+pub const STORE_OFF_LAST_TRAP_CODE: i32 = 200;
+pub const STORE_STATE_BYTES: usize = 208;
 
 // ---- Canonical trap codes `1..=22` ----
 pub const TRAP_UNREACHABLE: u8 = 1;
@@ -125,6 +162,7 @@ pub const TRAP_MEM_TOO_LARGE: u8 = 9;
 pub const TRAP_MEM_ALLOC_OVERFLOW: u8 = 10;
 pub const TRAP_MEM_LIMIT: u8 = 11;
 pub const TRAP_ALLOC_FAILED: u8 = 12;
+pub const TRAP_UNALIGNED_ATOMIC: u8 = 13;
 pub const TRAP_HOST: u8 = 19;
 #[allow(dead_code)]
 pub const TRAP_EXIT: u8 = 20;
@@ -158,7 +196,16 @@ pub const HELPER_TABLE_INIT: u32 = 30;
 pub const HELPER_TABLE_COPY: u32 = 31;
 pub const HELPER_TABLE_GROW: u32 = 32;
 pub const HELPER_TABLE_FILL: u32 = 33;
-pub(crate) const NUM_HELPERS: usize = 34;
+pub const HELPER_GC_COLLECT: u32 = 34;
+pub const HELPER_GC_ARRAY_FILL_RAW: u32 = 35;
+pub const HELPER_GC_ARRAY_FILL: u32 = 36;
+pub const HELPER_GC_ARRAY_COPY: u32 = 37;
+pub const HELPER_GC_ARRAY_INIT_DATA: u32 = 38;
+pub const HELPER_GC_ARRAY_INIT_ELEM: u32 = 39;
+pub const HELPER_ATOMIC_WAIT: u32 = 40;
+pub const HELPER_ATOMIC_NOTIFY: u32 = 41;
+pub const HELPER_STORE_EXN_ALLOC: u32 = 42;
+pub(crate) const NUM_HELPERS: usize = 43;
 
 /// Per-signature `call_indirect` (or typed `call_ref`) dispatch table metadata in `.rodata` (or dynamic `Ctx` table).
 #[derive(Clone, Copy, Debug)]
@@ -228,6 +275,8 @@ pub struct CtxLayout {
     pub func_sig_ro_off: u32,
     /// `.rodata` offset of `i32 func_addr_rel[n_total]` (non-zero iff `module.uses_dyn_ci`).
     pub func_addr_ro_off: u32,
+    /// `.rodata` offset of passive data descriptor table (`data_seg_count` × 8B `(rel_off, byte_len)`).
+    pub passive_data_table_off: u32,
     /// Byte offsets into `Ctx` for 32-byte descriptors `(base, len, max_pages, reserve_bytes)`
     /// of additional linear memories `1..N` (empty for 0/1-memory modules).
     pub extra_mem_offs: Vec<i32>,
@@ -242,6 +291,12 @@ pub struct CtxLayout {
     pub ci_tables: Vec<CiTableLayout>,
     /// Present only for `--pgo-gen` instrumented builds; `None` for normal and `--pgo-use` builds.
     pub pgo_gen: Option<PgoGenLayout>,
+    /// Present only when `module.uses_gc == true`; `None` for non-GC modules (zero overhead).
+    pub gc: Option<gc_rt::GcCtxLayout>,
+    /// `true` iff compiled for multi-module `X64Target::StoreCdylib`.
+    pub is_store: bool,
+    /// Number of imported globals (`0..imported_global_count` hold `*mut u8` pointers in `Ctx`).
+    pub imported_global_count: u32,
     pub total_bytes: usize,
 }
 
@@ -332,6 +387,8 @@ impl CtxLayout {
     /// Computes checked byte offsets for all non-folded globals and mutable `externref` tables,
     /// rounding `total_bytes` up to a 4 KiB page and enforcing `total_bytes <= MAX_CTX_BYTES`.
     pub fn compute(module: &X64Module, ci_tables: Vec<CiTableLayout>) -> Result<Self, String> {
+        let is_store = module.target == X64Target::StoreCdylib;
+        let imported_global_count = module.imported_globals.len() as u32;
         let mut cur = CTX_HEADER_BYTES;
         let mut global_offs = Vec::with_capacity(module.globals.len());
         for (k, &(vt, _)) in module.globals.iter().enumerate() {
@@ -339,7 +396,10 @@ impl CtxLayout {
                 global_offs.push(-1);
                 continue;
             }
-            let (align, size) = if vt == ValType::V128 {
+            let (align, size) = if is_store && k < module.imported_globals.len() {
+                // Imported global slot in `StoreCdylib` holds an 8-byte `*mut u8` pointer to the owning cell.
+                (8usize, 8usize)
+            } else if vt == ValType::V128 {
                 (16usize, 16usize)
             } else {
                 (8usize, 8usize)
@@ -355,58 +415,78 @@ impl CtxLayout {
             global_offs.push(off);
         }
         let mut extern_tables = BTreeMap::new();
-        for (&tbl, &len) in &module.mut_extern_tables {
-            cur = align_up_checked(cur, 8)?;
-            let off = i32::try_from(cur).map_err(|_| "x64: Ctx extern table offset exceeds i32")?;
-            let bytes = (len as usize)
-                .checked_mul(8)
-                .ok_or("x64: Ctx extern table size overflow")?;
-            cur = cur.checked_add(bytes).ok_or("x64: Ctx size overflow")?;
-            if cur > MAX_CTX_BYTES {
-                return Err(format!(
-                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
-                ));
+        if !is_store {
+            for (&tbl, &len) in &module.mut_extern_tables {
+                cur = align_up_checked(cur, 8)?;
+                let off =
+                    i32::try_from(cur).map_err(|_| "x64: Ctx extern table offset exceeds i32")?;
+                let bytes = (len as usize)
+                    .checked_mul(8)
+                    .ok_or("x64: Ctx extern table size overflow")?;
+                cur = cur.checked_add(bytes).ok_or("x64: Ctx size overflow")?;
+                if cur > MAX_CTX_BYTES {
+                    return Err(format!(
+                        "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                    ));
+                }
+                extern_tables.insert(tbl, (off, len));
             }
-            extern_tables.insert(tbl, (off, len));
         }
         let mut dyn_tables = BTreeMap::new();
         for (&tbl, meta) in &module.dyn_tables {
-            cur = align_up_checked(cur, 8)?;
-            let off = i32::try_from(cur).map_err(|_| "x64: Ctx dyn table offset exceeds i32")?;
-            cur = cur.checked_add(24).ok_or("x64: Ctx size overflow")?;
-            if cur > MAX_CTX_BYTES {
-                return Err(format!(
-                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
-                ));
+            if is_store {
+                // In `StoreCdylib`, `StoreTableDesc*` lives in `OFF_STORE_TABLE_DESCS[tbl]`.
+                dyn_tables.insert(tbl, (tbl as i32, meta.min_len, meta.eff_max_len));
+            } else {
+                cur = align_up_checked(cur, 8)?;
+                let off =
+                    i32::try_from(cur).map_err(|_| "x64: Ctx dyn table offset exceeds i32")?;
+                cur = cur.checked_add(24).ok_or("x64: Ctx size overflow")?;
+                if cur > MAX_CTX_BYTES {
+                    return Err(format!(
+                        "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                    ));
+                }
+                dyn_tables.insert(tbl, (off, meta.min_len, meta.eff_max_len));
             }
-            dyn_tables.insert(tbl, (off, meta.min_len, meta.eff_max_len));
         }
         let mut extra_mem_offs = Vec::with_capacity(module.extra_memories.len());
         let mut extra_mem_is64 = Vec::with_capacity(module.extra_memories.len());
         let mut extra_mem_min_bytes = Vec::with_capacity(module.extra_memories.len());
-        for em in &module.extra_memories {
-            cur = align_up_checked(cur, 8)?;
-            let off = i32::try_from(cur).map_err(|_| "x64: Ctx extra-memory offset exceeds i32")?;
-            cur = cur.checked_add(32).ok_or("x64: Ctx size overflow")?;
-            if cur > MAX_CTX_BYTES {
-                return Err(format!(
-                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
-                ));
+        for (emi, em) in module.extra_memories.iter().enumerate() {
+            if is_store {
+                // In `StoreCdylib`, `StoreMemDesc*` lives in `OFF_STORE_MEM_DESCS[mem_idx]`.
+                extra_mem_offs.push((emi + 1) as i32);
+            } else {
+                cur = align_up_checked(cur, 8)?;
+                let off =
+                    i32::try_from(cur).map_err(|_| "x64: Ctx extra-memory offset exceeds i32")?;
+                cur = cur.checked_add(32).ok_or("x64: Ctx size overflow")?;
+                if cur > MAX_CTX_BYTES {
+                    return Err(format!(
+                        "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                    ));
+                }
+                extra_mem_offs.push(off);
             }
-            extra_mem_offs.push(off);
             extra_mem_is64.push(em.memory64);
             extra_mem_min_bytes.push(em.min_pages.saturating_mul(65_536));
         }
         let exn_state_off = if module.uses_exceptions {
-            cur = align_up_checked(cur, 8)?;
-            let off = i32::try_from(cur).map_err(|_| "x64: Ctx exception offset exceeds i32")?;
-            cur = cur.checked_add(32).ok_or("x64: Ctx size overflow")?;
-            if cur > MAX_CTX_BYTES {
-                return Err(format!(
-                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
-                ));
+            if is_store {
+                Some(0)
+            } else {
+                cur = align_up_checked(cur, 8)?;
+                let off =
+                    i32::try_from(cur).map_err(|_| "x64: Ctx exception offset exceeds i32")?;
+                cur = cur.checked_add(32).ok_or("x64: Ctx size overflow")?;
+                if cur > MAX_CTX_BYTES {
+                    return Err(format!(
+                        "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                    ));
+                }
+                Some(off)
             }
-            Some(off)
         } else {
             None
         };
@@ -437,6 +517,43 @@ impl CtxLayout {
                 ));
             }
             Some(off)
+        } else {
+            None
+        };
+        let gc = if module.uses_gc {
+            let gc_state_off = if is_store {
+                0
+            } else {
+                cur = align_up_checked(cur, 16)?;
+                let off = i32::try_from(cur).map_err(|_| "x64: Ctx GC offset exceeds i32")?;
+                cur = cur
+                    .checked_add(gc_rt::GC_STATE_BYTES)
+                    .ok_or("x64: Ctx size overflow")?;
+                if cur > MAX_CTX_BYTES {
+                    return Err(format!(
+                        "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                    ));
+                }
+                off
+            };
+            Some(gc_rt::GcCtxLayout {
+                gc_state_off,
+                init_heap_bytes: module::DEFAULT_GC_INIT_HEAP_BYTES,
+                max_heap_bytes: module::DEFAULT_GC_MAX_HEAP_BYTES,
+                gc_elem_buf_bytes: 0,
+                type_desc_ro_off: 0,
+                func_canon_ro_off: 0,
+                gc_elem_desc_ro_off: 0,
+                gc_root_globals_ro_off: 0,
+                gc_root_globals_count: 0,
+                gc_root_inline_tables_ro_off: 0,
+                gc_root_inline_tables_count: 0,
+                gc_root_dyn_tables_ro_off: 0,
+                gc_root_dyn_tables_count: 0,
+                gc_root_exn_tags_ro_off: 0,
+                has_traced_exn_tags: false,
+                passive_gc_elem_offs: Vec::new(),
+            })
         } else {
             None
         };
@@ -477,6 +594,7 @@ impl CtxLayout {
             elem_dropped_off,
             func_sig_ro_off: 0,
             func_addr_ro_off: 0,
+            passive_data_table_off: 0,
             extra_mem_offs,
             extra_mem_is64,
             extra_mem_min_bytes,
@@ -484,6 +602,9 @@ impl CtxLayout {
             tag_layouts,
             ci_tables,
             pgo_gen: None,
+            gc,
+            is_store,
+            imported_global_count,
             total_bytes,
         })
     }
@@ -560,6 +681,10 @@ pub struct X64CompileOptions {
     pub pgo_gen_path: Option<PathBuf>,
     /// Optional verified `WTPGO1` profile (`--pgo-use`) driving devirt, inlining, and `.text` layout.
     pub pgo_use: Option<crate::pgo::PgoProfile>,
+    /// Initial GC semi-space heap size in bytes (rounded up to 4 KiB; defaults to 4 MiB).
+    pub gc_initial_heap_bytes: u64,
+    /// Maximum GC semi-space heap size in bytes before trapping `TRAP_ALLOC_FAILED` (defaults to 256 MiB).
+    pub gc_max_heap_bytes: u64,
     pub hooks: RuntimeTestHooks,
 }
 
@@ -583,6 +708,8 @@ impl Default for X64CompileOptions {
             cache_key_salt: None,
             pgo_gen_path: None,
             pgo_use: None,
+            gc_initial_heap_bytes: module::DEFAULT_GC_INIT_HEAP_BYTES,
+            gc_max_heap_bytes: module::DEFAULT_GC_MAX_HEAP_BYTES,
             hooks: RuntimeTestHooks::default(),
         }
     }
@@ -766,15 +893,17 @@ struct SharedRodata {
     ci_tables: Vec<CiTableLayout>,
     call_export_patches: Vec<CallExportPatch>,
     pgo_path_ro_off: u32,
+    gc_rodata: Option<gc_rt::GcRodataInfo>,
 }
 
 fn build_shared_rodata(
     decoded: &DecodedModule,
     module: &X64Module,
-    layout_global_offs: &[i32],
+    layout: &CtxLayout,
     pgo_gen_path_nul: Option<&[u8]>,
     budget: &CompileBudget,
 ) -> Result<SharedRodata, String> {
+    let layout_global_offs = &layout.global_offs;
     let mut rb = RodataBuilder::new();
 
     // 1. Fixed vector & scalar constants (all 128-bit masks 16-byte aligned and 16 bytes wide!).
@@ -888,22 +1017,25 @@ fn build_shared_rodata(
     let imp_count =
         u32::try_from(module.imports.len()).map_err(|_| "x64: import count exceeds u32")?;
 
-    // 4. `blot_aot_call_export` table (16 B entries):
+    // 4. `blot_aot_call_export` table (16 B entries, BlotCdylib/StandaloneExec only):
     //    +0: name_rel: i32, +4: name_len: u32, +8: fn_rel: i32 (patched), +12: arg_kind: u8, +13: ret_kind: u8
+    let is_store = module.target == X64Target::StoreCdylib;
     let mut call_export_items = Vec::new();
-    for (i, (name, fi)) in module.exported_funcs.iter().enumerate() {
-        if (i & 4095) == 4095 {
-            budget.check_deadline()?;
+    if !is_store {
+        for (i, (name, fi)) in module.exported_funcs.iter().enumerate() {
+            if (i & 4095) == 4095 {
+                budget.check_deadline()?;
+            }
+            let Some(fty) = module.func_type(*fi) else {
+                continue;
+            };
+            let (Some(ak), Some(rk)) = (export_val_kind(&fty.params), export_val_kind(&fty.results))
+            else {
+                continue;
+            };
+            let (noff, nlen) = push_str(&mut rb, name)?;
+            call_export_items.push((noff, nlen, *fi, ak as u8, rk as u8));
         }
-        let Some(fty) = module.func_type(*fi) else {
-            continue;
-        };
-        let (Some(ak), Some(rk)) = (export_val_kind(&fty.params), export_val_kind(&fty.results))
-        else {
-            continue;
-        };
-        let (noff, nlen) = push_str(&mut rb, name)?;
-        call_export_items.push((noff, nlen, *fi, ak as u8, rk as u8));
     }
     let call_export_table_off = rb.align(4)?;
     let mut call_export_patches = Vec::with_capacity(call_export_items.len());
@@ -928,34 +1060,38 @@ fn build_shared_rodata(
     //    +12: ctx_off: i32, +16: const_bits: u64
     let mut get_global_items = Vec::new();
     let mut set_global_items = Vec::new();
-    for (i, (name, gi, vt, mutable)) in module.exported_globals.iter().enumerate() {
-        if (i & 4095) == 4095 {
-            budget.check_deadline()?;
-        }
-        let Some(kind) = global_kind_code(*vt) else {
-            continue; // V128 excluded from scalar/ref global API
-        };
-        let (noff, nlen) = push_str(&mut rb, name)?;
-        match module.global_consts[*gi] {
-            Some(c) => {
-                // Store I32/F32 constants 32-bit zero-extended (never sign-extended for negative I32!).
-                let bits: u64 = match c {
-                    X64ConstVal::I32(v) => u64::from(v as u32),
-                    X64ConstVal::I64(v) => v as u64,
-                    X64ConstVal::F32(b) => u64::from(b),
-                    X64ConstVal::F64(b) => b,
-                    X64ConstVal::RefNull => 0,
-                    X64ConstVal::FuncRef(f) => u64::from(f) + 1,
-                    X64ConstVal::V128(_) => continue,
-                };
-                get_global_items.push((noff, nlen, kind, 1u8, 0i32, bits));
+    if !is_store {
+        for (i, (name, gi, vt, mutable)) in module.exported_globals.iter().enumerate() {
+            if (i & 4095) == 4095 {
+                budget.check_deadline()?;
             }
-            None => {
-                let ctx_off = layout_global_offs[*gi];
-                get_global_items.push((noff, nlen, kind, 0u8, ctx_off, 0u64));
-                if *mutable {
-                    let is64 = u8::from(!matches!(vt, ValType::I32 | ValType::F32));
-                    set_global_items.push((noff, nlen, ctx_off, is64));
+            let Some(kind) = global_kind_code(*vt) else {
+                continue; // V128 excluded from scalar/ref global API
+            };
+            let (noff, nlen) = push_str(&mut rb, name)?;
+            match module.global_consts[*gi] {
+                Some(c) => {
+                    // Store I32/F32 constants 32-bit zero-extended (never sign-extended for negative I32!).
+                    let bits: u64 = match c {
+                        X64ConstVal::I32(v) => u64::from(v as u32),
+                        X64ConstVal::I64(v) => v as u64,
+                        X64ConstVal::F32(b) => u64::from(b),
+                        X64ConstVal::F64(b) => b,
+                        X64ConstVal::RefNull => 0,
+                        X64ConstVal::FuncRef(f) => u64::from(f) + 1,
+                        X64ConstVal::I31(enc) => u64::from(enc),
+                        X64ConstVal::ExternI31(enc) => module::GC_EXT_I31_TAG_HI | u64::from(enc),
+                        X64ConstVal::V128(_) | X64ConstVal::RuntimeGc => continue,
+                    };
+                    get_global_items.push((noff, nlen, kind, 1u8, 0i32, bits));
+                }
+                None => {
+                    let ctx_off = layout_global_offs[*gi];
+                    get_global_items.push((noff, nlen, kind, 0u8, ctx_off, 0u64));
+                    if *mutable {
+                        let is64 = u8::from(!matches!(vt, ValType::I32 | ValType::F32));
+                        set_global_items.push((noff, nlen, ctx_off, is64));
+                    }
                 }
             }
         }
@@ -1045,7 +1181,8 @@ fn build_shared_rodata(
     // 8b. Dynamic funcref `call_indirect` signature table & `call_indirect`/`call_ref` function
     //     address dispatch table (zero overhead when neither feature is used).
     let n_funcs = module.func_canon_sig.len();
-    let func_sig_ro_off = if module.uses_dyn_ci {
+    let is_store = module.target == X64Target::StoreCdylib;
+    let func_sig_ro_off = if !is_store && module.uses_dyn_ci {
         let sig_off = rb.align(4)?;
         for &cs in &module.func_canon_sig {
             rb.push_u32(cs)?;
@@ -1054,7 +1191,7 @@ fn build_shared_rodata(
     } else {
         0
     };
-    let func_addr_ro_off = if module.uses_dyn_ci || module.uses_call_ref {
+    let func_addr_ro_off = if !is_store && (module.uses_dyn_ci || module.uses_call_ref) {
         rb.push_zeros(4, n_funcs * 4)?
     } else {
         0
@@ -1114,9 +1251,10 @@ fn build_shared_rodata(
         Vec::new()
     };
     for (ei, seg) in module.elem_segs.iter().enumerate() {
-        let need_active_dyn = seg
-            .active_target
-            .is_some_and(|(tbl, _)| module.dyn_tables.contains_key(&tbl));
+        let need_active_dyn = seg.gc_entries.is_none()
+            && seg
+                .active_target
+                .is_some_and(|(tbl, _)| module.dyn_tables.contains_key(&tbl));
         let need_passive = module.uses_bulk_elem && seg.is_passive;
         if !need_active_dyn && !need_passive {
             continue;
@@ -1158,6 +1296,17 @@ fn build_shared_rodata(
         0
     };
 
+    let gc_rodata = if module.uses_gc {
+        Some(gc_rt::build_gc_rodata(
+            &mut rb.buf,
+            module,
+            layout,
+            &passive_elem_entries,
+        )?)
+    } else {
+        None
+    };
+
     budget.charge_rodata(rb.buf.len())?;
 
     let tables = RuntimeTables {
@@ -1186,6 +1335,7 @@ fn build_shared_rodata(
         ci_tables,
         call_export_patches,
         pgo_path_ro_off,
+        gc_rodata,
     })
 }
 
@@ -1195,6 +1345,7 @@ struct LinkContext<'a> {
     guest_code_start_vaddr: u64,
     guest_code_end_vaddr: u64,
     guard_state_vaddr: Option<u64>,
+    gc_safepoint_vaddr: Option<u64>,
     func_text_offs: &'a [u64],
     helper_text_offs: &'a [u64],
 }
@@ -1251,6 +1402,9 @@ fn patch_relocs_in_slice(
             RelocTarget::GuardState => ctx
                 .guard_state_vaddr
                 .ok_or("x64: GuardState reloc without guard-pages ET_DYN layout")?,
+            RelocTarget::GcSafepointHeader => ctx
+                .gc_safepoint_vaddr
+                .ok_or("x64: GcSafepointHeader reloc without GC safepoint table")?,
         };
         let next_ip_vaddr = item_vaddr
             .checked_add(u64::from(r.next_ip_off))
@@ -1512,6 +1666,8 @@ fn val_body_entry_from_summary(
         uses_exceptions: admit.uses_exceptions,
         uses_bulk_data: admit.uses_bulk_data,
         uses_bulk_elem: admit.uses_bulk_elem,
+        uses_gc: admit.uses_gc,
+        uses_threads: admit.uses_threads,
         dyn_table_ops: admit.dyn_table_ops,
         sig_arity: admit.sig_arity as u32,
         br_table_entries: admit.br_table_entries as u32,
@@ -1756,10 +1912,11 @@ fn compile_wasm_to_x64_so_inner(
         ci_tables,
         call_export_patches,
         pgo_path_ro_off,
+        gc_rodata,
     } = build_shared_rodata(
         validated.decoded(),
         &module,
-        &preliminary_layout.global_offs,
+        &preliminary_layout,
         pgo_gen_path_nul.as_deref(),
         &budget,
     )
@@ -1781,8 +1938,38 @@ fn compile_wasm_to_x64_so_inner(
         ci_tables,
         func_sig_ro_off: tables.func_sig_ro_off,
         func_addr_ro_off: tables.func_addr_ro_off,
+        passive_data_table_off: tables.passive_data_table_off,
         ..preliminary_layout
     };
+    if let (Some(ref mut gc_lay), Some(gc_ro)) = (layout.gc.as_mut(), gc_rodata) {
+        let raw_max = if opts.gc_max_heap_bytes == 0 {
+            module::DEFAULT_GC_MAX_HEAP_BYTES
+        } else {
+            opts.gc_max_heap_bytes
+        };
+        let raw_init = if opts.gc_initial_heap_bytes == 0 {
+            module::DEFAULT_GC_INIT_HEAP_BYTES
+        } else {
+            opts.gc_initial_heap_bytes
+        };
+        let max_heap = raw_max.max(4096).saturating_add(4095) & !4095;
+        let init_heap = raw_init.max(4096).saturating_add(4095) & !4095;
+        gc_lay.max_heap_bytes = max_heap;
+        gc_lay.init_heap_bytes = init_heap.min(max_heap);
+        gc_lay.gc_elem_buf_bytes = gc_ro.gc_elem_buf_bytes;
+        gc_lay.type_desc_ro_off = gc_ro.type_desc_ro_off;
+        gc_lay.func_canon_ro_off = gc_ro.func_canon_ro_off;
+        gc_lay.gc_elem_desc_ro_off = gc_ro.gc_elem_desc_ro_off;
+        gc_lay.gc_root_globals_ro_off = gc_ro.gc_root_globals_ro_off;
+        gc_lay.gc_root_globals_count = gc_ro.gc_root_globals_count;
+        gc_lay.gc_root_inline_tables_ro_off = gc_ro.gc_root_inline_tables_ro_off;
+        gc_lay.gc_root_inline_tables_count = gc_ro.gc_root_inline_tables_count;
+        gc_lay.gc_root_dyn_tables_ro_off = gc_ro.gc_root_dyn_tables_ro_off;
+        gc_lay.gc_root_dyn_tables_count = gc_ro.gc_root_dyn_tables_count;
+        gc_lay.gc_root_exn_tags_ro_off = gc_ro.gc_root_exn_tags_ro_off;
+        gc_lay.has_traced_exn_tags = gc_ro.has_traced_exn_tags;
+        gc_lay.passive_gc_elem_offs = gc_ro.passive_gc_elem_offs;
+    }
     if pgo_gen_path_nul.is_some() {
         let n_defs_u32 = u32::try_from(validated.decoded().code.len()).map_err(|_| {
             X64CompileError::Failed("x64: defined function count exceeds u32".into())
@@ -1803,6 +1990,16 @@ fn compile_wasm_to_x64_so_inner(
     }
 
     // 4. Emit shared runtime helpers, import trampolines, and target entry points / exports.
+    let n_imports = module.imports.len();
+    let n_defs = validated.decoded().code.len();
+    let store_ro_info = if opts.target == X64Target::StoreCdylib {
+        Some(
+            store_rt::build_store_rodata(&mut rodata, &module, &layout, n_defs)
+                .map_err(X64CompileError::Failed)?,
+        )
+    } else {
+        None
+    };
     let mut export_asms = match opts.target {
         X64Target::BlotCdylib => {
             emit_all_exports(&module, &layout, &ro, &tables, opts.isa, opts.hooks)
@@ -1812,22 +2009,59 @@ fn compile_wasm_to_x64_so_inner(
             emit_standalone_entry(&module, &layout, &ro, &tables, opts.isa, opts.hooks)
                 .map_err(X64CompileError::Failed)?,
         ],
+        X64Target::StoreCdylib => vec![
+            store_rt::emit_store_get_desc(&module, &layout, store_ro_info.as_ref().unwrap())
+                .map_err(X64CompileError::Failed)?,
+        ],
     };
-    let helper_asms = emit_all_helpers(&module, &layout, &ro, &tables, opts.hooks)
-        .map_err(X64CompileError::Failed)?;
-    let mut import_asms = Vec::with_capacity(module.imports.len());
-    for k in 0..module.imports.len() {
-        let imp = match opts.target {
-            X64Target::BlotCdylib => emit_import_trampoline(&module, k),
-            X64Target::StandaloneExec => emit_standalone_import_trampoline(&module, k),
+    let helper_asms = match opts.target {
+        X64Target::StoreCdylib => store_rt::emit_store_helpers(&module, &layout, &ro, &tables)
+            .map_err(X64CompileError::Failed)?,
+        X64Target::BlotCdylib | X64Target::StandaloneExec => {
+            emit_all_helpers(&module, &layout, &ro, &tables, opts.hooks)
+                .map_err(X64CompileError::Failed)?
         }
-        .map_err(X64CompileError::Failed)?;
-        import_asms.push(imp);
+    };
+    let mut import_asms = Vec::new();
+    let mut store_host_tramp_asms = Vec::new();
+    let mut store_export_tramp_asms = Vec::new();
+    match opts.target {
+        X64Target::BlotCdylib | X64Target::StandaloneExec => {
+            import_asms.reserve(module.imports.len());
+            for k in 0..module.imports.len() {
+                let imp = match opts.target {
+                    X64Target::BlotCdylib => emit_import_trampoline(&module, k),
+                    X64Target::StandaloneExec => emit_standalone_import_trampoline(&module, k),
+                    X64Target::StoreCdylib => unreachable!(),
+                }
+                .map_err(X64CompileError::Failed)?;
+                import_asms.push(imp);
+            }
+        }
+        X64Target::StoreCdylib => {
+            let sro = store_ro_info.as_ref().unwrap();
+            store_host_tramp_asms.reserve(sro.host_tramp_sigs.len());
+            for (ps, rs) in &sro.host_tramp_sigs {
+                store_host_tramp_asms.push(
+                    store_rt::emit_store_host_trampoline(ps, rs)
+                        .map_err(X64CompileError::Failed)?,
+                );
+            }
+            store_export_tramp_asms.reserve(sro.export_tramp_sigs.len());
+            for (ps, rs) in &sro.export_tramp_sigs {
+                store_export_tramp_asms.push(
+                    store_rt::emit_store_export_entry(ps, rs, &ro)
+                        .map_err(X64CompileError::Failed)?,
+                );
+            }
+        }
     }
     let runtime_code_bytes: usize = export_asms
         .iter()
         .chain(&helper_asms)
         .chain(&import_asms)
+        .chain(&store_host_tramp_asms)
+        .chain(&store_export_tramp_asms)
         .map(|a| a.code.len())
         .sum();
     budget
@@ -1839,8 +2073,6 @@ fn compile_wasm_to_x64_so_inner(
     //    module-wide inlining + effect analysis -> parallel Stage 2 IR opt + regalloc ->
     //    coupled Step 8a/8b stack & trap-check elision -> parallel x64 codegen) into an indexed
     //    `Vec<Option<Asm>>` for 100% deterministic `.text`/`.rodata` layout.
-    let n_imports = module.imports.len();
-    let n_defs = validated.decoded().code.len();
     let n_workers = resolve_jobs(opts.jobs).min(n_defs.max(1));
     let ns_lower5a = AtomicU64::new(0);
     let ns_opt5c = AtomicU64::new(0);
@@ -1880,7 +2112,9 @@ fn compile_wasm_to_x64_so_inner(
         allow_r12: layout.pinned_global.is_none(),
         allow_r13: layout.fixed_mem_bytes.is_some() && layout.pinned_global_2.is_none(),
         has_bmi2: opts.isa.has_bmi2,
-        allow_xmm16_31: opts.isa.has_avx512,
+        allow_xmm16_31: opts.isa.has_avx512 && !layout.is_store,
+        is_store: layout.is_store,
+        n_imports,
     };
 
     type IncCtx = (
@@ -1894,6 +2128,8 @@ fn compile_wasm_to_x64_so_inner(
         && default_hooks
         && opts.pgo_gen_path.is_none()
         && opts.pgo_use.is_none()
+        && !module.uses_gc
+        && opts.target != X64Target::StoreCdylib
         && n_defs > 0
     {
         let abi_hash = inc_cache::compute_abi_hash(
@@ -2114,6 +2350,8 @@ fn compile_wasm_to_x64_so_inner(
                                 uses_exceptions: false,
                                 uses_bulk_data: false,
                                 uses_bulk_elem: false,
+                                uses_gc: false,
+                                uses_threads: false,
                                 dyn_table_ops: Vec::new(),
                                 sig_arity: 0,
                                 br_table_entries: 0,
@@ -2773,6 +3011,7 @@ fn compile_wasm_to_x64_so_inner(
                 let res = lower_ir_to_x64_with_budget(
                     &irs[bi],
                     &allocs[bi],
+                    &module,
                     &layout,
                     &ro,
                     opts.isa,
@@ -3051,6 +3290,16 @@ fn compile_wasm_to_x64_so_inner(
         for asm in &import_asms {
             imp_local_rodata_offs.push(reserve_local_ro_len(asm.local_rodata.len())?);
         }
+        let mut store_host_local_rodata_offs: Vec<u64> =
+            Vec::with_capacity(store_host_tramp_asms.len());
+        for asm in &store_host_tramp_asms {
+            store_host_local_rodata_offs.push(reserve_local_ro_len(asm.local_rodata.len())?);
+        }
+        let mut store_export_local_rodata_offs: Vec<u64> =
+            Vec::with_capacity(store_export_tramp_asms.len());
+        for asm in &store_export_tramp_asms {
+            store_export_local_rodata_offs.push(reserve_local_ro_len(asm.local_rodata.len())?);
+        }
         let mut fn_local_rodata_offs: Vec<u64> = Vec::with_capacity(n_defs);
         if let Some(ref cache_arc) = link_cache {
             for (bi, cf) in cache_arc.funcs.iter().enumerate() {
@@ -3067,6 +3316,13 @@ fn compile_wasm_to_x64_so_inner(
                 fn_local_rodata_offs.push(reserve_local_ro_len(asm.local_rodata.len())?);
             }
         }
+        let gc_safepoint_ro_off: Option<u64> = if module.uses_gc {
+            let sp_bytes =
+                gc_rt::planned_safepoint_table_bytes(&def_asms).map_err(X64CompileError::Failed)?;
+            Some(reserve_local_ro_len(sp_bytes)?)
+        } else {
+            None
+        };
 
         // 6b. Precompute exact merged `.text` offsets (16-byte aligned per item) without copying
         //     bytes yet, in deterministic order: 1. exports / `_start`, 2. shared helpers,
@@ -3092,12 +3348,22 @@ fn compile_wasm_to_x64_so_inner(
         for (i, asm) in export_asms.iter().enumerate() {
             let off = reserve_text_off(&mut planned_text_len, asm.code.len())?;
             export_text_offs.push(off);
-            if opts.target == X64Target::BlotCdylib {
-                export_defs.push(ExportDef {
-                    name: EXPORT_NAMES[i],
-                    text_off: off,
-                    size: asm.code.len() as u64,
-                });
+            match opts.target {
+                X64Target::BlotCdylib => {
+                    export_defs.push(ExportDef {
+                        name: EXPORT_NAMES[i],
+                        text_off: off,
+                        size: asm.code.len() as u64,
+                    });
+                }
+                X64Target::StoreCdylib => {
+                    export_defs.push(ExportDef {
+                        name: store_rt::STORE_EXPORT_NAMES[i],
+                        text_off: off,
+                        size: asm.code.len() as u64,
+                    });
+                }
+                X64Target::StandaloneExec => {}
             }
         }
 
@@ -3109,6 +3375,15 @@ fn compile_wasm_to_x64_so_inner(
         let mut func_text_offs: Vec<u64> = Vec::with_capacity(n_imports + n_defs);
         for asm in &import_asms {
             func_text_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
+        }
+        let mut store_host_tramp_offs: Vec<u64> = Vec::with_capacity(store_host_tramp_asms.len());
+        for asm in &store_host_tramp_asms {
+            store_host_tramp_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
+        }
+        let mut store_export_tramp_offs: Vec<u64> =
+            Vec::with_capacity(store_export_tramp_asms.len());
+        for asm in &store_export_tramp_asms {
+            store_export_tramp_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
         }
         let text_order: Vec<usize> = match opts.pgo_use.as_ref() {
             Some(prof) if link_cache.is_none() => prof.text_layout_order(),
@@ -3151,6 +3426,12 @@ fn compile_wasm_to_x64_so_inner(
                 let (rv, tv) = (lay.rodata_vaddr as u64, lay.text_vaddr as u64);
                 (PlannedElf::So(lay), rv, tv)
             }
+            X64Target::StoreCdylib => {
+                let lay = ElfLayout::plan(&store_rt::STORE_EXPORT_NAMES, planned_rodata_len)
+                    .map_err(X64CompileError::Failed)?;
+                let (rv, tv) = (lay.rodata_vaddr as u64, lay.text_vaddr as u64);
+                (PlannedElf::So(lay), rv, tv)
+            }
             X64Target::StandaloneExec => {
                 let lay =
                     ElfExecLayout::plan(planned_rodata_len).map_err(X64CompileError::Failed)?;
@@ -3178,6 +3459,20 @@ fn compile_wasm_to_x64_so_inner(
         for (k, asm) in import_asms.iter_mut().enumerate() {
             if !asm.local_rodata.is_empty() {
                 let target_off = imp_local_rodata_offs[k] as usize;
+                rodata.resize(target_off, 0);
+                rodata.extend_from_slice(&asm.local_rodata);
+            }
+        }
+        for (k, asm) in store_host_tramp_asms.iter().enumerate() {
+            if !asm.local_rodata.is_empty() {
+                let target_off = store_host_local_rodata_offs[k] as usize;
+                rodata.resize(target_off, 0);
+                rodata.extend_from_slice(&asm.local_rodata);
+            }
+        }
+        for (k, asm) in store_export_tramp_asms.iter().enumerate() {
+            if !asm.local_rodata.is_empty() {
+                let target_off = store_export_local_rodata_offs[k] as usize;
                 rodata.resize(target_off, 0);
                 rodata.extend_from_slice(&asm.local_rodata);
             }
@@ -3241,6 +3536,17 @@ fn compile_wasm_to_x64_so_inner(
                 }
             }
         }
+        if let Some(sp_off) = gc_safepoint_ro_off {
+            gc_rt::emit_safepoint_table_rodata(
+                &mut rodata,
+                sp_off as usize,
+                &def_asms,
+                &func_text_offs,
+                n_imports,
+                defs_start_off,
+            )
+            .map_err(X64CompileError::Failed)?;
+        }
         debug_assert_eq!(rodata.len(), planned_rodata_len);
 
         // 6e. Patch `call_indirect` dispatch tables (`target_vaddr - table_base_vaddr`).
@@ -3278,7 +3584,7 @@ fn compile_wasm_to_x64_so_inner(
             }
         }
         // 6e2. Patch dynamic `call_indirect` / `call_ref` function address table (`target_vaddr - func_addr_base_vaddr`).
-        if module.uses_dyn_ci || module.uses_call_ref {
+        if !layout.is_store && (module.uses_dyn_ci || module.uses_call_ref) {
             let base_va = ro_vaddr
                 .checked_add(u64::from(layout.func_addr_ro_off))
                 .ok_or_else(|| X64CompileError::Failed("x64: func_addr vaddr overflow".into()))?;
@@ -3291,6 +3597,28 @@ fn compile_wasm_to_x64_so_inner(
                 let pos = (layout.func_addr_ro_off as usize) + fi * 4;
                 rodata[pos..pos + 4].copy_from_slice(&disp.to_le_bytes());
             }
+        }
+        // 6e3. Patch `StoreCdylib` defined-function, host-trampoline, and export-trampoline rel32 tables.
+        if let Some(ref sro) = store_ro_info {
+            let mut patch_rel32_table = |ro_off: u32, text_offs: &[u64]| -> Result<(), X64CompileError> {
+                let base_va = ro_vaddr
+                    .checked_add(u64::from(ro_off))
+                    .ok_or_else(|| X64CompileError::Failed("x64: store table vaddr overflow".into()))?;
+                for (i, &t_off) in text_offs.iter().enumerate() {
+                    let target_va = tx_vaddr.checked_add(t_off).ok_or_else(|| {
+                        X64CompileError::Failed("x64: store target vaddr overflow".into())
+                    })?;
+                    let disp = i32::try_from(i128::from(target_va) - i128::from(base_va)).map_err(
+                        |_| X64CompileError::Failed("x64: store table rel32 overflow".into()),
+                    )?;
+                    let pos = (ro_off as usize) + i * 4;
+                    rodata[pos..pos + 4].copy_from_slice(&disp.to_le_bytes());
+                }
+                Ok(())
+            };
+            patch_rel32_table(sro.def_fn_rel_ro_off, &func_text_offs[n_imports..])?;
+            patch_rel32_table(sro.host_tramp_rel_ro_off, &store_host_tramp_offs)?;
+            patch_rel32_table(sro.export_tramp_rel_ro_off, &store_export_tramp_offs)?;
         }
 
         // 6f. Patch `call_export_table` function displacements (`target_vaddr - table_base_vaddr`).
@@ -3331,12 +3659,20 @@ fn compile_wasm_to_x64_so_inner(
             ),
             _ => None,
         };
+        let gc_safepoint_vaddr = gc_safepoint_ro_off
+            .map(|off| {
+                ro_vaddr.checked_add(off).ok_or_else(|| {
+                    X64CompileError::Failed("x64: gc_safepoint vaddr overflow".into())
+                })
+            })
+            .transpose()?;
         let link_ctx = LinkContext {
             tx_vaddr,
             ro_vaddr,
             guest_code_start_vaddr,
             guest_code_end_vaddr,
             guard_state_vaddr,
+            gc_safepoint_vaddr,
             func_text_offs: &func_text_offs,
             helper_text_offs: &helper_text_offs,
         };
@@ -3381,6 +3717,37 @@ fn compile_wasm_to_x64_so_inner(
                 let lro = (!asm.local_rodata.is_empty()).then_some(imp_local_rodata_offs[k]);
                 patch_relocs(prefix_slice, func_text_offs[k], &asm.relocs, lro, &link_ctx)
                     .map_err(X64CompileError::Failed)?;
+            }
+            for (k, asm) in store_host_tramp_asms.iter().enumerate() {
+                let off = store_host_tramp_offs[k] as usize;
+                prefix_slice[cursor..off].fill(0xcc);
+                prefix_slice[off..off + asm.code.len()].copy_from_slice(&asm.code);
+                cursor = off + asm.code.len();
+                let lro = (!asm.local_rodata.is_empty()).then_some(store_host_local_rodata_offs[k]);
+                patch_relocs(
+                    prefix_slice,
+                    store_host_tramp_offs[k],
+                    &asm.relocs,
+                    lro,
+                    &link_ctx,
+                )
+                .map_err(X64CompileError::Failed)?;
+            }
+            for (k, asm) in store_export_tramp_asms.iter().enumerate() {
+                let off = store_export_tramp_offs[k] as usize;
+                prefix_slice[cursor..off].fill(0xcc);
+                prefix_slice[off..off + asm.code.len()].copy_from_slice(&asm.code);
+                cursor = off + asm.code.len();
+                let lro =
+                    (!asm.local_rodata.is_empty()).then_some(store_export_local_rodata_offs[k]);
+                patch_relocs(
+                    prefix_slice,
+                    store_export_tramp_offs[k],
+                    &asm.relocs,
+                    lro,
+                    &link_ctx,
+                )
+                .map_err(X64CompileError::Failed)?;
             }
             debug_assert_eq!(cursor, prefix_end_len);
             prefix_slice[cursor..defs_start_off].fill(0xcc);
@@ -4472,6 +4839,7 @@ fn try_compile_defs_incremental(
                 let res = lower_ir_to_x64_with_budget(
                     opt_irs[bi].as_deref().unwrap(),
                     opt_allocs[bi].as_deref().unwrap(),
+                    module,
                     layout,
                     ro,
                     opts.isa,

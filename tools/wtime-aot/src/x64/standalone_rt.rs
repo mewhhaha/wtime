@@ -943,6 +943,9 @@ pub fn emit_standalone_entry(
         }
     }
 
+    // ---- Step 3a4b: Wasm GC semi-space heap + passive GC elem buffer (GC modules only) ----
+    super::gc_rt::emit_gc_heap_init(&mut a, layout, lbl_fail_alloc);
+
     // ---- Step 3a5: Native PGO counter buffer (`--pgo-gen` only) ----
     if let Some(ref pgo) = layout.pgo_gen {
         a.xor_rr(false, Gp::Rdi, Gp::Rdi);
@@ -1020,7 +1023,29 @@ pub fn emit_standalone_entry(
         a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
         a.mov_mr(true, Mem::base_disp(Gp::Rax, -8), Gp::Rsp);
         a.lea(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -16));
+        if let Some(ref gc) = layout.gc {
+            a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rsp, -8));
+            a.mov_mr(
+                true,
+                Mem::base_disp(
+                    Gp::R15,
+                    gc.gc_state_off + super::gc_rt::GC_OFF_WALK_STOP_RSP,
+                ),
+                Gp::Rax,
+            );
+        }
         a.call_reloc(RelocTarget::Func(start_fi));
+        if let Some(ref gc) = layout.gc {
+            a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+            a.mov_mr(
+                true,
+                Mem::base_disp(
+                    Gp::R15,
+                    gc.gc_state_off + super::gc_rt::GC_OFF_WALK_STOP_RSP,
+                ),
+                Gp::Rcx,
+            );
+        }
         a.mov_rr(false, Gp::Rbx, Gp::R11);
         if returns_i32 {
             let lbl_skip_ret = a.new_label();

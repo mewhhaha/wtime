@@ -1,0 +1,19 @@
+[package]
+name = "wtime-aot-host"
+version = "0.1.10"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Multi-module Wasm Store, Cheney GC, Weak/Ephemeron, Threads, and Interrupt host runtime for wtime-aot StoreCdylib x86-64 modules"
+
+# Standalone tool crate, excluded from the zero-dependency core workspace.
+[workspace]
+
+[dependencies]
+wtime-aot = { path = ".." }
+wtime-types = { path = "../../../crates/wtime-types" }
+wtime-validate = { path = "../../../crates/wtime-validate" }
+libc = "0.2"
+
+[dev-dependencies]
+wat = "1"

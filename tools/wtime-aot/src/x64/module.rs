@@ -10,7 +10,8 @@ use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 use wtime_types::{
-    CompositeType, FeatureSet, FuncType, HeapType, IndexType, ResourceLimits, ValType,
+    CompositeType, FeatureSet, FieldType, FuncType, HeapType, IndexType, ResourceLimits,
+    StorageType, SubType, TypeIdx, ValType,
 };
 use wtime_validate::{
     DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode,
@@ -25,11 +26,14 @@ pub enum X64Target {
     BlotCdylib,
     /// Self-contained static Linux x86-64 executable (`ET_EXEC`).
     StandaloneExec,
+    /// Multi-module Store-hosted shared library (`ET_DYN`) with arbitrary imports/exports,
+    /// shared Cheney GC heap, and cross-module canonical type remapping.
+    StoreCdylib,
 }
 
 /// Exact Wasm feature profile enforced right at the front door of `wtime_validate::validate`,
-/// disabling unsupported proposals (GC, threads, function-references, custom page sizes/descriptors,
-/// stack switching) before decoding/validation.
+/// disabling unsupported proposals (threads, custom page sizes/descriptors, stack switching)
+/// before decoding/validation.
 pub const fn x64_validate_features() -> FeatureSet {
     FeatureSet {
         mutable_globals: true,
@@ -47,14 +51,20 @@ pub const fn x64_validate_features() -> FeatureSet {
         wide_arithmetic: true,
         exception_handling: true,
         function_references: true,
+        gc: true,
+        threads: true,
+        branch_hinting: true,
         ..FeatureSet::mvp()
     }
 }
 
 /// Resource limits passed to `wtime_validate::validate` (matching `ResourceLimits::default()`
-/// except allowing `memory64` declared page limits up to `2^48`, enforced strictly at admission).
+/// except allowing `memory64` declared page limits up to `2^48` and large compiled guest modules).
 pub fn x64_validate_limits() -> ResourceLimits {
     ResourceLimits {
+        max_module_bytes: 256 * 1024 * 1024,
+        max_instructions: 100_000_000,
+        max_total_locals: 4_000_000,
         max_memory_pages: 1 << 48,
         max_memory_bytes: u64::MAX,
         ..ResourceLimits::default()
@@ -81,6 +91,8 @@ pub const MAX_AGGREGATE_BR_TABLE_ENTRIES: usize = 4_194_304; // 16 MiB jump tabl
 pub const MAX_LOCALS_PER_FN: usize = 65_536;
 pub const MAX_TOTAL_LOCALS: usize = 1_000_000;
 pub const MAX_TOTAL_SIG_ARITY: usize = 1_000_000; // params + results across decls, blocks, and call_indirect sites
+pub const STORE_MAX_TOTAL_LOCALS: usize = 8_000_000;
+pub const STORE_MAX_TOTAL_SIG_ARITY: usize = 16_000_000;
 pub const MAX_BLOCKS_PER_FN: usize = 262_144;
 pub const MAX_FRAME_BYTES: i32 = 4 << 20; // 4 MiB (well below 8 MiB dedicated guest stack)
 pub const MAX_LIVENESS_BYTES: usize = 16 << 20; // 16 MiB per function
@@ -253,6 +265,144 @@ impl CompileBudget {
     }
 }
 
+/// Inline Cohen supertype-display length embedded directly in each 64-byte `.rodata` `TypeDesc`.
+pub const GC_DISPLAY_LEN: usize = 10;
+/// Object header tag bits (`bits 1..2`, with `bit 0 == 0` for live objects, `bit 0 == 1` for Cheney forwarding ptr).
+pub const GC_HDR_KIND_STRUCT: u32 = 0;
+pub const GC_HDR_KIND_ARRAY: u32 = 2;
+pub const GC_HDR_KIND_INTERNAL_EXTERN: u32 = 4;
+/// Reserved high 32-bit sentinel tag distinguishing `extern.convert_any(i31)` from opaque host `externref`s.
+pub const GC_EXT_I31_TAG_HI: u64 = 0x5754_4933_0000_0000;
+/// Admission caps for Wasm GC types and constant initializers.
+pub const MAX_GC_STRUCT_FIELDS: usize = 4_096;
+pub const MAX_GC_CONST_NODES: usize = 1_000_000;
+pub const MAX_GC_SUBTYPE_DEPTH: usize = 1_024;
+/// Default demand-paged initial semi-space size (4 MiB) and per-semi-space growth cap (256 MiB).
+pub const DEFAULT_GC_INIT_HEAP_BYTES: u64 = 4 << 20;
+pub const DEFAULT_GC_MAX_HEAP_BYTES: u64 = 256 << 20;
+
+/// Disjoint Wasm reference hierarchy family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GcRefFamily {
+    /// `any`, `eq`, `i31`, `struct`, `array`, `none`, concrete struct/array types (unconditionally GC-traced if non-null & non-i31).
+    Any,
+    /// `extern`, `noextern` (GC-traced only if pointing inside active GC from-space).
+    Extern,
+    /// `func`, `nofunc`, concrete function types (`0` = null, `f + 1` = `ref.func f`).
+    Func,
+    /// `exn`, `noexn` (`0` = null, offset into exception slab).
+    Exn,
+}
+
+impl GcRefFamily {
+    #[inline]
+    pub const fn is_traced(self) -> bool {
+        matches!(self, GcRefFamily::Any | GcRefFamily::Extern)
+    }
+}
+
+/// Physical storage kind of a GC struct field or array element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum GcStorageKind {
+    I8 = 0,
+    I16 = 1,
+    I32 = 2,
+    I64 = 3,
+    F32 = 4,
+    F64 = 5,
+    V128 = 6,
+    GcRef = 7,
+    ExternRef = 8,
+    OtherRef = 9,
+}
+
+impl GcStorageKind {
+    #[inline]
+    pub const fn byte_size(self) -> u32 {
+        match self {
+            GcStorageKind::I8 => 1,
+            GcStorageKind::I16 => 2,
+            GcStorageKind::I32 | GcStorageKind::F32 => 4,
+            GcStorageKind::I64
+            | GcStorageKind::F64
+            | GcStorageKind::GcRef
+            | GcStorageKind::ExternRef
+            | GcStorageKind::OtherRef => 8,
+            GcStorageKind::V128 => 16,
+        }
+    }
+
+    #[inline]
+    pub const fn align(self) -> u32 {
+        match self {
+            GcStorageKind::I8 => 1,
+            GcStorageKind::I16 => 2,
+            GcStorageKind::I32 | GcStorageKind::F32 => 4,
+            GcStorageKind::I64
+            | GcStorageKind::F64
+            | GcStorageKind::V128
+            | GcStorageKind::GcRef
+            | GcStorageKind::ExternRef
+            | GcStorageKind::OtherRef => 8,
+        }
+    }
+}
+
+/// Laid-out field inside a Wasm GC struct (byte offset from object base `+0`, after the 8-byte header).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GcStructField {
+    pub offset: u32,
+    pub storage: GcStorageKind,
+    pub mutable: bool,
+}
+
+/// Canonical composite payload of a `GcCanonType`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GcCompositeInfo {
+    Func,
+    Struct {
+        fields: Vec<GcStructField>,
+        /// 8-byte aligned total object byte size including the 8-byte header (`>= 8`).
+        total_bytes: u32,
+        /// Byte offsets of fields holding `GcRef` (`any` hierarchy).
+        gc_ref_offs: Vec<u32>,
+        /// Byte offsets of fields holding `ExternRef` (`extern` hierarchy).
+        ext_ref_offs: Vec<u32>,
+    },
+    Array {
+        elem: GcStorageKind,
+        mutable: bool,
+    },
+}
+
+/// Canonicalized Wasm GC type metadata indexed by `canon_id`.
+#[derive(Clone, Debug)]
+pub struct GcCanonType {
+    pub canon_id: u32,
+    pub is_final: bool,
+    pub supertype: Option<u32>,
+    pub depth: u32,
+    /// Inline supertype chain `[root, ..., self]`, padded with `u32::MAX` beyond `depth`.
+    pub display: [u32; GC_DISPLAY_LEN],
+    /// Full supertype chain `[root, ..., self]` (length `depth + 1`) for `depth >= GC_DISPLAY_LEN`.
+    pub supertypes_all: Vec<u32>,
+    pub composite: GcCompositeInfo,
+}
+
+impl GcCanonType {
+    /// Header word (`u32`) stored at `[obj + 0]` for live instances of this type.
+    #[inline]
+    pub const fn header_word(&self) -> u32 {
+        let kind = match self.composite {
+            GcCompositeInfo::Struct { .. } => GC_HDR_KIND_STRUCT,
+            GcCompositeInfo::Array { .. } => GC_HDR_KIND_ARRAY,
+            GcCompositeInfo::Func => 0,
+        };
+        (self.canon_id << 3) | kind
+    }
+}
+
 /// Constant value folded from an immutable/never-written non-exported global initializer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum X64ConstVal {
@@ -263,6 +413,42 @@ pub enum X64ConstVal {
     V128([u8; 16]),
     RefNull,
     FuncRef(u32),
+    /// Encoded `ref.i31` (`((x as u32) << 1) | 1`), stored zero-extended in 64 bits.
+    I31(u32),
+    /// Encoded `extern.convert_any(ref.i31)` (`GC_EXT_I31_TAG_HI | enc`).
+    ExternI31(u32),
+    /// Placeholder indicating a runtime GC-allocated initializer evaluated in `wt_initialize`.
+    RuntimeGc,
+}
+
+/// Runtime-evaluated Wasm GC constant expression tree (for globals, table inits, and elem segments).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GcConstExpr {
+    Scalar(X64ConstVal),
+    GlobalGet(u32),
+    StructNew {
+        ty: u32,
+        fields: Vec<GcConstExpr>,
+    },
+    StructNewDefault(u32),
+    ArrayNew {
+        ty: u32,
+        init: Box<GcConstExpr>,
+        len: Box<GcConstExpr>,
+    },
+    ArrayNewDefault {
+        ty: u32,
+        len: Box<GcConstExpr>,
+    },
+    ArrayNewFixed {
+        ty: u32,
+        elems: Vec<GcConstExpr>,
+    },
+    RefI31(Box<GcConstExpr>),
+    AnyConvertExtern(Box<GcConstExpr>),
+    ExternConvertAny(Box<GcConstExpr>),
+    I32Bin(u16, Box<GcConstExpr>, Box<GcConstExpr>),
+    I64Bin(u16, Box<GcConstExpr>, Box<GcConstExpr>),
 }
 
 /// Static or dynamic `call_indirect` (or typed `call_ref`) dispatch metadata.
@@ -294,16 +480,22 @@ pub struct DynTableMeta {
     pub eff_max_len: u32,
     pub is_funcref: bool,
     pub is_table64: bool,
-    /// Encoded initial slot value (`0` = null, `f + 1` = `ref.func f`).
+    /// Reference hierarchy family stored in this table (controls GC root tracing).
+    pub ref_family: GcRefFamily,
+    /// Encoded initial slot value (`0` = null, `f + 1` = `ref.func f`, or encoded i31).
     pub init_val: u64,
 }
 
-/// Decoded element segment initializer (`0` = null, `f + 1` = `ref.func f`).
+/// Decoded element segment initializer (`0` = null, `f + 1` = `ref.func f`, or GC const exprs).
 #[derive(Clone, Debug)]
 pub struct ElemSegInit {
     pub is_passive: bool,
     pub active_target: Option<(u32, u64)>,
     pub entries: Vec<u32>,
+    /// Reference hierarchy family of elements in this segment.
+    pub ref_family: GcRefFamily,
+    /// Present for element segments with GC/extern/exn or runtime-allocated expressions.
+    pub gc_entries: Option<Vec<GcConstExpr>>,
 }
 
 /// Metadata for an additional linear memory (`memory_index >= 1`, Wasm `multi-memory`).
@@ -312,7 +504,11 @@ pub struct ExtraMemMeta {
     pub min_pages: u64,
     pub max_pages: u64,
     pub memory64: bool,
+    pub shared: bool,
 }
+
+/// Imported memory metadata `(module, name, min_pages, eff_max_pages, declared_max_pages, is64, shared)`.
+pub type ImportedMemMeta = (String, String, u64, u64, Option<u64>, bool, bool);
 
 /// Lean module metadata consumed by `x64/{ir,lower,mod}.rs`.
 pub struct X64Module {
@@ -359,6 +555,8 @@ pub struct X64Module {
     pub memory: Option<(u64, u64)>,
     /// `true` iff memory 0 uses 64-bit (`i64`) addressing (`memory64`).
     pub memory64: bool,
+    /// `true` iff memory 0 is declared `shared` (`threads`).
+    pub memory_shared: bool,
     /// `Some(fixed_bytes)` iff memory 0 exists with `min == max`.
     pub fixed32: Option<u64>,
     /// Additional linear memories `1..N` (`multi-memory`; empty for all 0/1-memory modules).
@@ -385,18 +583,167 @@ pub struct X64Module {
     pub uses_bulk_data: bool,
     /// All declared element segments `0..decoded.elements.len()`.
     pub elem_segs: Vec<ElemSegInit>,
-    /// `true` iff any function uses `table.init` or `elem.drop`.
+    /// `true` iff any function uses `table.init`, `elem.drop`, `array.new_elem`, or `array.init_elem`.
     pub uses_bulk_elem: bool,
+    /// `true` iff the module uses any Wasm GC feature (rec groups, struct/array types, subtyping,
+    /// GC heap types, GC const expressions, or GC opcodes `0xd3`/`0xfb00..=0xfb1e`).
+    pub uses_gc: bool,
+    /// `true` iff the module declares any shared memory or uses any atomic opcode (`0xfe00..=0xfe4e`).
+    pub uses_threads: bool,
+    /// Canonical type ID (`0..gc_canon_types.len()`) for every declared module type `0..module_types.len()`.
+    pub type_canon: Vec<u32>,
+    /// Canonical Wasm GC type descriptors (populated for all canonical types when `uses_gc`).
+    pub gc_canon_types: Vec<GcCanonType>,
+    /// Kind byte for every declared module type (`0 = Func, 1 = Struct, 2 = Array`).
+    pub type_kinds: Vec<u8>,
+    /// Runtime-evaluated GC global initializers `(global_index, expr)` in declaration order.
+    pub runtime_global_inits: Vec<(usize, GcConstExpr)>,
+    /// Runtime-evaluated GC explicit table initializers `(table_index, expr)` in declaration order.
+    pub runtime_table_inits: Vec<(u32, GcConstExpr)>,
+    /// Multi-module StoreCdylib imported metadata (empty/zero for `BlotCdylib` and `StandaloneExec`).
+    pub imported_globals: Vec<(String, String, ValType, bool)>,
+    pub imported_mems: Vec<ImportedMemMeta>,
+    pub imported_tables: Vec<(String, String, wtime_types::TableType)>,
+    pub imported_tags: Vec<(String, String, u32)>,
+    /// Original Wasm import declaration order `(kind, kind_local_idx)` where
+    /// `0=Func, 1=Table, 2=Mem, 3=Global, 4=Tag` (populated for `StoreCdylib`).
+    pub import_order: Vec<(u8, u32)>,
+    /// Declared optional maximum pages for every memory `0..total_mems` (populated for `StoreCdylib`).
+    pub all_mem_declared_max: Vec<Option<u64>>,
+    /// Declared `TableType` for every table `0..total_tables` (populated for `StoreCdylib`).
+    pub all_table_types: Vec<wtime_types::TableType>,
+    /// Multi-module StoreCdylib exported non-func/non-global metadata.
+    pub exported_mems: Vec<(String, u32)>,
+    pub exported_tables: Vec<(String, u32)>,
+    pub exported_tags: Vec<(String, u32)>,
+    /// Raw recursion groups preserved for cross-module `CanonicalTypeRegistry` in `StoreCdylib`.
+    pub raw_type_groups: Vec<wtime_types::TypeGroup>,
     /// Optional start function index.
     pub start: Option<u32>,
 }
 
 impl X64Module {
+    /// Returns `true` iff linear memory `mem` is declared `shared` (Wasm Threads).
+    #[inline]
+    pub fn mem_is_shared(&self, mem: u32) -> bool {
+        if mem == 0 {
+            self.memory_shared
+        } else {
+            self.extra_memories
+                .get((mem - 1) as usize)
+                .is_some_and(|em| em.shared)
+        }
+    }
+
     /// Borrows the canonical `FuncType` for function index `func_index` without cloning.
     #[inline]
     pub fn func_type(&self, func_index: usize) -> Option<&FuncType> {
         let &ti = self.func_type_idx.get(func_index)?;
         self.module_types.get(ti as usize)
+    }
+
+    /// Classifies a `HeapType` into its disjoint reference family.
+    #[inline]
+    pub fn heap_ref_family(&self, heap: HeapType) -> GcRefFamily {
+        match heap {
+            HeapType::Func | HeapType::NoFunc => GcRefFamily::Func,
+            HeapType::Extern | HeapType::NoExtern => GcRefFamily::Extern,
+            HeapType::Exn | HeapType::NoExn => GcRefFamily::Exn,
+            HeapType::Any
+            | HeapType::Eq
+            | HeapType::I31
+            | HeapType::Struct
+            | HeapType::Array
+            | HeapType::None => GcRefFamily::Any,
+            HeapType::Defined(ti) | HeapType::ExactDefined(ti) => {
+                if self.type_kinds.get(ti.0 as usize).copied().unwrap_or(0) == 0 {
+                    GcRefFamily::Func
+                } else {
+                    GcRefFamily::Any
+                }
+            }
+            HeapType::Cont | HeapType::NoCont => {
+                unreachable!("x64: stack-switching cont types are rejected at admission")
+            }
+        }
+    }
+
+    /// Returns `true` iff canonical type `actual` is a subtype of `expected`.
+    #[cfg(test)]
+    #[inline]
+    pub fn is_canon_subtype(&self, actual: u32, expected: u32) -> bool {
+        if actual == expected {
+            return true;
+        }
+        let Some(act) = self.gc_canon_types.get(actual as usize) else {
+            return false;
+        };
+        let Some(exp) = self.gc_canon_types.get(expected as usize) else {
+            return false;
+        };
+        if exp.is_final || act.depth < exp.depth {
+            return false;
+        }
+        let d = exp.depth as usize;
+        if d < GC_DISPLAY_LEN {
+            act.display[d] == expected
+        } else {
+            act.supertypes_all.get(d).copied() == Some(expected)
+        }
+    }
+
+    /// Returns the canonical `GcCanonType` for module type index `ti`.
+    #[inline]
+    pub fn gc_type(&self, ti: u32) -> &GcCanonType {
+        let cid = self.type_canon[ti as usize] as usize;
+        &self.gc_canon_types[cid]
+    }
+
+    /// Maps a Wasm `ValType` to its SSA IR `ValRefKind` (always `None` when `!self.uses_gc`).
+    #[inline]
+    pub fn val_ref_kind(&self, vt: ValType) -> super::ir::ValRefKind {
+        if !self.uses_gc {
+            return super::ir::ValRefKind::None;
+        }
+        match vt {
+            ValType::Ref(rt) => match self.heap_ref_family(rt.heap) {
+                GcRefFamily::Any => super::ir::ValRefKind::GcRef,
+                GcRefFamily::Extern => super::ir::ValRefKind::ExternRef,
+                GcRefFamily::Func | GcRefFamily::Exn => super::ir::ValRefKind::None,
+            },
+            _ => super::ir::ValRefKind::None,
+        }
+    }
+
+    /// Maps a `GcStorageKind` to its SSA IR `ValRefKind`.
+    #[inline]
+    pub const fn storage_ref_kind(sk: GcStorageKind) -> super::ir::ValRefKind {
+        match sk {
+            GcStorageKind::GcRef => super::ir::ValRefKind::GcRef,
+            GcStorageKind::ExternRef => super::ir::ValRefKind::ExternRef,
+            _ => super::ir::ValRefKind::None,
+        }
+    }
+
+    /// Maps a `GcStorageKind` to its unpacked SSA IR `Ty`.
+    #[inline]
+    pub const fn storage_to_ty(sk: GcStorageKind) -> super::ir::Ty {
+        match sk {
+            GcStorageKind::I8 | GcStorageKind::I16 | GcStorageKind::I32 => super::ir::Ty::I32,
+            GcStorageKind::I64
+            | GcStorageKind::GcRef
+            | GcStorageKind::ExternRef
+            | GcStorageKind::OtherRef => super::ir::Ty::I64,
+            GcStorageKind::F32 => super::ir::Ty::F32,
+            GcStorageKind::F64 => super::ir::Ty::F64,
+            GcStorageKind::V128 => super::ir::Ty::V128,
+        }
+    }
+
+    /// Maps a Wasm `ValType` to its SSA IR `Ty`.
+    #[inline]
+    pub fn val_type_to_ty(&self, vt: ValType) -> super::ir::Ty {
+        super::ir::Ty::from_val(vt)
     }
 
     /// Returns `true` iff linear memory `mem` uses 64-bit (`memory64`) addressing.
@@ -431,7 +778,7 @@ impl X64Module {
         let mut off: i32 = 8;
         let mut fields = Vec::with_capacity(params.len());
         for &vt in params {
-            let ty = super::ir::Ty::from_val(vt);
+            let ty = self.val_type_to_ty(vt);
             let (sz, align) = if ty == super::ir::Ty::V128 {
                 (16, 16)
             } else {
@@ -446,65 +793,223 @@ impl X64Module {
     }
 }
 
-fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstVal> {
-    let mut stk: Vec<X64ConstVal> = Vec::new();
+impl GcConstExpr {
+    #[inline]
+    pub fn as_scalar(&self) -> Option<X64ConstVal> {
+        match *self {
+            GcConstExpr::Scalar(v) if v != X64ConstVal::RuntimeGc => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn uses_gc(&self) -> bool {
+        match self {
+            GcConstExpr::Scalar(
+                X64ConstVal::I31(_) | X64ConstVal::ExternI31(_) | X64ConstVal::RuntimeGc,
+            ) => true,
+            GcConstExpr::Scalar(_) | GcConstExpr::GlobalGet(_) => false,
+            GcConstExpr::StructNew { .. }
+            | GcConstExpr::StructNewDefault(_)
+            | GcConstExpr::ArrayNew { .. }
+            | GcConstExpr::ArrayNewDefault { .. }
+            | GcConstExpr::ArrayNewFixed { .. }
+            | GcConstExpr::RefI31(_)
+            | GcConstExpr::AnyConvertExtern(_)
+            | GcConstExpr::ExternConvertAny(_) => true,
+            GcConstExpr::I32Bin(_, a, b) | GcConstExpr::I64Bin(_, a, b) => {
+                a.uses_gc() || b.uses_gc()
+            }
+        }
+    }
+}
+
+fn eval_const_expr_gc(
+    expr: &[Instruction],
+    prior: &[X64ConstVal],
+    type_canon: &[u32],
+    gc_canon_types: &[GcCanonType],
+    const_nodes: &mut usize,
+) -> Res<GcConstExpr> {
+    let mut stk: Vec<GcConstExpr> = Vec::new();
     for i in expr {
+        *const_nodes = const_nodes.saturating_add(1);
+        if *const_nodes > MAX_GC_CONST_NODES {
+            return Err(format!(
+                "x64: aggregate const expression nodes exceed cap {MAX_GC_CONST_NODES}"
+            ));
+        }
         let v = match (i.opcode, &i.immediate) {
             (0x0b, _) => break,
-            (0x41, Immediate::I32(k)) => X64ConstVal::I32(*k),
-            (0x42, Immediate::I64(k)) => X64ConstVal::I64(*k),
-            (0x43, Immediate::F32(b)) => X64ConstVal::F32(*b),
-            (0x44, Immediate::F64(b)) => X64ConstVal::F64(*b),
+            (0x41, Immediate::I32(k)) => GcConstExpr::Scalar(X64ConstVal::I32(*k)),
+            (0x42, Immediate::I64(k)) => GcConstExpr::Scalar(X64ConstVal::I64(*k)),
+            (0x43, Immediate::F32(b)) => GcConstExpr::Scalar(X64ConstVal::F32(*b)),
+            (0x44, Immediate::F64(b)) => GcConstExpr::Scalar(X64ConstVal::F64(*b)),
             (0xfd0c, Immediate::Bytes(bytes)) => {
                 let arr: [u8; 16] = bytes
                     .as_ref()
                     .try_into()
                     .map_err(|_| "invalid v128.const")?;
-                X64ConstVal::V128(arr)
+                GcConstExpr::Scalar(X64ConstVal::V128(arr))
             }
-            (0xd0, _) => X64ConstVal::RefNull,
-            (0xd2, Immediate::Index(f)) => X64ConstVal::FuncRef(*f),
-            (0x23, Immediate::Index(g)) => *prior
-                .get(*g as usize)
-                .ok_or("const global.get out of range")?,
-            (0x6a..=0x6c, _) => match (stk.pop(), stk.pop()) {
-                (Some(X64ConstVal::I32(b)), Some(X64ConstVal::I32(a))) => {
-                    X64ConstVal::I32(match i.opcode {
-                        0x6a => a.wrapping_add(b),
-                        0x6b => a.wrapping_sub(b),
-                        _ => a.wrapping_mul(b),
-                    })
+            (0xd0, _) => GcConstExpr::Scalar(X64ConstVal::RefNull),
+            (0xd2, Immediate::Index(f)) => GcConstExpr::Scalar(X64ConstVal::FuncRef(*f)),
+            (0x23, Immediate::Index(g)) => {
+                let pv = *prior
+                    .get(*g as usize)
+                    .ok_or("const global.get out of range")?;
+                if pv == X64ConstVal::RuntimeGc {
+                    GcConstExpr::GlobalGet(*g)
+                } else {
+                    GcConstExpr::Scalar(pv)
                 }
-                _ => return Err("invalid i32 const expr".into()),
-            },
-            (0x7c..=0x7e, _) => match (stk.pop(), stk.pop()) {
-                (Some(X64ConstVal::I64(b)), Some(X64ConstVal::I64(a))) => {
-                    X64ConstVal::I64(match i.opcode {
-                        0x7c => a.wrapping_add(b),
-                        0x7d => a.wrapping_sub(b),
-                        _ => a.wrapping_mul(b),
-                    })
+            }
+            (0x6a..=0x6c, _) => {
+                let b = stk.pop().ok_or("invalid i32 const expr")?;
+                let a = stk.pop().ok_or("invalid i32 const expr")?;
+                match (a.as_scalar(), b.as_scalar()) {
+                    (Some(X64ConstVal::I32(av)), Some(X64ConstVal::I32(bv))) => {
+                        GcConstExpr::Scalar(X64ConstVal::I32(match i.opcode {
+                            0x6a => av.wrapping_add(bv),
+                            0x6b => av.wrapping_sub(bv),
+                            _ => av.wrapping_mul(bv),
+                        }))
+                    }
+                    _ => GcConstExpr::I32Bin(i.opcode, Box::new(a), Box::new(b)),
                 }
-                _ => return Err("invalid i64 const expr".into()),
-            },
+            }
+            (0x7c..=0x7e, _) => {
+                let b = stk.pop().ok_or("invalid i64 const expr")?;
+                let a = stk.pop().ok_or("invalid i64 const expr")?;
+                match (a.as_scalar(), b.as_scalar()) {
+                    (Some(X64ConstVal::I64(av)), Some(X64ConstVal::I64(bv))) => {
+                        GcConstExpr::Scalar(X64ConstVal::I64(match i.opcode {
+                            0x7c => av.wrapping_add(bv),
+                            0x7d => av.wrapping_sub(bv),
+                            _ => av.wrapping_mul(bv),
+                        }))
+                    }
+                    _ => GcConstExpr::I64Bin(i.opcode, Box::new(a), Box::new(b)),
+                }
+            }
+            (0xfb1c, _) => {
+                let x = stk.pop().ok_or("invalid ref.i31 const expr")?;
+                if let Some(X64ConstVal::I32(k)) = x.as_scalar() {
+                    let enc = ((k as u32) << 1) | 1;
+                    GcConstExpr::Scalar(X64ConstVal::I31(enc))
+                } else {
+                    GcConstExpr::RefI31(Box::new(x))
+                }
+            }
+            (0xfb1a, _) => {
+                let x = stk.pop().ok_or("invalid any.convert_extern const expr")?;
+                match x.as_scalar() {
+                    Some(X64ConstVal::RefNull) => GcConstExpr::Scalar(X64ConstVal::RefNull),
+                    Some(X64ConstVal::ExternI31(enc)) => GcConstExpr::Scalar(X64ConstVal::I31(enc)),
+                    _ => GcConstExpr::AnyConvertExtern(Box::new(x)),
+                }
+            }
+            (0xfb1b, _) => {
+                let x = stk.pop().ok_or("invalid extern.convert_any const expr")?;
+                match x.as_scalar() {
+                    Some(X64ConstVal::RefNull) => GcConstExpr::Scalar(X64ConstVal::RefNull),
+                    Some(X64ConstVal::I31(enc)) => GcConstExpr::Scalar(X64ConstVal::ExternI31(enc)),
+                    _ => GcConstExpr::ExternConvertAny(Box::new(x)),
+                }
+            }
+            (0xfb00, Immediate::Index(ty)) => {
+                let cid = *type_canon
+                    .get(*ty as usize)
+                    .ok_or("struct.new const type out of range")?
+                    as usize;
+                let n_fields = match &gc_canon_types[cid].composite {
+                    GcCompositeInfo::Struct { fields, .. } => fields.len(),
+                    _ => return Err("struct.new const on non-struct type".into()),
+                };
+                if stk.len() < n_fields {
+                    return Err("struct.new const stack underflow".into());
+                }
+                let fields = stk.split_off(stk.len() - n_fields);
+                GcConstExpr::StructNew { ty: *ty, fields }
+            }
+            (0xfb01, Immediate::Index(ty)) => GcConstExpr::StructNewDefault(*ty),
+            (0xfb06, Immediate::Index(ty)) => {
+                let len = stk.pop().ok_or("array.new const stack underflow")?;
+                let init = stk.pop().ok_or("array.new const stack underflow")?;
+                GcConstExpr::ArrayNew {
+                    ty: *ty,
+                    init: Box::new(init),
+                    len: Box::new(len),
+                }
+            }
+            (0xfb07, Immediate::Index(ty)) => {
+                let len = stk.pop().ok_or("array.new_default const stack underflow")?;
+                GcConstExpr::ArrayNewDefault {
+                    ty: *ty,
+                    len: Box::new(len),
+                }
+            }
+            (0xfb08, Immediate::Pair(ty, n)) => {
+                let count = *n as usize;
+                if stk.len() < count {
+                    return Err("array.new_fixed const stack underflow".into());
+                }
+                let elems = stk.split_off(stk.len() - count);
+                GcConstExpr::ArrayNewFixed { ty: *ty, elems }
+            }
             (op, _) => return Err(format!("x64: unsupported const expression opcode {op:#x}")),
         };
         stk.push(v);
     }
-    match stk.as_slice() {
-        [v] => Ok(*v),
-        _ => Err("const expression did not yield one value".into()),
+    if stk.len() == 1 {
+        Ok(stk.pop().unwrap())
+    } else {
+        Err("const expression did not yield one value".into())
+    }
+}
+
+fn is_gc_heap_type(ht: HeapType, type_kinds: &[u8]) -> bool {
+    match ht {
+        HeapType::Any
+        | HeapType::Eq
+        | HeapType::I31
+        | HeapType::Struct
+        | HeapType::Array
+        | HeapType::None
+        | HeapType::NoFunc
+        | HeapType::NoExtern
+        | HeapType::NoExn => true,
+        HeapType::Defined(ti) => type_kinds.get(ti.0 as usize).copied().unwrap_or(0) != 0,
+        _ => false,
+    }
+}
+
+fn is_gc_val_type(vt: ValType, type_kinds: &[u8]) -> bool {
+    matches!(vt, ValType::Ref(rt) if is_gc_heap_type(rt.heap, type_kinds))
+}
+
+fn check_heap_type(ht: HeapType, n_types: usize) -> Res<()> {
+    match ht {
+        HeapType::Extern
+        | HeapType::Func
+        | HeapType::Exn
+        | HeapType::Any
+        | HeapType::Eq
+        | HeapType::I31
+        | HeapType::Struct
+        | HeapType::Array
+        | HeapType::None
+        | HeapType::NoFunc
+        | HeapType::NoExtern
+        | HeapType::NoExn => Ok(()),
+        HeapType::Defined(ti) if (ti.0 as usize) < n_types => Ok(()),
+        _ => Err(format!("x64: unsupported heap type {ht:?}")),
     }
 }
 
 fn check_val_type(vt: ValType, n_types: usize) -> Res<()> {
     match vt {
         ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => Ok(()),
-        ValType::Ref(rt) => match rt.heap {
-            HeapType::Extern | HeapType::Func | HeapType::Exn => Ok(()),
-            HeapType::Defined(ti) if (ti.0 as usize) < n_types => Ok(()),
-            _ => Err(format!("x64: unsupported value type {vt:?}")),
-        },
+        ValType::Ref(rt) => check_heap_type(rt.heap, n_types),
     }
 }
 
@@ -512,34 +1017,49 @@ fn check_block_imm(
     imm: &Immediate,
     type_arity: &[usize],
     type_admitted: &[bool],
+    type_kinds: &[u8],
     total_sig_arity: &mut usize,
+    max_total_sig_arity: usize,
+    uses_gc: &mut bool,
 ) -> Res<()> {
     let n_types = type_admitted.len();
     match imm {
         Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -16 | -17 | -23) => Ok(()),
+        Immediate::Block(-22..=-18 | -15..=-12) => {
+            *uses_gc = true;
+            Ok(())
+        }
         Immediate::Block(i) if *i >= 0 => {
             let idx = *i as usize;
             if !*type_admitted
                 .get(idx)
                 .ok_or("x64: block type index out of range")?
+                || type_kinds.get(idx).copied() != Some(0)
             {
                 return Err(format!(
                     "x64: block type index {idx} uses unsupported value type"
                 ));
             }
             *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
-            if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+            if *total_sig_arity > max_total_sig_arity {
                 return Err(format!(
-                    "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                    "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
                 ));
             }
             Ok(())
         }
-        Immediate::BlockType(vt) => check_val_type(*vt, n_types),
+        Immediate::BlockType(vt) => {
+            check_val_type(*vt, n_types)?;
+            if is_gc_val_type(*vt, type_kinds) {
+                *uses_gc = true;
+            }
+            Ok(())
+        }
         other => Err(format!("x64: unsupported block type {other:?}")),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_supported_opcode(
     op: u16,
     imm: &Immediate,
@@ -547,7 +1067,10 @@ fn check_supported_opcode(
     tag_type_idx: &[u32],
     type_arity: &[usize],
     type_admitted: &[bool],
+    type_kinds: &[u8],
     total_sig_arity: &mut usize,
+    max_total_sig_arity: usize,
+    uses_gc: &mut bool,
 ) -> Res<()> {
     let n_types = type_admitted.len();
     match op {
@@ -566,15 +1089,19 @@ fn check_supported_opcode(
         | 0xd4
         | 0xd5
         | 0xd6 => Ok(()),
+        0xd3 => {
+            *uses_gc = true;
+            Ok(())
+        }
         0x08 => match imm {
             Immediate::Index(ti) => {
                 let &fty = tag_type_idx
                     .get(*ti as usize)
                     .ok_or_else(|| format!("x64: throw tag index {ti} out of range"))?;
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[fty as usize]);
-                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                if *total_sig_arity > max_total_sig_arity {
                     return Err(format!(
-                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                        "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
                     ));
                 }
                 Ok(())
@@ -583,16 +1110,24 @@ fn check_supported_opcode(
         },
         0x1f => match imm {
             Immediate::TryTable(tt) => {
-                check_block_imm(&tt.block, type_arity, type_admitted, total_sig_arity)?;
+                check_block_imm(
+                    &tt.block,
+                    type_arity,
+                    type_admitted,
+                    type_kinds,
+                    total_sig_arity,
+                    max_total_sig_arity,
+                    uses_gc,
+                )?;
                 for c in &tt.catches {
                     if let Some(tag) = c.tag {
                         let &fty = tag_type_idx
                             .get(tag as usize)
                             .ok_or_else(|| format!("x64: catch tag index {tag} out of range"))?;
                         *total_sig_arity = total_sig_arity.saturating_add(type_arity[fty as usize]);
-                        if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                        if *total_sig_arity > max_total_sig_arity {
                             return Err(format!(
-                                "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                                "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
                             ));
                         }
                     }
@@ -607,9 +1142,9 @@ fn check_supported_opcode(
                     .get(*fi as usize)
                     .ok_or_else(|| format!("x64: call function index {fi} out of range"))?;
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[ti as usize]);
-                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                if *total_sig_arity > max_total_sig_arity {
                     return Err(format!(
-                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                        "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
                     ));
                 }
                 Ok(())
@@ -622,37 +1157,47 @@ fn check_supported_opcode(
                 if !*type_admitted
                     .get(idx)
                     .ok_or("x64: call_ref type index out of range")?
+                    || type_kinds.get(idx).copied() != Some(0)
                 {
                     return Err(format!(
                         "x64: call_ref type index {idx} uses unsupported value type"
                     ));
                 }
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
-                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                if *total_sig_arity > max_total_sig_arity {
                     return Err(format!(
-                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                        "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
                     ));
                 }
                 Ok(())
             }
             _ => Err("x64: malformed call_ref immediate".into()),
         },
-        0x02..=0x04 => check_block_imm(imm, type_arity, type_admitted, total_sig_arity),
+        0x02..=0x04 => check_block_imm(
+            imm,
+            type_arity,
+            type_admitted,
+            type_kinds,
+            total_sig_arity,
+            max_total_sig_arity,
+            uses_gc,
+        ),
         0x11 | 0x13 => match imm {
             Immediate::Pair(ti, _) => {
                 let idx = *ti as usize;
                 if !*type_admitted
                     .get(idx)
                     .ok_or("x64: call_indirect type index out of range")?
+                    || type_kinds.get(idx).copied() != Some(0)
                 {
                     return Err(format!(
                         "x64: call_indirect type index {idx} uses unsupported value type"
                     ));
                 }
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
-                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                if *total_sig_arity > max_total_sig_arity {
                     return Err(format!(
-                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                        "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
                     ));
                 }
                 Ok(())
@@ -663,6 +1208,9 @@ fn check_supported_opcode(
             Immediate::Types(tys) => {
                 for &vt in tys.iter() {
                     check_val_type(vt, n_types)?;
+                    if is_gc_val_type(vt, type_kinds) {
+                        *uses_gc = true;
+                    }
                 }
                 Ok(())
             }
@@ -673,8 +1221,13 @@ fn check_supported_opcode(
             _ => Err("x64: malformed memory.size/grow immediate".into()),
         },
         0xd0 => match imm {
-            Immediate::Heap(HeapType::Extern | HeapType::Exn | HeapType::Func) => Ok(()),
-            Immediate::Heap(HeapType::Defined(ti)) if (ti.0 as usize) < n_types => Ok(()),
+            Immediate::Heap(ht) => {
+                check_heap_type(*ht, n_types)?;
+                if is_gc_heap_type(*ht, type_kinds) {
+                    *uses_gc = true;
+                }
+                Ok(())
+            }
             other => Err(format!("x64: unsupported ref.null heap type {other:?}")),
         },
         0x28..=0x3e | 0xfd00..=0xfd0b | 0xfd5c | 0xfd5d => match imm {
@@ -703,7 +1256,51 @@ fn check_supported_opcode(
             Immediate::Index(_) | Immediate::None => Ok(()),
             _ => Err("x64: malformed memory.fill immediate".into()),
         },
+        // Wasm GC (`0xfb00..=0xfb1e`)
+        0xfb00 | 0xfb01 | 0xfb06 | 0xfb07 | 0xfb0b..=0xfb0e | 0xfb10 => {
+            *uses_gc = true;
+            match imm {
+                Immediate::Index(ti) if (*ti as usize) < n_types => Ok(()),
+                _ => Err(format!("x64: malformed GC index immediate for {op:#x}")),
+            }
+        }
+        0xfb02..=0xfb05 | 0xfb08..=0xfb0a | 0xfb11..=0xfb13 => {
+            *uses_gc = true;
+            match imm {
+                Immediate::Pair(ti, _) if (*ti as usize) < n_types => Ok(()),
+                _ => Err(format!("x64: malformed GC pair immediate for {op:#x}")),
+            }
+        }
+        0xfb0f | 0xfb1a..=0xfb1e => {
+            *uses_gc = true;
+            Ok(())
+        }
+        0xfb14..=0xfb17 => {
+            *uses_gc = true;
+            match imm {
+                Immediate::Heap(ht) => check_heap_type(*ht, n_types),
+                _ => Err(format!(
+                    "x64: malformed GC ref.test/cast immediate for {op:#x}"
+                )),
+            }
+        }
+        0xfb18 | 0xfb19 => {
+            *uses_gc = true;
+            match imm {
+                Immediate::Cast { from, to, .. } => {
+                    check_heap_type(*from, n_types)?;
+                    check_heap_type(*to, n_types)
+                }
+                _ => Err(format!("x64: malformed br_on_cast immediate for {op:#x}")),
+            }
+        }
         0xfd0c..=0xfd53 | 0xfd5e..=0xfdff | 0xfa00..=0xfa13 => Ok(()),
+        // Wasm Threads / Atomics (`0xfe00..=0xfe03`, `0xfe10..=0xfe4e`)
+        0xfe03 => Ok(()),
+        0xfe00..=0xfe02 | 0xfe10..=0xfe4e => match imm {
+            Immediate::MemArg { .. } => Ok(()),
+            _ => Err(format!("x64: malformed atomic immediate for {op:#x}")),
+        },
         _ => Err(format!("x64: unsupported opcode {op:#x}")),
     }
 }
@@ -896,12 +1493,123 @@ pub struct BodyAdmitSummary {
     pub uses_exceptions: bool,
     pub uses_bulk_data: bool,
     pub uses_bulk_elem: bool,
+    pub uses_gc: bool,
+    pub uses_threads: bool,
     pub dyn_table_ops: Vec<u32>,
     pub sig_arity: usize,
     pub br_table_entries: usize,
     pub g_reads: Vec<(u32, u32)>,
     pub g_writes: Vec<(u32, u32)>,
     pub ci_pairs: Vec<(u32, u32)>,
+}
+
+fn rewrite_subtype_indices(
+    ty: &mut SubType,
+    base: usize,
+    end: usize,
+    preceding: &[u32],
+) -> Res<()> {
+    let map_idx = |idx: TypeIdx| -> Res<TypeIdx> {
+        let n = idx.0 as usize;
+        if n < base {
+            Ok(TypeIdx(preceding[n]))
+        } else if n < end {
+            let local = u32::try_from(n - base).map_err(|_| "x64: rec group too large")?;
+            Ok(TypeIdx(0x8000_0000 | local))
+        } else {
+            Err("x64: type reference outside recursion group".into())
+        }
+    };
+    if let Some(ref mut s) = ty.supertype {
+        *s = map_idx(*s)?;
+    }
+    let map_val = |v: &mut ValType| -> Res<()> {
+        if let ValType::Ref(r) = v
+            && let HeapType::Defined(ref mut i) | HeapType::ExactDefined(ref mut i) = r.heap
+        {
+            *i = map_idx(*i)?;
+        }
+        Ok(())
+    };
+    let map_field = |f: &mut FieldType| -> Res<()> {
+        if let StorageType::Val(ref mut v) = f.storage {
+            map_val(v)?;
+        }
+        Ok(())
+    };
+    match &mut ty.composite {
+        CompositeType::Func(ft) => {
+            for v in ft.params.iter_mut().chain(&mut ft.results) {
+                map_val(v)?;
+            }
+        }
+        CompositeType::Struct(st) => {
+            for f in &mut st.fields {
+                map_field(f)?;
+            }
+        }
+        CompositeType::Array(at) => map_field(&mut at.field)?,
+        CompositeType::Cont(_) => {
+            return Err("x64: stack-switching continuation types are not supported".into());
+        }
+    }
+    Ok(())
+}
+
+fn storage_to_gc_kind(st: StorageType, type_kinds: &[u8]) -> Res<GcStorageKind> {
+    Ok(match st {
+        StorageType::I8 => GcStorageKind::I8,
+        StorageType::I16 => GcStorageKind::I16,
+        StorageType::Val(vt) => match vt {
+            ValType::I32 => GcStorageKind::I32,
+            ValType::I64 => GcStorageKind::I64,
+            ValType::F32 => GcStorageKind::F32,
+            ValType::F64 => GcStorageKind::F64,
+            ValType::V128 => GcStorageKind::V128,
+            ValType::Ref(rt) => match rt.heap {
+                HeapType::Any
+                | HeapType::Eq
+                | HeapType::I31
+                | HeapType::Struct
+                | HeapType::Array
+                | HeapType::None => GcStorageKind::GcRef,
+                HeapType::Extern | HeapType::NoExtern => GcStorageKind::ExternRef,
+                HeapType::Func | HeapType::NoFunc | HeapType::Exn | HeapType::NoExn => {
+                    GcStorageKind::OtherRef
+                }
+                HeapType::Defined(ti) => {
+                    if type_kinds.get(ti.0 as usize).copied().unwrap_or(0) == 0 {
+                        GcStorageKind::OtherRef
+                    } else {
+                        GcStorageKind::GcRef
+                    }
+                }
+                _ => return Err(format!("x64: unsupported GC field heap type {:?}", rt.heap)),
+            },
+        },
+    })
+}
+
+fn ref_family_from_heap(ht: HeapType, type_kinds: &[u8]) -> Res<GcRefFamily> {
+    Ok(match ht {
+        HeapType::Func | HeapType::NoFunc => GcRefFamily::Func,
+        HeapType::Extern | HeapType::NoExtern => GcRefFamily::Extern,
+        HeapType::Exn | HeapType::NoExn => GcRefFamily::Exn,
+        HeapType::Any
+        | HeapType::Eq
+        | HeapType::I31
+        | HeapType::Struct
+        | HeapType::Array
+        | HeapType::None => GcRefFamily::Any,
+        HeapType::Defined(ti) => {
+            if type_kinds.get(ti.0 as usize).copied().unwrap_or(0) == 0 {
+                GcRefFamily::Func
+            } else {
+                GcRefFamily::Any
+            }
+        }
+        _ => return Err(format!("x64: unsupported heap type {ht:?}")),
+    })
 }
 
 /// Enforces the admission contract and builds lean `X64Module` metadata (Blot cdylib target).
@@ -940,35 +1648,123 @@ pub fn admit_x64_module_for_target_with_summaries(
             decoded.tags.len()
         ));
     }
-    for group in &decoded.type_groups {
+    let mut uses_gc = false;
+    let n_types = decoded.types.len();
+    if n_types > MAX_MODULE_TYPES {
+        return Err(format!(
+            "x64: module declares {n_types} types (max {MAX_MODULE_TYPES})"
+        ));
+    }
+    let synthetic_type_groups: Vec<wtime_types::TypeGroup> =
+        if decoded.type_groups.is_empty() && !decoded.types.is_empty() {
+            decoded
+                .types
+                .iter()
+                .map(|ft| wtime_types::TypeGroup {
+                    explicit: false,
+                    types: vec![SubType {
+                        final_: true,
+                        supertype: None,
+                        descriptor: None,
+                        describes: None,
+                        composite: CompositeType::Func(ft.clone()),
+                    }],
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let type_groups: &[wtime_types::TypeGroup] = if decoded.type_groups.is_empty() {
+        &synthetic_type_groups
+    } else {
+        &decoded.type_groups
+    };
+    let mut type_kinds: Vec<u8> = Vec::with_capacity(n_types);
+    for group in type_groups {
         if group.explicit {
-            return Err("x64: GC recursive type groups are not supported".into());
+            uses_gc = true;
         }
         for st in &group.types {
-            if !matches!(st.composite, CompositeType::Func(_))
-                || !st.final_
-                || st.supertype.is_some()
-                || st.descriptor.is_some()
-                || st.describes.is_some()
-            {
-                return Err(
-                    "x64: GC/subtyping/non-final/descriptor types are not supported".into(),
-                );
+            if st.descriptor.is_some() || st.describes.is_some() {
+                return Err("x64: custom descriptor types are not supported".into());
+            }
+            if !st.final_ || st.supertype.is_some() {
+                uses_gc = true;
+            }
+            match &st.composite {
+                CompositeType::Func(_) => type_kinds.push(0),
+                CompositeType::Struct(s) => {
+                    if s.fields.len() > MAX_GC_STRUCT_FIELDS {
+                        return Err(format!(
+                            "x64: GC struct field count ({}) exceeds cap {MAX_GC_STRUCT_FIELDS}",
+                            s.fields.len()
+                        ));
+                    }
+                    uses_gc = true;
+                    type_kinds.push(1);
+                }
+                CompositeType::Array(_) => {
+                    uses_gc = true;
+                    type_kinds.push(2);
+                }
+                CompositeType::Cont(_) => {
+                    return Err("x64: stack-switching continuation types are not supported".into());
+                }
             }
         }
     }
-    if decoded.memories.len() > 1 + MAX_EXTRA_MEMORIES {
+    if type_kinds.len() != n_types {
+        return Err("x64: decoded type_groups count mismatch with types".into());
+    }
+    let is_store = target == X64Target::StoreCdylib;
+    // Pre-partition non-function imports (admitted ONLY for `StoreCdylib`).
+    let mut imp_mem_defs: Vec<(String, String, wtime_types::MemoryType)> = Vec::new();
+    let mut imp_table_defs: Vec<(String, String, wtime_types::TableType)> = Vec::new();
+    let mut imp_global_defs: Vec<(String, String, wtime_types::GlobalType)> = Vec::new();
+    let mut imp_tag_defs: Vec<(String, String, wtime_types::TagType)> = Vec::new();
+    let mut import_order: Vec<(u8, u32)> = Vec::new();
+    let mut imp_func_ord: u32 = 0;
+    for imp in &decoded.imports {
+        match &imp.kind {
+            ImportKind::Func(_) => {
+                if is_store {
+                    import_order.push((0, imp_func_ord));
+                    imp_func_ord += 1;
+                }
+            }
+            ImportKind::Table(tt) if is_store => {
+                import_order.push((1, imp_table_defs.len() as u32));
+                imp_table_defs.push((imp.module.clone(), imp.name.clone(), *tt));
+            }
+            ImportKind::Memory(mt) if is_store => {
+                import_order.push((2, imp_mem_defs.len() as u32));
+                imp_mem_defs.push((imp.module.clone(), imp.name.clone(), *mt));
+            }
+            ImportKind::Global(gt) if is_store => {
+                import_order.push((3, imp_global_defs.len() as u32));
+                imp_global_defs.push((imp.module.clone(), imp.name.clone(), *gt));
+            }
+            ImportKind::Tag(tt) if is_store => {
+                import_order.push((4, imp_tag_defs.len() as u32));
+                imp_tag_defs.push((imp.module.clone(), imp.name.clone(), *tt));
+            }
+            _ => {
+                return Err(format!(
+                    "x64: only plain function imports are supported (got {:?}::{:?})",
+                    imp.module, imp.name
+                ));
+            }
+        }
+    }
+    let total_mems = imp_mem_defs.len() + decoded.memories.len();
+    if total_mems > 1 + MAX_EXTRA_MEMORIES {
         return Err(format!(
-            "x64: memory count ({}) exceeds cap {}",
-            decoded.memories.len(),
+            "x64: memory count ({total_mems}) exceeds cap {}",
             1 + MAX_EXTRA_MEMORIES
         ));
     }
-    let check_mem = |mi: usize, mt: &wtime_types::MemoryType| -> Res<(u64, u64, bool)> {
+    let check_mem = |mi: usize, mt: &wtime_types::MemoryType| -> Res<(u64, u64, bool, bool)> {
         let is_mem64 = mt.index_type == IndexType::I64;
-        if mt.shared {
-            return Err(format!("x64: shared memory {mi} is not supported"));
-        }
         if mt.page_size_log2 != 16 {
             return Err(format!(
                 "x64: custom memory page size (2^{}) on memory {mi} is not supported",
@@ -996,72 +1792,250 @@ pub fn admit_x64_module_for_target_with_summaries(
                 mt.limits.min
             ));
         }
-        Ok((mt.limits.min, max_p, is_mem64))
+        Ok((mt.limits.min, max_p, is_mem64, mt.shared))
     };
-    let (memory, memory64, fixed32) = if let Some(mt) = decoded.memories.first() {
-        let (min_p, max_p, is_mem64) = check_mem(0, mt)?;
-        let fixed = if min_p == max_p {
-            min_p.checked_mul(65_536)
+    let mut uses_threads = false;
+    let mut all_mems_checked: Vec<(u64, u64, bool, bool)> = Vec::with_capacity(total_mems);
+    let mut all_mem_declared_max: Vec<Option<u64>> = Vec::with_capacity(total_mems);
+    let mut imported_mems = Vec::with_capacity(imp_mem_defs.len());
+    for (mi, (m_mod, m_name, mt)) in imp_mem_defs.iter().enumerate() {
+        let (min_p, max_p, m64, is_shared) = check_mem(mi, mt)?;
+        uses_threads |= is_shared;
+        all_mems_checked.push((min_p, max_p, m64, is_shared));
+        all_mem_declared_max.push(mt.limits.max);
+        imported_mems.push((
+            m_mod.clone(),
+            m_name.clone(),
+            min_p,
+            max_p,
+            mt.limits.max,
+            m64,
+            is_shared,
+        ));
+    }
+    for (di, mt) in decoded.memories.iter().enumerate() {
+        let mi = imp_mem_defs.len() + di;
+        let (min_p, max_p, m64, is_shared) = check_mem(mi, mt)?;
+        uses_threads |= is_shared;
+        all_mems_checked.push((min_p, max_p, m64, is_shared));
+        all_mem_declared_max.push(mt.limits.max);
+    }
+    let (memory, memory64, memory_shared, fixed32) =
+        if let Some(&(min_p, max_p, is_mem64, is_shared)) = all_mems_checked.first() {
+            let fixed = if !is_store && min_p == max_p {
+                min_p.checked_mul(65_536)
+            } else {
+                None
+            };
+            (Some((min_p, max_p)), is_mem64, is_shared, fixed)
         } else {
-            None
+            (None, false, false, None)
         };
-        (Some((min_p, max_p)), is_mem64, fixed)
-    } else {
-        (None, false, None)
-    };
-    let mut extra_memories = Vec::with_capacity(decoded.memories.len().saturating_sub(1));
-    for (mi, mt) in decoded.memories.iter().enumerate().skip(1) {
-        let (min_pages, max_pages, m64) = check_mem(mi, mt)?;
+    let mut extra_memories = Vec::with_capacity(all_mems_checked.len().saturating_sub(1));
+    for &(min_pages, max_pages, m64, is_shared) in all_mems_checked.iter().skip(1) {
         extra_memories.push(ExtraMemMeta {
             min_pages,
             max_pages,
             memory64: m64,
+            shared: is_shared,
         });
     }
 
-    // Pre-validate and intern module types ONCE into canonical `u32` IDs + cached arity/admissibility
-    // so every function declaration, block type, table slot, and `call_indirect` site runs in O(1)
-    // with zero per-function or per-slot `FuncType` cloning/re-scanning. Also bound total
-    // declared type arity upfront before cloning `decoded.types` into `X64Module`.
-    if decoded.types.len() > MAX_MODULE_TYPES {
-        return Err(format!(
-            "x64: module declares {} types (max {MAX_MODULE_TYPES})",
-            decoded.types.len()
-        ));
-    }
-    let mut sig_to_canon: HashMap<&FuncType, u32> = HashMap::with_capacity(decoded.types.len());
-    let mut type_canon: Vec<u32> = Vec::with_capacity(decoded.types.len());
-    let mut type_arity: Vec<usize> = Vec::with_capacity(decoded.types.len());
-    let mut type_admitted: Vec<bool> = Vec::with_capacity(decoded.types.len());
+    // Canonicalize all `decoded.type_groups` into structural rec-group canonical IDs
+    // (exact match with `wtime-runtime/src/canonical.rs`) and compute `GcCanonType` layouts
+    // and Cohen supertype displays.
+    let mut group_to_canon: HashMap<Vec<SubType>, Vec<u32>> =
+        HashMap::with_capacity(type_groups.len());
+    let mut type_canon: Vec<u32> = Vec::with_capacity(n_types);
+    let mut gc_canon_types: Vec<GcCanonType> = Vec::new();
+    let mut type_arity: Vec<usize> = Vec::with_capacity(n_types);
+    let mut type_admitted: Vec<bool> = Vec::with_capacity(n_types);
     let mut declared_type_arity: usize = 0;
-    let n_types = decoded.types.len();
-    for (ti, fty) in decoded.types.iter().enumerate() {
+    let mut has_func_subtyping = false;
+    let mut flat_ti = 0usize;
+    for group in type_groups {
         if let Some(b) = budget
-            && (ti & 4095) == 4095
+            && (flat_ti & 4095) == 4095
         {
             b.check_deadline()?;
         }
-        let arity = fty.params.len().saturating_add(fty.results.len());
-        declared_type_arity = declared_type_arity.saturating_add(arity);
-        if declared_type_arity > MAX_TOTAL_SIG_ARITY {
-            return Err(format!(
-                "x64: total type-section signature arity exceeds cap ({MAX_TOTAL_SIG_ARITY})"
-            ));
+        let base = type_canon.len();
+        let end = base + group.types.len();
+        let mut normalized = group.types.clone();
+        for st in &mut normalized {
+            rewrite_subtype_indices(st, base, end, &type_canon)?;
         }
-        let next_id = sig_to_canon.len() as u32;
-        let cid = *sig_to_canon.entry(fty).or_insert(next_id);
-        type_canon.push(cid);
-        type_arity.push(arity);
-        type_admitted.push(
-            fty.params
-                .iter()
-                .chain(&fty.results)
-                .all(|&vt| check_val_type(vt, n_types).is_ok()),
-        );
+        let ids = if let Some(existing) = group_to_canon.get(&normalized) {
+            existing.clone()
+        } else {
+            let first = gc_canon_types.len() as u32;
+            let ids: Vec<u32> = (0..group.types.len() as u32).map(|i| first + i).collect();
+            let resolve_norm = |idx: TypeIdx| -> u32 {
+                if (idx.0 & 0x8000_0000) != 0 {
+                    first + (idx.0 & 0x7fff_ffff)
+                } else {
+                    idx.0
+                }
+            };
+            // First push skeletons with resolved supertype & composite, then fill supertype displays.
+            for (local_i, (orig_st, norm_st)) in group.types.iter().zip(&normalized).enumerate() {
+                let cid = first + local_i as u32;
+                let super_cid = norm_st.supertype.map(resolve_norm);
+                let composite = match &orig_st.composite {
+                    CompositeType::Func(_) => {
+                        if !orig_st.final_ || super_cid.is_some() {
+                            has_func_subtyping = true;
+                        }
+                        GcCompositeInfo::Func
+                    }
+                    CompositeType::Struct(s) => {
+                        let mut off: u32 = 8;
+                        let mut fields = Vec::with_capacity(s.fields.len());
+                        let mut gc_ref_offs = Vec::new();
+                        let mut ext_ref_offs = Vec::new();
+                        for f in &s.fields {
+                            let sk = storage_to_gc_kind(f.storage, &type_kinds)?;
+                            let align = sk.align();
+                            off = off
+                                .checked_add(align - 1)
+                                .map(|v| v & !(align - 1))
+                                .ok_or("x64: GC struct offset overflow")?;
+                            if sk == GcStorageKind::GcRef {
+                                gc_ref_offs.push(off);
+                            } else if sk == GcStorageKind::ExternRef {
+                                ext_ref_offs.push(off);
+                            }
+                            fields.push(GcStructField {
+                                offset: off,
+                                storage: sk,
+                                mutable: f.mutable,
+                            });
+                            off = off
+                                .checked_add(sk.byte_size())
+                                .ok_or("x64: GC struct size overflow")?;
+                        }
+                        let total_bytes = off
+                            .checked_add(7)
+                            .map(|v| (v & !7).max(8))
+                            .ok_or("x64: GC struct aligned size overflow")?;
+                        GcCompositeInfo::Struct {
+                            fields,
+                            total_bytes,
+                            gc_ref_offs,
+                            ext_ref_offs,
+                        }
+                    }
+                    CompositeType::Array(at) => GcCompositeInfo::Array {
+                        elem: storage_to_gc_kind(at.field.storage, &type_kinds)?,
+                        mutable: at.field.mutable,
+                    },
+                    CompositeType::Cont(_) => unreachable!(),
+                };
+                gc_canon_types.push(GcCanonType {
+                    canon_id: cid,
+                    is_final: orig_st.final_,
+                    supertype: super_cid,
+                    depth: 0,
+                    display: [u32::MAX; GC_DISPLAY_LEN],
+                    supertypes_all: Vec::new(),
+                    composite,
+                });
+            }
+            // Compute supertype chain & Cohen display for each newly created canonical type.
+            for local_i in 0..group.types.len() {
+                let cid = first + local_i as u32;
+                let mut rev_chain = Vec::new();
+                let mut cur = Some(cid);
+                while let Some(id) = cur {
+                    if rev_chain.len() > MAX_GC_SUBTYPE_DEPTH {
+                        return Err(format!(
+                            "x64: GC supertype depth exceeds cap {MAX_GC_SUBTYPE_DEPTH}"
+                        ));
+                    }
+                    rev_chain.push(id);
+                    cur = gc_canon_types[id as usize].supertype;
+                }
+                rev_chain.reverse();
+                let depth = (rev_chain.len() - 1) as u32;
+                let mut display = [u32::MAX; GC_DISPLAY_LEN];
+                for (k, &anc) in rev_chain.iter().take(GC_DISPLAY_LEN).enumerate() {
+                    display[k] = anc;
+                }
+                let entry = &mut gc_canon_types[cid as usize];
+                entry.depth = depth;
+                entry.display = display;
+                entry.supertypes_all = rev_chain;
+            }
+            group_to_canon.insert(normalized, ids.clone());
+            ids
+        };
+        for (st, cid) in group.types.iter().zip(ids) {
+            type_canon.push(cid);
+            let (arity, admitted) = match &st.composite {
+                CompositeType::Func(fty) => {
+                    let ar = fty.params.len().saturating_add(fty.results.len());
+                    let ok = fty.params.iter().chain(&fty.results).all(|&vt| {
+                        if is_gc_val_type(vt, &type_kinds) {
+                            uses_gc = true;
+                        }
+                        check_val_type(vt, n_types).is_ok()
+                    });
+                    (ar, ok)
+                }
+                CompositeType::Struct(s) => {
+                    let ok = s.fields.iter().all(|f| match f.storage {
+                        StorageType::I8 | StorageType::I16 => true,
+                        StorageType::Val(vt) => check_val_type(vt, n_types).is_ok(),
+                    });
+                    (s.fields.len(), ok)
+                }
+                CompositeType::Array(a) => {
+                    let ok = match a.field.storage {
+                        StorageType::I8 | StorageType::I16 => true,
+                        StorageType::Val(vt) => check_val_type(vt, n_types).is_ok(),
+                    };
+                    (1, ok)
+                }
+                CompositeType::Cont(_) => (0, false),
+            };
+            let max_total_sig_arity = if is_store {
+                STORE_MAX_TOTAL_SIG_ARITY
+            } else {
+                MAX_TOTAL_SIG_ARITY
+            };
+            declared_type_arity = declared_type_arity.saturating_add(arity);
+            if declared_type_arity > max_total_sig_arity {
+                return Err(format!(
+                    "x64: total type-section signature arity exceeds cap ({max_total_sig_arity})"
+                ));
+            }
+            type_arity.push(arity);
+            type_admitted.push(admitted);
+            flat_ti += 1;
+        }
     }
 
-    let mut tags: Vec<u32> = Vec::with_capacity(decoded.tags.len());
-    for (ti, tag) in decoded.tags.iter().enumerate() {
+    let mut tags: Vec<u32> = Vec::with_capacity(imp_tag_defs.len() + decoded.tags.len());
+    let mut imported_tags = Vec::with_capacity(imp_tag_defs.len());
+    for (ti, (t_mod, t_name, tag)) in imp_tag_defs.iter().enumerate() {
+        let fti = tag.function.0 as usize;
+        let fty = decoded
+            .types
+            .get(fti)
+            .ok_or_else(|| format!("x64: imported tag {ti} type index {fti} out of range"))?;
+        if !fty.results.is_empty() {
+            return Err(format!("x64: imported tag {ti} must have empty results"));
+        }
+        if !type_admitted[fti] {
+            return Err(format!(
+                "x64: imported tag {ti} type index {fti} uses unsupported value type"
+            ));
+        }
+        tags.push(tag.function.0);
+        imported_tags.push((t_mod.clone(), t_name.clone(), tag.function.0));
+    }
+    for (di, tag) in decoded.tags.iter().enumerate() {
+        let ti = imp_tag_defs.len() + di;
         let fti = tag.function.0 as usize;
         let fty = decoded
             .types
@@ -1086,6 +2060,16 @@ pub fn admit_x64_module_for_target_with_summaries(
             decoded.code.len()
         ));
     }
+    let max_total_locals = if is_store {
+        STORE_MAX_TOTAL_LOCALS
+    } else {
+        MAX_TOTAL_LOCALS
+    };
+    let max_total_sig_arity = if is_store {
+        STORE_MAX_TOTAL_SIG_ARITY
+    } else {
+        MAX_TOTAL_SIG_ARITY
+    };
     let mut precheck_total_locals = 0usize;
     let mut total_sig_arity = 0usize;
     for (bi, body) in decoded.code.iter().enumerate() {
@@ -1119,15 +2103,15 @@ pub fn admit_x64_module_for_target_with_summaries(
             ));
         }
         precheck_total_locals = precheck_total_locals.saturating_add(n_locals);
-        if precheck_total_locals > MAX_TOTAL_LOCALS {
+        if precheck_total_locals > max_total_locals {
             return Err(format!(
-                "x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"
+                "x64: module total locals exceeds cap {max_total_locals}"
             ));
         }
         total_sig_arity = total_sig_arity.saturating_add(type_arity[ti]);
-        if total_sig_arity > MAX_TOTAL_SIG_ARITY {
+        if total_sig_arity > max_total_sig_arity {
             return Err(format!(
-                "x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                "x64: module expanded signature arity exceeds cap {max_total_sig_arity}"
             ));
         }
     }
@@ -1146,6 +2130,11 @@ pub fn admit_x64_module_for_target_with_summaries(
         }
         let ti_u32 = match imp.kind {
             ImportKind::Func(t) => t.0,
+            ImportKind::Memory(_) | ImportKind::Table(_) | ImportKind::Global(_) | ImportKind::Tag(_)
+                if is_store =>
+            {
+                continue;
+            }
             _ => {
                 return Err(format!(
                     "x64: only plain function imports are supported (got {:?}::{:?})",
@@ -1165,9 +2154,9 @@ pub fn admit_x64_module_for_target_with_summaries(
             ));
         }
         total_sig_arity = total_sig_arity.saturating_add(type_arity[ti]);
-        if total_sig_arity > MAX_TOTAL_SIG_ARITY {
+        if total_sig_arity > max_total_sig_arity {
             return Err(format!(
-                "x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                "x64: module expanded signature arity exceeds cap {max_total_sig_arity}"
             ));
         }
         match target {
@@ -1175,6 +2164,7 @@ pub fn admit_x64_module_for_target_with_summaries(
             X64Target::StandaloneExec => {
                 check_standalone_import_sig(&imp.module, &imp.name, fty, memory64)?;
             }
+            X64Target::StoreCdylib => {}
         }
         imports.push((imp.module.clone(), imp.name.clone()));
         func_type_idx.push(ti_u32);
@@ -1196,42 +2186,85 @@ pub fn admit_x64_module_for_target_with_summaries(
     }
 
     // Tables: classify metadata first (32-bit/64-bit funcref, typed concrete-func ref, externref,
-    // exnref tables, with optional explicit table initializers); partitioning into static funcref,
-    // inline fixed externref, and dynamic mmap-backed tables happens right after scanning bodies.
+    // exnref, and Wasm GC ref tables, with optional explicit table initializers); partitioning
+    // into static funcref, inline fixed externref, and dynamic mmap-backed tables happens right
+    // after scanning bodies.
+    let mut const_nodes = 0usize;
     struct RawTableMeta {
         min_len: u32,
         eff_max_len: u32,
         is_funcref: bool,
         is_table64: bool,
+        ref_family: GcRefFamily,
         init_val: u64,
+        has_runtime_init: bool,
         fixed_inline_extern_eligible: bool,
     }
-    let mut raw_tables: Vec<RawTableMeta> = Vec::with_capacity(decoded.tables.len());
-    let mut table_lens: Vec<u32> = Vec::with_capacity(decoded.tables.len());
-    let mut table_is64: Vec<bool> = Vec::with_capacity(decoded.tables.len());
+    let total_tables = imp_table_defs.len() + decoded.tables.len();
+    let mut raw_tables: Vec<RawTableMeta> = Vec::with_capacity(total_tables);
+    let mut table_lens: Vec<u32> = Vec::with_capacity(total_tables);
+    let mut table_is64: Vec<bool> = Vec::with_capacity(total_tables);
+    let mut imported_tables = Vec::with_capacity(imp_table_defs.len());
+    let mut runtime_table_inits: Vec<(u32, GcConstExpr)> = Vec::new();
     let mut total_funcref_slots: usize = 0;
     let mut total_extern_slots: usize = 0;
-    for (ti, tt) in decoded.tables.iter().enumerate() {
-        let _ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
+    let all_table_types: Vec<(bool, wtime_types::TableType)> = imp_table_defs
+        .iter()
+        .map(|(m, n, tt)| {
+            imported_tables.push((m.clone(), n.clone(), *tt));
+            (true, *tt)
+        })
+        .chain(decoded.tables.iter().map(|tt| (false, *tt)))
+        .collect();
+    for (ti, (is_imp_tbl, tt)) in all_table_types.iter().enumerate() {
+        let ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
         let is_table64 = tt.index_type == IndexType::I64;
-        let init_val = if let Some(init_expr) = decoded.table_inits.get(ti).and_then(|o| o.as_ref())
+        check_heap_type(tt.element.heap, n_types)?;
+        if is_gc_heap_type(tt.element.heap, &type_kinds) {
+            uses_gc = true;
+        }
+        let ref_family = ref_family_from_heap(tt.element.heap, &type_kinds)?;
+        let (init_val, has_runtime_init) = if !*is_imp_tbl
+            && let Some(init_expr) = decoded
+                .table_inits
+                .get(ti - imp_table_defs.len())
+                .and_then(|o| o.as_ref())
         {
-            match eval_const_expr(init_expr, &[])? {
-                X64ConstVal::RefNull => 0u64,
-                X64ConstVal::FuncRef(f) => u64::from(f)
-                    .checked_add(1)
-                    .ok_or("x64: table init funcref overflow")?,
-                other => {
+            let expr = eval_const_expr_gc(
+                init_expr,
+                &[],
+                &type_canon,
+                &gc_canon_types,
+                &mut const_nodes,
+            )?;
+            if expr.uses_gc() {
+                uses_gc = true;
+            }
+            match expr.as_scalar() {
+                Some(X64ConstVal::RefNull) => (0u64, false),
+                Some(X64ConstVal::FuncRef(f)) => (
+                    u64::from(f)
+                        .checked_add(1)
+                        .ok_or("x64: table init funcref overflow")?,
+                    false,
+                ),
+                Some(X64ConstVal::I31(enc)) => (u64::from(enc), false),
+                Some(X64ConstVal::ExternI31(enc)) => (GC_EXT_I31_TAG_HI | u64::from(enc), false),
+                None => {
+                    runtime_table_inits.push((ti_u32, expr));
+                    (0u64, true)
+                }
+                Some(other) => {
                     return Err(format!(
                         "x64: unsupported explicit table {ti} initializer {other:?}"
                     ));
                 }
             }
         } else {
-            0u64
+            (0u64, false)
         };
-        match tt.element.heap {
-            HeapType::Func => {
+        match ref_family {
+            GcRefFamily::Func => {
                 let len = u32::try_from(tt.limits.min)
                     .ok()
                     .filter(|&n| n <= MAX_FUNCREF_TABLE_SLOTS)
@@ -1254,38 +2287,13 @@ pub fn admit_x64_module_for_target_with_summaries(
                     eff_max_len: eff_max,
                     is_funcref: true,
                     is_table64,
+                    ref_family,
                     init_val,
+                    has_runtime_init,
                     fixed_inline_extern_eligible: false,
                 });
             }
-            HeapType::Defined(ct) if (ct.0 as usize) < n_types => {
-                let len = u32::try_from(tt.limits.min)
-                    .ok()
-                    .filter(|&n| n <= MAX_FUNCREF_TABLE_SLOTS)
-                    .ok_or_else(|| format!("x64: funcref table {ti} min ({}) exceeds cap {MAX_FUNCREF_TABLE_SLOTS}", tt.limits.min))?;
-                total_funcref_slots = total_funcref_slots.saturating_add(len as usize);
-                if total_funcref_slots > MAX_TOTAL_FUNCREF_SLOTS {
-                    return Err(format!(
-                        "x64: aggregate funcref table slots ({total_funcref_slots}) exceed cap {MAX_TOTAL_FUNCREF_SLOTS}"
-                    ));
-                }
-                let eff_max = tt
-                    .limits
-                    .max
-                    .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
-                    .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
-                table_lens.push(len);
-                table_is64.push(is_table64);
-                raw_tables.push(RawTableMeta {
-                    min_len: len,
-                    eff_max_len: eff_max,
-                    is_funcref: true,
-                    is_table64,
-                    init_val,
-                    fixed_inline_extern_eligible: false,
-                });
-            }
-            HeapType::Extern | HeapType::Exn => {
+            GcRefFamily::Extern | GcRefFamily::Exn => {
                 let len = u32::try_from(tt.limits.min)
                     .ok()
                     .filter(|&n| n <= MAX_DYN_TABLE_SLOTS)
@@ -1296,6 +2304,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                         )
                     })?;
                 let fixed_inline_ok = init_val == 0
+                    && !has_runtime_init
                     && tt.limits.max == Some(tt.limits.min)
                     && tt.limits.min <= u64::from(MAX_EXTERN_TABLE_SLOTS);
                 if fixed_inline_ok {
@@ -1313,42 +2322,96 @@ pub fn admit_x64_module_for_target_with_summaries(
                     eff_max_len: eff_max,
                     is_funcref: false,
                     is_table64,
+                    ref_family,
                     init_val,
+                    has_runtime_init,
                     fixed_inline_extern_eligible: fixed_inline_ok
                         && total_extern_slots <= MAX_TOTAL_EXTERN_SLOTS,
                 });
             }
-            other => {
-                return Err(format!(
-                    "x64: unsupported table element type {other:?} on table {ti}"
-                ));
+            GcRefFamily::Any => {
+                let len = u32::try_from(tt.limits.min)
+                    .ok()
+                    .filter(|&n| n <= MAX_DYN_TABLE_SLOTS)
+                    .ok_or_else(|| {
+                        format!(
+                            "x64: GC ref table {ti} min ({}) exceeds cap {MAX_DYN_TABLE_SLOTS}",
+                            tt.limits.min
+                        )
+                    })?;
+                let eff_max = tt
+                    .limits
+                    .max
+                    .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
+                    .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
+                table_lens.push(len);
+                table_is64.push(is_table64);
+                raw_tables.push(RawTableMeta {
+                    min_len: len,
+                    eff_max_len: eff_max,
+                    is_funcref: false,
+                    is_table64,
+                    ref_family,
+                    init_val,
+                    has_runtime_init,
+                    fixed_inline_extern_eligible: false,
+                });
             }
         }
     }
 
-    if decoded.globals.len() > MAX_GLOBALS {
+    let total_globals = imp_global_defs.len() + decoded.globals.len();
+    if total_globals > MAX_GLOBALS {
         return Err(format!(
-            "x64: module global count ({}) exceeds cap {MAX_GLOBALS}",
-            decoded.globals.len()
+            "x64: module global count ({total_globals}) exceeds cap {MAX_GLOBALS}",
         ));
     }
 
-    // Globals: evaluate all initializers; track which globals are written or exported-mutable.
-    let mut globals = Vec::with_capacity(decoded.globals.len());
-    let mut global_inits = Vec::with_capacity(decoded.globals.len());
-    for (gi, g) in decoded.globals.iter().enumerate() {
+    // Globals: prepend imported globals (StoreCdylib only), then evaluate all defined initializers.
+    let mut globals = Vec::with_capacity(total_globals);
+    let mut global_inits = Vec::with_capacity(total_globals);
+    let mut imported_globals = Vec::with_capacity(imp_global_defs.len());
+    let mut runtime_global_inits: Vec<(usize, GcConstExpr)> = Vec::new();
+    for (g_mod, g_name, gt) in &imp_global_defs {
+        check_val_type(gt.value, n_types)?;
+        if is_gc_val_type(gt.value, &type_kinds) {
+            uses_gc = true;
+        }
+        globals.push((gt.value, gt.mutable));
+        global_inits.push(X64ConstVal::RuntimeGc);
+        imported_globals.push((g_mod.clone(), g_name.clone(), gt.value, gt.mutable));
+    }
+    for (di, g) in decoded.globals.iter().enumerate() {
+        let gi = imp_global_defs.len() + di;
         if let Some(b) = budget
             && (gi & 4095) == 4095
         {
             b.check_deadline()?;
         }
         check_val_type(g.ty.value, n_types)?;
-        let init = eval_const_expr(&g.init, &global_inits)?;
+        if is_gc_val_type(g.ty.value, &type_kinds) {
+            uses_gc = true;
+        }
+        let expr = eval_const_expr_gc(
+            &g.init,
+            &global_inits,
+            &type_canon,
+            &gc_canon_types,
+            &mut const_nodes,
+        )?;
+        if expr.uses_gc() {
+            uses_gc = true;
+        }
         globals.push((g.ty.value, g.ty.mutable));
-        global_inits.push(init);
+        if let Some(sv) = expr.as_scalar() {
+            global_inits.push(sv);
+        } else {
+            global_inits.push(X64ConstVal::RuntimeGc);
+            runtime_global_inits.push((gi, expr));
+        }
     }
 
-    // Exports: admit functions, globals, and memory 0 (`blot:memory` etc.); reject table/tag exports.
+    // Exports: admit functions, globals, and memories (plus tables & tags in `StoreCdylib`).
     if decoded.exports.len() > MAX_EXPORTS {
         return Err(format!(
             "x64: module export count ({}) exceeds cap {MAX_EXPORTS}",
@@ -1357,7 +2420,11 @@ pub fn admit_x64_module_for_target_with_summaries(
     }
     let mut exported_funcs = Vec::new();
     let mut exported_globals = Vec::new();
+    let mut exported_mems = Vec::new();
+    let mut exported_tables = Vec::new();
+    let mut exported_tags = Vec::new();
     let mut exported_mut_globals = vec![false; globals.len()];
+    let mut exported_any_globals = vec![false; globals.len()];
     for (ei, exp) in decoded.exports.iter().enumerate() {
         if let Some(b) = budget
             && (ei & 4095) == 4095
@@ -1375,18 +2442,37 @@ pub fn admit_x64_module_for_target_with_summaries(
             ExternalKind::Global => {
                 let gi = exp.index as usize;
                 let (vt, mutable) = *globals.get(gi).ok_or("exported global out of range")?;
+                exported_any_globals[gi] = true;
                 if mutable {
                     exported_mut_globals[gi] = true;
                 }
                 exported_globals.push((exp.name.clone(), gi, vt, mutable));
             }
             ExternalKind::Memory => {
-                if (exp.index as usize) >= decoded.memories.len() {
+                if (exp.index as usize) >= total_mems {
                     return Err(format!(
                         "x64: unsupported memory export {:?} (index {})",
                         exp.name, exp.index
                     ));
                 }
+                if is_store {
+                    exported_mems.push((exp.name.clone(), exp.index));
+                }
+            }
+            ExternalKind::Table if is_store => {
+                if (exp.index as usize) >= raw_tables.len() {
+                    return Err(format!(
+                        "x64: exported table index {} out of range",
+                        exp.index
+                    ));
+                }
+                exported_tables.push((exp.name.clone(), exp.index));
+            }
+            ExternalKind::Tag if is_store => {
+                if (exp.index as usize) >= tags.len() {
+                    return Err(format!("x64: exported tag index {} out of range", exp.index));
+                }
+                exported_tags.push((exp.name.clone(), exp.index));
             }
             ExternalKind::Table | ExternalKind::Tag => {
                 return Err(format!(
@@ -1397,40 +2483,82 @@ pub fn admit_x64_module_for_target_with_summaries(
         }
     }
 
-    // Element segments: admit active, passive, and declarative segments.
+    // Element segments: admit active, passive, and declarative segments (both funcref and GC).
     let mut elem_segs: Vec<ElemSegInit> = Vec::with_capacity(decoded.elements.len());
+    let mut has_gc_elem_segs = false;
     let mut table_has_active_elem = vec![false; raw_tables.len()];
     let mut elem_steps: usize = 0;
     let mut total_elem_entries: usize = 0;
-    let parse_elem_entries =
-        |inits: &[Vec<Instruction>], steps: &mut usize, total: &mut usize| -> Res<Vec<u32>> {
-            let mut entries = Vec::with_capacity(inits.len());
-            for expr in inits {
-                *steps += 1;
-                if let Some(b) = budget
-                    && (*steps & 4095) == 0
-                {
-                    b.check_deadline()?;
-                }
-                let v = eval_const_expr(expr, &global_inits)?;
-                let enc = match v {
-                    X64ConstVal::RefNull => 0u32,
-                    X64ConstVal::FuncRef(f) => f
-                        .checked_add(1)
-                        .ok_or("x64: element funcref index overflow")?,
-                    _ => return Err("x64: unsupported element init expression".into()),
-                };
-                entries.push(enc);
-            }
-            *total = total.saturating_add(entries.len());
-            if *total > MAX_ELEM_SEG_ENTRIES {
-                return Err(format!(
-                    "x64: aggregate element entries ({total}) exceed cap {MAX_ELEM_SEG_ENTRIES}"
-                ));
-            }
-            Ok(entries)
+    let parse_elem_entries = |inits: &[Vec<Instruction>],
+                              ref_family: GcRefFamily,
+                              steps: &mut usize,
+                              total: &mut usize,
+                              c_nodes: &mut usize,
+                              saw_gc: &mut bool|
+     -> Res<(Vec<u32>, Option<Vec<GcConstExpr>>)> {
+        *total = total.saturating_add(inits.len());
+        if *total > MAX_ELEM_SEG_ENTRIES {
+            return Err(format!(
+                "x64: aggregate element entries ({total}) exceed cap {MAX_ELEM_SEG_ENTRIES}"
+            ));
+        }
+        let mut func_entries = if ref_family == GcRefFamily::Func {
+            Some(Vec::with_capacity(inits.len()))
+        } else {
+            None
         };
+        let mut gc_entries: Option<Vec<GcConstExpr>> = if ref_family == GcRefFamily::Func {
+            None
+        } else {
+            Some(Vec::with_capacity(inits.len()))
+        };
+        for expr in inits {
+            *steps += 1;
+            if let Some(b) = budget
+                && (*steps & 4095) == 0
+            {
+                b.check_deadline()?;
+            }
+            let e = eval_const_expr_gc(expr, &global_inits, &type_canon, &gc_canon_types, c_nodes)?;
+            if e.uses_gc() {
+                *saw_gc = true;
+            }
+            if let Some(ref mut fe) = func_entries {
+                match e.as_scalar() {
+                    Some(X64ConstVal::RefNull) => fe.push(0),
+                    Some(X64ConstVal::FuncRef(f)) => {
+                        fe.push(
+                            f.checked_add(1)
+                                .ok_or("x64: element funcref index overflow")?,
+                        );
+                    }
+                    _ => {
+                        // Fall back to runtime GC element evaluation.
+                        let mut ge = Vec::with_capacity(inits.len());
+                        for &prev in fe.iter() {
+                            ge.push(GcConstExpr::Scalar(if prev == 0 {
+                                X64ConstVal::RefNull
+                            } else {
+                                X64ConstVal::FuncRef(prev - 1)
+                            }));
+                        }
+                        ge.push(e);
+                        func_entries = None;
+                        gc_entries = Some(ge);
+                    }
+                }
+            } else if let Some(ref mut ge) = gc_entries {
+                ge.push(e);
+            }
+        }
+        Ok((func_entries.unwrap_or_default(), gc_entries))
+    };
     for elem in &decoded.elements {
+        check_heap_type(elem.ty.heap, n_types)?;
+        if is_gc_heap_type(elem.ty.heap, &type_kinds) {
+            uses_gc = true;
+        }
+        let ref_family = ref_family_from_heap(elem.ty.heap, &type_kinds)?;
         match &elem.mode {
             SegmentMode::Active { index, offset } => {
                 if (*index as usize) >= raw_tables.len() {
@@ -1438,7 +2566,15 @@ pub fn admit_x64_module_for_target_with_summaries(
                         "x64: active element segment targets out-of-range table {index}"
                     ));
                 }
-                let off_val = eval_const_expr(offset, &global_inits)?;
+                let off_val = eval_const_expr_gc(
+                    offset,
+                    &global_inits,
+                    &type_canon,
+                    &gc_canon_types,
+                    &mut const_nodes,
+                )?
+                .as_scalar()
+                .ok_or("x64: active element offset must be constant")?;
                 let off_u64 = if raw_tables[*index as usize].is_table64 {
                     let X64ConstVal::I64(off_i64) = off_val else {
                         return Err("x64: table64 active element offset must be i64".into());
@@ -1450,22 +2586,44 @@ pub fn admit_x64_module_for_target_with_summaries(
                     };
                     u64::from(off_i32 as u32)
                 };
-                let entries =
-                    parse_elem_entries(&elem.init, &mut elem_steps, &mut total_elem_entries)?;
+                let (entries, gc_entries) = parse_elem_entries(
+                    &elem.init,
+                    ref_family,
+                    &mut elem_steps,
+                    &mut total_elem_entries,
+                    &mut const_nodes,
+                    &mut uses_gc,
+                )?;
+                if gc_entries.is_some() {
+                    has_gc_elem_segs = true;
+                }
                 table_has_active_elem[*index as usize] = true;
                 elem_segs.push(ElemSegInit {
                     is_passive: false,
                     active_target: Some((*index, off_u64)),
                     entries,
+                    ref_family,
+                    gc_entries,
                 });
             }
             SegmentMode::Passive => {
-                let entries =
-                    parse_elem_entries(&elem.init, &mut elem_steps, &mut total_elem_entries)?;
+                let (entries, gc_entries) = parse_elem_entries(
+                    &elem.init,
+                    ref_family,
+                    &mut elem_steps,
+                    &mut total_elem_entries,
+                    &mut const_nodes,
+                    &mut uses_gc,
+                )?;
+                if gc_entries.is_some() {
+                    has_gc_elem_segs = true;
+                }
                 elem_segs.push(ElemSegInit {
                     is_passive: true,
                     active_target: None,
                     entries,
+                    ref_family,
+                    gc_entries,
                 });
             }
             SegmentMode::Declarative => {
@@ -1473,9 +2631,15 @@ pub fn admit_x64_module_for_target_with_summaries(
                     is_passive: false,
                     active_target: None,
                     entries: Vec::new(),
+                    ref_family,
+                    gc_entries: None,
                 });
             }
         }
+    }
+
+    if has_gc_elem_segs {
+        uses_gc = true;
     }
 
     // Data segments: admit both active and passive data segments.
@@ -1491,7 +2655,7 @@ pub fn admit_x64_module_for_target_with_summaries(
         match &seg.mode {
             SegmentMode::Active { index, offset } => {
                 let m_idx = *index as usize;
-                if m_idx >= decoded.memories.len() {
+                if m_idx >= total_mems {
                     return Err(format!(
                         "x64: active data segment on out-of-range memory {index}"
                     ));
@@ -1501,13 +2665,22 @@ pub fn admit_x64_module_for_target_with_summaries(
                 } else {
                     extra_memories[m_idx - 1].memory64
                 };
+                let off_scalar = eval_const_expr_gc(
+                    offset,
+                    &global_inits,
+                    &type_canon,
+                    &gc_canon_types,
+                    &mut const_nodes,
+                )?
+                .as_scalar()
+                .ok_or("x64: active data offset must be constant")?;
                 let off_u64 = if is_m64 {
-                    let X64ConstVal::I64(off_i64) = eval_const_expr(offset, &global_inits)? else {
+                    let X64ConstVal::I64(off_i64) = off_scalar else {
                         return Err("x64: memory64 active data offset must be i64".into());
                     };
                     off_i64 as u64
                 } else {
-                    let X64ConstVal::I32(off_i32) = eval_const_expr(offset, &global_inits)? else {
+                    let X64ConstVal::I32(off_i32) = off_scalar else {
                         return Err("x64: active data offset must be i32".into());
                     };
                     u64::from(off_i32 as u32)
@@ -1532,6 +2705,8 @@ pub fn admit_x64_module_for_target_with_summaries(
         uses_exceptions: bool,
         uses_bulk_data: bool,
         uses_bulk_elem: bool,
+        uses_gc: bool,
+        uses_threads: bool,
         dyn_table_ops: Vec<u32>,
         global_reads: Vec<usize>,
         global_writes: Vec<usize>,
@@ -1551,6 +2726,8 @@ pub fn admit_x64_module_for_target_with_summaries(
         let mut chunk_uses_exceptions = false;
         let mut chunk_uses_bulk_data = false;
         let mut chunk_uses_bulk_elem = false;
+        let mut chunk_uses_gc = false;
+        let mut chunk_uses_threads = false;
         let mut chunk_dyn_seen: HashSet<u32> = HashSet::new();
         let mut chunk_dyn_tables: Vec<u32> = Vec::new();
         let mut g_reads = vec![0usize; n_globals];
@@ -1590,6 +2767,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                 chunk_uses_exceptions |= pre.uses_exceptions;
                 chunk_uses_bulk_data |= pre.uses_bulk_data;
                 chunk_uses_bulk_elem |= pre.uses_bulk_elem;
+                chunk_uses_gc |= pre.uses_gc;
+                chunk_uses_threads |= pre.uses_threads;
                 for &t in &pre.dyn_table_ops {
                     if chunk_dyn_seen.insert(t) {
                         chunk_dyn_tables.push(t);
@@ -1631,6 +2810,8 @@ pub fn admit_x64_module_for_target_with_summaries(
             let mut b_uses_exceptions = false;
             let mut b_uses_bulk_data = false;
             let mut b_uses_bulk_elem = false;
+            let mut b_uses_gc = false;
+            let mut b_uses_threads = false;
             let mut mark_dyn_table = |t: u32| -> Res<()> {
                 if (t as usize) >= raw_table_is_funcref.len() {
                     return Err(format!("x64: table index {t} out of range"));
@@ -1645,7 +2826,11 @@ pub fn admit_x64_module_for_target_with_summaries(
             };
             for &vt in &body.locals {
                 check_val_type(vt, n_types)?;
-                if matches!(vt, ValType::Ref(rt) if rt.heap == HeapType::Exn) {
+                if is_gc_val_type(vt, &type_kinds) {
+                    b_uses_gc = true;
+                }
+                if matches!(vt, ValType::Ref(rt) if matches!(rt.heap, HeapType::Exn | HeapType::NoExn))
+                {
                     b_uses_exceptions = true;
                 }
             }
@@ -1662,10 +2847,19 @@ pub fn admit_x64_module_for_target_with_summaries(
                     &tags,
                     &type_arity,
                     &type_admitted,
+                    &type_kinds,
                     &mut sig_arity,
+                    max_total_sig_arity,
+                    &mut b_uses_gc,
                 )?;
+                if matches!(insn.opcode, 0xfe00..=0xfe03 | 0xfe10..=0xfe4e) {
+                    b_uses_threads = true;
+                }
                 if matches!(insn.opcode, 0x08 | 0x0a | 0x1f)
-                    || matches!(insn.immediate, Immediate::Heap(HeapType::Exn))
+                    || matches!(
+                        insn.immediate,
+                        Immediate::Heap(HeapType::Exn | HeapType::NoExn)
+                    )
                 {
                     b_uses_exceptions = true;
                 }
@@ -1738,8 +2932,11 @@ pub fn admit_x64_module_for_target_with_summaries(
                             }
                         }
                     }
-                    0xfc08 | 0xfc09 => {
+                    0xfc08 | 0xfc09 | 0xfb09 | 0xfb12 => {
                         b_uses_bulk_data = true;
+                    }
+                    0xfb0a | 0xfb13 => {
+                        b_uses_bulk_elem = true;
                     }
                     0xfc0c => {
                         b_uses_bulk_elem = true;
@@ -1789,6 +2986,8 @@ pub fn admit_x64_module_for_target_with_summaries(
             chunk_uses_exceptions |= b_uses_exceptions;
             chunk_uses_bulk_data |= b_uses_bulk_data;
             chunk_uses_bulk_elem |= b_uses_bulk_elem;
+            chunk_uses_gc |= b_uses_gc;
+            chunk_uses_threads |= b_uses_threads;
             if collect_summaries {
                 let mut gr = Vec::with_capacity(touched_reads.len());
                 for g in touched_reads.drain(..) {
@@ -1810,6 +3009,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                     uses_exceptions: b_uses_exceptions,
                     uses_bulk_data: b_uses_bulk_data,
                     uses_bulk_elem: b_uses_bulk_elem,
+                    uses_gc: b_uses_gc,
+                    uses_threads: b_uses_threads,
                     dyn_table_ops: b_dyn_tables,
                     sig_arity: sig_arity - b_sig_before,
                     br_table_entries: br_table_entries - b_br_before,
@@ -1825,6 +3026,8 @@ pub fn admit_x64_module_for_target_with_summaries(
             uses_exceptions: chunk_uses_exceptions,
             uses_bulk_data: chunk_uses_bulk_data,
             uses_bulk_elem: chunk_uses_bulk_elem,
+            uses_gc: chunk_uses_gc,
+            uses_threads: chunk_uses_threads,
             dyn_table_ops: chunk_dyn_tables,
             global_reads: g_reads,
             global_writes: g_writes,
@@ -1916,6 +3119,8 @@ pub fn admit_x64_module_for_target_with_summaries(
         uses_exceptions |= chunk.uses_exceptions;
         uses_bulk_data |= chunk.uses_bulk_data;
         uses_bulk_elem |= chunk.uses_bulk_elem;
+        uses_gc |= chunk.uses_gc;
+        uses_threads |= chunk.uses_threads;
         for t in chunk.dyn_table_ops {
             dyn_table_touched.insert(t);
         }
@@ -1923,9 +3128,9 @@ pub fn admit_x64_module_for_target_with_summaries(
             all_body_summaries.extend(chunk.body_summaries);
         }
         total_sig_arity = total_sig_arity.saturating_add(chunk.sig_arity);
-        if total_sig_arity > MAX_TOTAL_SIG_ARITY {
+        if total_sig_arity > max_total_sig_arity {
             return Err(format!(
-                "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                "x64: expanded signature arity exceeds cap {max_total_sig_arity}"
             ));
         }
         total_br_table_entries = total_br_table_entries.saturating_add(chunk.br_table_entries);
@@ -1954,8 +3159,26 @@ pub fn admit_x64_module_for_target_with_summaries(
     let mut inline_extern_slots: usize = 0;
     for (ti, rt) in raw_tables.iter().enumerate() {
         let t = ti as u32;
-        if rt.is_funcref {
-            if dyn_table_touched.contains(&t) {
+        if is_store {
+            if rt.min_len > MAX_DYN_TABLE_SLOTS {
+                return Err(format!(
+                    "x64: StoreCdylib table {t} min ({}) exceeds cap {MAX_DYN_TABLE_SLOTS}",
+                    rt.min_len
+                ));
+            }
+            dyn_tables.insert(
+                t,
+                DynTableMeta {
+                    min_len: rt.min_len,
+                    eff_max_len: rt.eff_max_len.max(rt.min_len),
+                    is_funcref: rt.is_funcref,
+                    is_table64: rt.is_table64,
+                    ref_family: rt.ref_family,
+                    init_val: rt.init_val,
+                },
+            );
+        } else if rt.is_funcref {
+            if dyn_table_touched.contains(&t) || rt.has_runtime_init {
                 if rt.min_len > MAX_DYN_TABLE_SLOTS {
                     return Err(format!(
                         "x64: dynamic funcref table {t} min ({}) exceeds cap {MAX_DYN_TABLE_SLOTS}",
@@ -1969,6 +3192,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                         eff_max_len: rt.eff_max_len.max(rt.min_len),
                         is_funcref: true,
                         is_table64: rt.is_table64,
+                        ref_family: rt.ref_family,
                         init_val: rt.init_val,
                     },
                 );
@@ -1983,6 +3207,7 @@ pub fn admit_x64_module_for_target_with_summaries(
         } else if dyn_table_touched.contains(&t)
             || !rt.fixed_inline_extern_eligible
             || table_has_active_elem[ti]
+            || rt.has_runtime_init
         {
             dyn_tables.insert(
                 t,
@@ -1991,6 +3216,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                     eff_max_len: rt.eff_max_len.max(rt.min_len),
                     is_funcref: false,
                     is_table64: rt.is_table64,
+                    ref_family: rt.ref_family,
                     init_val: rt.init_val,
                 },
             );
@@ -2007,6 +3233,7 @@ pub fn admit_x64_module_for_target_with_summaries(
         .saturating_add(extra_memories.len().saturating_mul(32))
         .saturating_add(if uses_bulk_data { data_seg_count } else { 0 })
         .saturating_add(if uses_bulk_elem { elem_segs.len() } else { 0 })
+        .saturating_add(if uses_gc { 128 } else { 0 })
         .saturating_add(64);
     if worst_ctx_bytes > MAX_CTX_BYTES {
         return Err(format!(
@@ -2035,7 +3262,8 @@ pub fn admit_x64_module_for_target_with_summaries(
         }
     }
 
-    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, canon_sig_id)`.
+    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, canon_sig_id)`
+    // (also propagating to every ancestor supertype when function subtyping is present!).
     let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
     let mut funcref_by_sig: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
     let mut slot_steps: usize = 0;
@@ -2051,10 +3279,19 @@ pub fn admit_x64_module_for_target_with_summaries(
             if let Some(f) = entry
                 && let Some(&csig) = func_canon_sig.get(f as usize)
             {
-                funcref_by_sig
-                    .entry((tbl, csig))
-                    .or_default()
-                    .push((slot as u32, f));
+                if has_func_subtyping {
+                    for &anc_sig in &gc_canon_types[csig as usize].supertypes_all {
+                        funcref_by_sig
+                            .entry((tbl, anc_sig))
+                            .or_default()
+                            .push((slot as u32, f));
+                    }
+                } else {
+                    funcref_by_sig
+                        .entry((tbl, csig))
+                        .or_default()
+                        .push((slot as u32, f));
+                }
             }
         }
     }
@@ -2147,10 +3384,14 @@ pub fn admit_x64_module_for_target_with_summaries(
         ci_index.insert((tbl, ti), ci_id);
     }
 
-    // Fold globals that are immutable OR never written by Wasm AND not exported-mutable.
+    // Fold globals that are immutable OR never written by Wasm AND not exported-mutable,
+    // EXCEPT runtime-initialized GC globals (which live in traced `Ctx` slots) and imported/exported
+    // `StoreCdylib` globals (which require addressable live `Ctx` storage).
     let mut global_consts = Vec::with_capacity(globals.len());
     for (k, &(_, mutable)) in globals.iter().enumerate() {
-        let can_fold = !mutable || (global_writes[k] == 0 && !exported_mut_globals[k]);
+        let can_fold = !(is_store && (k < imported_globals.len() || exported_any_globals[k]))
+            && global_inits[k] != X64ConstVal::RuntimeGc
+            && (!mutable || (global_writes[k] == 0 && !exported_mut_globals[k]));
         global_consts.push(if can_fold {
             Some(global_inits[k])
         } else {
@@ -2159,21 +3400,24 @@ pub fn admit_x64_module_for_target_with_summaries(
     }
 
     // Pin the hottest mutable scalar I32/I64 global in `R12` ONLY when its static access density
-    // justifies giving up a callee-saved GP register across every function (e.g. LLVM/Rust shadow
-    // `$__stack_pointer` averages >= 3 accesses/fn; Blot modules average ~1 access/fn and win much
-    // more from having `R12` as a 3rd general-purpose callee-saved register!).
+    // justifies giving up a callee-saved GP register across every function (disabled in `StoreCdylib`
+    // so cross-module calls and host global reads never see stale register-cached globals).
     let min_pin_accesses = decoded.code.len().saturating_mul(3).max(16);
-    let pinned_global = (0..globals.len())
-        .filter(|&k| {
-            global_consts[k].is_none()
-                && globals[k].1
-                && matches!(globals[k].0, ValType::I32 | ValType::I64)
-                && (global_reads[k] + global_writes[k]) >= min_pin_accesses
-        })
-        .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
-        .map(|k| k as u32);
+    let pinned_global = if is_store {
+        None
+    } else {
+        (0..globals.len())
+            .filter(|&k| {
+                global_consts[k].is_none()
+                    && globals[k].1
+                    && matches!(globals[k].0, ValType::I32 | ValType::I64)
+                    && (global_reads[k] + global_writes[k]) >= min_pin_accesses
+            })
+            .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
+            .map(|k| k as u32)
+    };
 
-    let pinned_global_2 = if fixed32.is_some() {
+    let pinned_global_2 = if !is_store && fixed32.is_some() {
         (0..globals.len())
             .filter(|&k| {
                 pinned_global != Some(k as u32)
@@ -2275,6 +3519,7 @@ pub fn admit_x64_module_for_target_with_summaries(
             dyn_tables,
             memory,
             memory64,
+            memory_shared,
             fixed32,
             extra_memories,
             tags,
@@ -2289,6 +3534,40 @@ pub fn admit_x64_module_for_target_with_summaries(
             uses_bulk_data,
             elem_segs,
             uses_bulk_elem,
+            uses_gc,
+            uses_threads,
+            type_canon,
+            gc_canon_types: if uses_gc || is_store {
+                gc_canon_types
+            } else {
+                Vec::new()
+            },
+            type_kinds,
+            runtime_global_inits,
+            runtime_table_inits,
+            imported_globals,
+            imported_mems,
+            imported_tables,
+            imported_tags,
+            import_order,
+            all_mem_declared_max: if is_store {
+                all_mem_declared_max
+            } else {
+                Vec::new()
+            },
+            all_table_types: if is_store {
+                all_table_types.into_iter().map(|(_, tt)| tt).collect()
+            } else {
+                Vec::new()
+            },
+            exported_mems,
+            exported_tables,
+            exported_tags,
+            raw_type_groups: if is_store {
+                type_groups.to_vec()
+            } else {
+                Vec::new()
+            },
             start,
         },
         all_body_summaries,

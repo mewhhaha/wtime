@@ -245,6 +245,7 @@ enum Outcome {
 fn wtime_err_to_trap(err: &wtime_types::Error) -> u8 {
     match (err.kind, err.trap_code) {
         (ErrorKind::Host, _) => 19,
+        (ErrorKind::ResourceLimit, _) => 12,
         (_, Some(TrapCode::Unreachable)) => 1,
         (_, Some(TrapCode::MemoryOutOfBounds)) => 2,
         (_, Some(TrapCode::TableOutOfBounds)) => 3,
@@ -252,6 +253,11 @@ fn wtime_err_to_trap(err: &wtime_types::Error) -> u8 {
         (_, Some(TrapCode::IntegerDivisionByZero)) => 5,
         (_, Some(TrapCode::IntegerOverflow)) => 6,
         (_, Some(TrapCode::InvalidConversionToInteger)) => 7,
+        (_, Some(TrapCode::UnalignedAtomic)) => 13,
+        (_, Some(TrapCode::Other)) if err.message.contains("unaligned") => 13,
+        (_, Some(TrapCode::Other)) if err.message.contains("shared memory") => 1,
+        (_, Some(TrapCode::Other)) if err.message.contains("cast failed") => 4,
+        (_, Some(TrapCode::Other)) if err.message.contains("length overflow") => 2,
         _ => panic!("unexpected wtime-runtime error: {err:?}"),
     }
 }
@@ -510,6 +516,19 @@ fn assert_oracle_matrix(
     check_globals: &[&str],
     check_mem: &[(u64, usize)],
 ) {
+    assert_oracle_matrix_with_gc_heap(name, wasm, calls, check_globals, check_mem, 0, 0);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn assert_oracle_matrix_with_gc_heap(
+    name: &str,
+    wasm: &[u8],
+    calls: &[OracleCall],
+    check_globals: &[&str],
+    check_mem: &[(u64, usize)],
+    gc_initial_heap_bytes: u64,
+    gc_max_heap_bytes: u64,
+) {
     let Some(driver) = get_oracle_driver() else {
         return;
     };
@@ -547,6 +566,8 @@ fn assert_oracle_matrix(
                 deadline: None,
                 opt,
                 verify: true, // Runs BOTH verify_ir and verify_alloc on every function!
+                gc_initial_heap_bytes,
+                gc_max_heap_bytes,
                 ..Default::default()
             },
         )
@@ -5772,4 +5793,1605 @@ fn oracle_x64_extra_memory_store_spilled_and_const_hardening() {
         &[],
         &[],
     );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_wasm_gc_all_opcodes_rec_subtyping_and_const_exprs() {
+    fn push_sleb_i32(out: &mut Vec<u8>, mut v: i32) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_sleb_i64(out: &mut Vec<u8>, mut v: i64) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_i32(out: &mut Vec<u8>, v: i32) {
+        out.push(0x41);
+        push_sleb_i32(out, v);
+    }
+    fn push_gc(out: &mut Vec<u8>, sub: u32) {
+        out.push(0xfb);
+        leb_u32(out, sub);
+    }
+
+    // Type section (30 entries -> 32 defined types 0..=31):
+    // - 0..=11: open struct chain S0 <: ... <: S11 with `(field (mut i32))`
+    // - 12: final S12 <: S11 (depth 12 > GC_DISPLAY_LEN=10!) with 10 fields of every storage kind:
+    //       i32, i8, i16, i64, f32, f64, v128, anyref, externref, funcref
+    // - Rec group A: 13=(struct (mut i32) (mut (ref null 14))), 14=(array (mut i16))
+    // - Rec group B: 15=(struct (mut i32) (mut (ref null 16))), 16=(array (mut i16))
+    // - 17..=26: mutable arrays of i8, i16, i32, i64, f32, f64, v128, anyref, externref, funcref
+    // - 27: (sub (func (param i32) (result i32)))
+    // - 28: (sub final 27 (func (param i32) (result i32)))
+    // - 29: (func (param i32) (result i32))
+    // - 30: (func (param anyref i32))  [tag 0 payload]
+    // - 31: (func (result anyref i32)) [try_table catch block]
+    let mut tsec = Vec::new();
+    leb_u32(&mut tsec, 30);
+    // Type 0
+    tsec.extend_from_slice(&[0x50, 0, 0x5f, 1, 0x7f, 1]);
+    // Types 1..=11
+    for sup in 0u32..=10 {
+        tsec.extend_from_slice(&[0x50, 1]);
+        leb_u32(&mut tsec, sup);
+        tsec.extend_from_slice(&[0x5f, 1, 0x7f, 1]);
+    }
+    // Type 12: final subtype of 11 with all 10 storage kinds
+    tsec.extend_from_slice(&[
+        0x4f, 1, 11, 0x5f, 10, 0x7f, 1, // f0: i32
+        0x78, 1, // f1: i8
+        0x77, 1, // f2: i16
+        0x7e, 1, // f3: i64
+        0x7d, 1, // f4: f32
+        0x7c, 1, // f5: f64
+        0x7b, 1, // f6: v128
+        0x6e, 1, // f7: anyref
+        0x6f, 1, // f8: externref
+        0x70, 1, // f9: funcref
+    ]);
+    // Rec group A (13, 14) and structurally identical Rec group B (15, 16)
+    tsec.extend_from_slice(&[0x4e, 2, 0x5f, 2, 0x7f, 1, 0x63, 14, 1, 0x5e, 0x77, 1]);
+    tsec.extend_from_slice(&[0x4e, 2, 0x5f, 2, 0x7f, 1, 0x63, 16, 1, 0x5e, 0x77, 1]);
+    // Arrays 17..=26
+    for st in [0x78u8, 0x77, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x6e, 0x6f, 0x70] {
+        tsec.extend_from_slice(&[0x5e, st, 1]);
+    }
+    // Func types 27..=31
+    tsec.extend_from_slice(&[0x50, 0, 0x60, 1, 0x7f, 1, 0x7f]); // 27
+    tsec.extend_from_slice(&[0x4f, 1, 27, 0x60, 1, 0x7f, 1, 0x7f]); // 28
+    tsec.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // 29
+    tsec.extend_from_slice(&[0x60, 2, 0x6e, 0x7f, 0]); // 30
+    tsec.extend_from_slice(&[0x60, 0, 2, 0x6e, 0x7f]); // 31
+
+    // Functions:
+    // 0 (type 28): fn_sub28(x) = x * 3 + 1
+    // 1 (type 27): fn_base27(x) = x * 5 + 2
+    // 2 (type 29): fn_unrelated29(x) = x * 7 + 3
+    // 3 (type 29): gc_structs(arg) -> i32
+    // 4 (type 29): gc_arrays(arg) -> i32
+    // 5 (type 29): gc_casts_and_subtyping(arg) -> i32
+    // 6 (type 29): gc_const_and_exn(arg) -> i32
+    // 7 (type 29): gc_traps(case) -> i32
+    let funcs = func_sec(&[28, 27, 29, 29, 29, 29, 29, 29]);
+
+    // Tables:
+    // 0: (table 4 funcref)
+    // 1: (table 4 anyref (struct.new 0 (i32.const 555)))
+    let mut tbl_sec = Vec::new();
+    tbl_sec.push(2);
+    tbl_sec.extend_from_slice(&[0x70, 0x00, 4]);
+    tbl_sec.extend_from_slice(&[0x40, 0x00, 0x6e, 0x00, 4]);
+    push_i32(&mut tbl_sec, 555);
+    push_gc(&mut tbl_sec, 0);
+    tbl_sec.push(0); // struct.new 0
+    tbl_sec.push(0x0b);
+
+    // Tag 0 (type 30: (param anyref i32))
+    let tag_sec = section(13, &[1, 0x00, 30]);
+
+    // Globals (nested GC const expressions):
+    // 0: (mut anyref) = (struct.new 0 (i32.const 42))
+    // 1: (mut anyref) = (array.new 19 (i32.const 9) (i32.const 4))
+    // 2: (mut anyref) = (ref.i31 (i32.const -7))
+    // 3: (mut externref) = (extern.convert_any (struct.new_default 0))
+    let mut gsec = Vec::new();
+    gsec.push(4);
+    // g0
+    gsec.extend_from_slice(&[0x6e, 1]);
+    push_i32(&mut gsec, 42);
+    push_gc(&mut gsec, 0);
+    gsec.push(0);
+    gsec.push(0x0b);
+    // g1
+    gsec.extend_from_slice(&[0x6e, 1]);
+    push_i32(&mut gsec, 9);
+    push_i32(&mut gsec, 4);
+    push_gc(&mut gsec, 6);
+    gsec.push(19);
+    gsec.push(0x0b);
+    // g2
+    gsec.extend_from_slice(&[0x6e, 1]);
+    push_i32(&mut gsec, -7);
+    push_gc(&mut gsec, 0x1c); // ref.i31
+    gsec.push(0x0b);
+    // g3
+    gsec.extend_from_slice(&[0x6f, 1]);
+    push_gc(&mut gsec, 1);
+    gsec.push(0); // struct.new_default 0
+    push_gc(&mut gsec, 0x1b); // extern.convert_any
+    gsec.push(0x0b);
+
+    // Element segments:
+    // 0 (passive anyref exprs): [ref.i31(10), struct.new 0 (777), array.new_fixed 19 2 (3, 4), ref.null any]
+    // 1 (passive anyref exprs): [ref.i31(99)] (dropped by gc_traps case 15)
+    // 2 (active table 0 funcref at 0): [fn0 (sub28), fn1 (base27), fn2 (unrelated29)]
+    // 3 (active table 1 anyref at 1): [ref.i31(1234), array.new_default 19 (3)]
+    let mut esec = Vec::new();
+    esec.push(4);
+    // elem 0 (flag 0x05, reftype 0x6e, 4 exprs)
+    esec.extend_from_slice(&[0x05, 0x6e, 4]);
+    push_i32(&mut esec, 10);
+    push_gc(&mut esec, 0x1c);
+    esec.push(0x0b);
+    push_i32(&mut esec, 777);
+    push_gc(&mut esec, 0);
+    esec.push(0);
+    esec.push(0x0b);
+    push_i32(&mut esec, 3);
+    push_i32(&mut esec, 4);
+    push_gc(&mut esec, 8);
+    esec.extend_from_slice(&[19, 2]);
+    esec.push(0x0b);
+    esec.extend_from_slice(&[0xd0, 0x6e, 0x0b]);
+    // elem 1 (flag 0x05, reftype 0x6e, 1 expr)
+    esec.extend_from_slice(&[0x05, 0x6e, 1]);
+    push_i32(&mut esec, 99);
+    push_gc(&mut esec, 0x1c);
+    esec.push(0x0b);
+    // elem 2 (flag 0x00, table 0 offset 0, 3 funcidx)
+    esec.extend_from_slice(&[0x00, 0x41, 0, 0x0b, 3, 0, 1, 2]);
+    // elem 3 (flag 0x06, table 1 offset 1, reftype 0x6e, 2 exprs)
+    esec.extend_from_slice(&[0x06, 1, 0x41, 1, 0x0b, 0x6e, 2]);
+    push_i32(&mut esec, 1234);
+    push_gc(&mut esec, 0x1c);
+    esec.push(0x0b);
+    push_i32(&mut esec, 3);
+    push_gc(&mut esec, 7);
+    esec.push(19);
+    esec.push(0x0b);
+
+    // Passive Data segments (2 segments -> requires DataCount section 12):
+    let dcount_sec = section(12, &[2]);
+    let mut dsec = Vec::new();
+    dsec.push(2);
+    // data 0 (16 bytes with high bits set to test sign/zero extension!)
+    let d0: [u8; 16] = [
+        0x11, 0x82, 0xf3, 0x04, 0x80, 0xff, 0x7f, 0x01, 0xfe, 0xca, 0xbe, 0xba, 0xde, 0xad, 0xef,
+        0xbe,
+    ];
+    dsec.extend_from_slice(&[0x01, d0.len() as u8]);
+    dsec.extend_from_slice(&d0);
+    // data 1 (8 bytes, dropped in gc_traps case 13)
+    dsec.extend_from_slice(&[0x01, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+    // Helpers fn0, fn1, fn2
+    let f0 = vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 1, 0x6a];
+    let f1 = vec![0x20, 0, 0x41, 5, 0x6c, 0x41, 2, 0x6a];
+    let f2 = vec![0x20, 0, 0x41, 7, 0x6c, 0x41, 3, 0x6a];
+
+    // fn3: gc_structs(arg: i32) -> i32
+    // Locals: 1=(ref null 12), 2=(ref null 12), 3=(ref null 0), 4=i32 (acc)
+    let mut f3 = Vec::new();
+    // s1 = struct.new 12(...)
+    f3.extend_from_slice(&[0x20, 0, 0x41, 10, 0x6a]); // f0: i32
+    push_i32(&mut f3, 0xfe); // f1: i8 (-2 signed / 254 unsigned)
+    push_i32(&mut f3, 0xff80); // f2: i16 (-128 signed / 65408 unsigned)
+    f3.push(0x42);
+    push_sleb_i64(&mut f3, 0x0102_0304_0506_0708); // f3: i64
+    f3.push(0x43);
+    f3.extend_from_slice(&1.5f32.to_le_bytes()); // f4: f32
+    f3.push(0x44);
+    f3.extend_from_slice(&(-3.25f64).to_le_bytes()); // f5: f64
+    f3.extend_from_slice(&[
+        0xfd, 0x0c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]); // f6: v128
+    f3.extend_from_slice(&[0x20, 0]);
+    push_i32(&mut f3, 0x5555);
+    f3.push(0x73); // xor
+    push_gc(&mut f3, 0x1c); // f7: ref.i31
+    push_i32(&mut f3, 99);
+    push_gc(&mut f3, 0);
+    f3.push(0);
+    push_gc(&mut f3, 0x1b); // f8: extern.convert_any(struct.new 0 (99))
+    f3.extend_from_slice(&[0xd2, 0]); // f9: ref.func 0
+    push_gc(&mut f3, 0);
+    f3.push(12); // struct.new 12
+    f3.extend_from_slice(&[0x21, 1]);
+    // s2 = struct.new_default 12; mutate f1 & f2 via struct.set
+    push_gc(&mut f3, 1);
+    f3.push(12);
+    f3.extend_from_slice(&[0x22, 2]);
+    push_i32(&mut f3, 0x81);
+    push_gc(&mut f3, 5);
+    f3.extend_from_slice(&[12, 1]); // struct.set 12 1
+    f3.extend_from_slice(&[0x20, 2]);
+    push_i32(&mut f3, 0x8001);
+    push_gc(&mut f3, 5);
+    f3.extend_from_slice(&[12, 2]); // struct.set 12 2
+    // Upcast s1 to S0 (local 3) and read field 0 via struct.get 0 0
+    f3.extend_from_slice(&[0x20, 1, 0x21, 3]);
+    f3.extend_from_slice(&[0x20, 3]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[0, 0]); // struct.get 0 0 -> acc
+    // + struct.get_s 12 1 (s1) + struct.get_u 12 1 (s1)
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 3);
+    f3.extend_from_slice(&[12, 1, 0x6a]);
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 4);
+    f3.extend_from_slice(&[12, 1, 0x6a]);
+    // + struct.get_s 12 2 (s1) + struct.get_u 12 2 (s1)
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 3);
+    f3.extend_from_slice(&[12, 2, 0x6a]);
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 4);
+    f3.extend_from_slice(&[12, 2, 0x6a]);
+    // + struct.get_s 12 1 (s2) + struct.get_u 12 2 (s2) + struct.get 12 0 (s2, default 0)
+    f3.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f3, 3);
+    f3.extend_from_slice(&[12, 1, 0x6a]);
+    f3.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f3, 4);
+    f3.extend_from_slice(&[12, 2, 0x6a]);
+    f3.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 0, 0x6a]);
+    // + i32.wrap_i64(s1.f3) + i32.reinterpret_f32(s1.f4) + wrap(i64.reinterpret_f64(s1.f5))
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 3, 0xa7, 0x6a]);
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 4, 0xbc, 0x6a]);
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 5, 0xbd, 0xa7, 0x6a]);
+    // + i32x4.extract_lane 3 (s1.f6)
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 6, 0xfd, 0x1b, 3, 0x6a]);
+    // + i31.get_s(ref.cast i31 (s1.f7))
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 7]);
+    push_gc(&mut f3, 0x16);
+    f3.push(0x6c); // ref.cast (ref i31)
+    push_gc(&mut f3, 0x1d); // i31.get_s
+    f3.push(0x6a);
+    // + struct.get 0 0 (ref.cast (ref 0) (any.convert_extern (s1.f8)))
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 8]);
+    push_gc(&mut f3, 0x1a); // any.convert_extern
+    push_gc(&mut f3, 0x16);
+    f3.push(0); // ref.cast (ref 0)
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[0, 0, 0x6a]);
+    // + call_ref 28 (arg, ref.cast (ref 28) (s1.f9))
+    f3.extend_from_slice(&[0x20, 0, 0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 9]);
+    push_gc(&mut f3, 0x16);
+    f3.push(28); // ref.cast (ref 28)
+    f3.extend_from_slice(&[0x14, 28, 0x6a]); // call_ref 28 + add
+    // Also mutate s1.f0 via struct.set 12 0 and read back!
+    f3.extend_from_slice(&[0x21, 4, 0x20, 1, 0x20, 4]);
+    push_gc(&mut f3, 5);
+    f3.extend_from_slice(&[12, 0]);
+    f3.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f3, 2);
+    f3.extend_from_slice(&[12, 0]);
+
+    // fn4: gc_arrays(arg: i32) -> i32
+    // Locals: 1=(ref null 17) i8[], 2=(ref null 18) i16[], 3=(ref null 19) i32[],
+    //         4=(ref null 24) any[], 5=(ref null 25) ext[], 6=(ref null 26) func[], 7=i32 acc
+    let mut f4 = Vec::new();
+    // a8 = array.new 17 (0x85, 8)
+    push_i32(&mut f4, 0x85);
+    push_i32(&mut f4, 8);
+    push_gc(&mut f4, 6);
+    f4.push(17);
+    f4.extend_from_slice(&[0x21, 1]);
+    // Set distinct bytes 0..8 and test array.fill + overlapping array.copy (fwd, bwd, self, 0-len at end)
+    for k in 0..8i32 {
+        f4.extend_from_slice(&[0x20, 1]);
+        push_i32(&mut f4, k);
+        push_i32(&mut f4, (k * 37 + 0x7a) & 0xff);
+        push_gc(&mut f4, 0x0e);
+        f4.push(17);
+    }
+    // array.fill 17 (a8, off=6, val=0xfe, len=2)
+    f4.extend_from_slice(&[0x20, 1]);
+    push_i32(&mut f4, 6);
+    push_i32(&mut f4, 0xfe);
+    push_i32(&mut f4, 2);
+    push_gc(&mut f4, 0x10);
+    f4.push(17);
+    // forward overlap copy: dst=1, src=2, len=4
+    f4.extend_from_slice(&[0x20, 1, 0x41, 1, 0x20, 1, 0x41, 2, 0x41, 4]);
+    push_gc(&mut f4, 0x11);
+    f4.extend_from_slice(&[17, 17]);
+    // backward overlap copy: dst=3, src=1, len=4
+    f4.extend_from_slice(&[0x20, 1, 0x41, 3, 0x20, 1, 0x41, 1, 0x41, 4]);
+    push_gc(&mut f4, 0x11);
+    f4.extend_from_slice(&[17, 17]);
+    // self-copy: dst=2, src=2, len=3
+    f4.extend_from_slice(&[0x20, 1, 0x41, 2, 0x20, 1, 0x41, 2, 0x41, 3]);
+    push_gc(&mut f4, 0x11);
+    f4.extend_from_slice(&[17, 17]);
+    // zero-len copy at exact end: dst=8, src=8, len=0 (must NOT trap!)
+    f4.extend_from_slice(&[0x20, 1, 0x41, 8, 0x20, 1, 0x41, 8, 0x41, 0]);
+    push_gc(&mut f4, 0x11);
+    f4.extend_from_slice(&[17, 17]);
+    // Sum a8 via get_s & get_u + array.len
+    f4.extend_from_slice(&[0x20, 0]); // start acc = arg
+    f4.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f4, 0x0f); // array.len
+    f4.push(0x6a);
+    for k in 0..8i32 {
+        f4.extend_from_slice(&[0x20, 1]);
+        push_i32(&mut f4, k);
+        push_gc(&mut f4, 0x0c);
+        f4.push(17); // get_s
+        f4.push(0x6a);
+        f4.extend_from_slice(&[0x20, 1]);
+        push_i32(&mut f4, k);
+        push_gc(&mut f4, 0x0d);
+        f4.push(17); // get_u
+        push_i32(&mut f4, k + 1);
+        f4.extend_from_slice(&[0x6c, 0x6a]);
+    }
+    f4.extend_from_slice(&[0x21, 7]);
+    // a16 = array.new_default 18 (5); array.init_data 18 0 (a16, dst=1, src=2, len=4)
+    push_i32(&mut f4, 5);
+    push_gc(&mut f4, 7);
+    f4.push(18);
+    f4.extend_from_slice(&[0x22, 2, 0x41, 1, 0x41, 2, 0x41, 4]);
+    push_gc(&mut f4, 0x12);
+    f4.extend_from_slice(&[18, 0]);
+    for k in 0..5i32 {
+        f4.extend_from_slice(&[0x20, 7, 0x20, 2]);
+        push_i32(&mut f4, k);
+        push_gc(&mut f4, 0x0c);
+        f4.push(18);
+        f4.push(0x6a);
+        f4.extend_from_slice(&[0x20, 2]);
+        push_i32(&mut f4, k);
+        push_gc(&mut f4, 0x0d);
+        f4.push(18);
+        f4.extend_from_slice(&[0x73, 0x21, 7]);
+    }
+    // a32 = array.new_data 19 0 (off=0, len=4)
+    f4.extend_from_slice(&[0x41, 0, 0x41, 4]);
+    push_gc(&mut f4, 9);
+    f4.extend_from_slice(&[19, 0, 0x21, 3]);
+    for k in 0..4i32 {
+        f4.extend_from_slice(&[0x20, 7, 0x20, 3]);
+        push_i32(&mut f4, k);
+        push_gc(&mut f4, 0x0b);
+        f4.push(19);
+        f4.extend_from_slice(&[0x6a, 0x21, 7]);
+    }
+    // array.new_fixed for i64 (20), f32 (21), f64 (22), v128 (23)
+    f4.push(0x42);
+    push_sleb_i64(&mut f4, 0x1234_5678_9abc_def0);
+    f4.push(0x42);
+    push_sleb_i64(&mut f4, -0x0fed_cba9_8765_4321);
+    push_gc(&mut f4, 8);
+    f4.extend_from_slice(&[20, 2, 0x41, 1]);
+    push_gc(&mut f4, 0x0b);
+    f4.extend_from_slice(&[20, 0xa7, 0x20, 7, 0x6a, 0x21, 7]);
+    // f32
+    f4.push(0x43);
+    f4.extend_from_slice(&2.25f32.to_le_bytes());
+    f4.push(0x43);
+    f4.extend_from_slice(&(-7.5f32).to_le_bytes());
+    push_gc(&mut f4, 8);
+    f4.extend_from_slice(&[21, 2, 0x41, 1]);
+    push_gc(&mut f4, 0x0b);
+    f4.extend_from_slice(&[21, 0xbc, 0x20, 7, 0x6a, 0x21, 7]);
+    // f64
+    f4.push(0x44);
+    f4.extend_from_slice(&11.125f64.to_le_bytes());
+    push_gc(&mut f4, 8);
+    f4.extend_from_slice(&[22, 1, 0x41, 0]);
+    push_gc(&mut f4, 0x0b);
+    f4.extend_from_slice(&[22, 0xbd, 0xa7, 0x20, 7, 0x6a, 0x21, 7]);
+    // v128
+    f4.extend_from_slice(&[
+        0xfd, 0x0c, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+    ]);
+    push_gc(&mut f4, 8);
+    f4.extend_from_slice(&[23, 1, 0x41, 0]);
+    push_gc(&mut f4, 0x0b);
+    f4.extend_from_slice(&[23, 0xfd, 0x1b, 2, 0x20, 7, 0x6a, 0x21, 7]);
+    // a_any = array.new_elem 24 0 (off=0, len=4); array.init_elem 24 0 (a_any, dst=3, src=1, len=1)
+    f4.extend_from_slice(&[0x41, 0, 0x41, 4]);
+    push_gc(&mut f4, 0x0a);
+    f4.extend_from_slice(&[24, 0, 0x22, 4, 0x41, 3, 0x41, 1, 0x41, 1]);
+    push_gc(&mut f4, 0x13);
+    f4.extend_from_slice(&[24, 0]);
+    // Read elem 0 (i31 10), elem 1 (S0 777), elem 2 (i32[] [3,4]), elem 3 (now S0 777)
+    f4.extend_from_slice(&[0x20, 7, 0x20, 4, 0x41, 0]);
+    push_gc(&mut f4, 0x0b);
+    f4.push(24);
+    push_gc(&mut f4, 0x16);
+    f4.push(0x6c);
+    push_gc(&mut f4, 0x1d);
+    f4.push(0x6a);
+    f4.extend_from_slice(&[0x20, 4, 0x41, 3]);
+    push_gc(&mut f4, 0x0b);
+    f4.push(24);
+    push_gc(&mut f4, 0x16);
+    f4.push(0);
+    push_gc(&mut f4, 2);
+    f4.extend_from_slice(&[0, 0, 0x6a]);
+    f4.extend_from_slice(&[0x20, 4, 0x41, 2]);
+    push_gc(&mut f4, 0x0b);
+    f4.push(24);
+    push_gc(&mut f4, 0x16);
+    f4.push(19);
+    f4.push(0x41);
+    f4.push(1);
+    push_gc(&mut f4, 0x0b);
+    f4.extend_from_slice(&[19, 0x6a, 0x21, 7]);
+    // a_ext = array.new_default 25 (2); store extern.convert_any(ref.i31(51)) and read back
+    f4.extend_from_slice(&[0x41, 2]);
+    push_gc(&mut f4, 7);
+    f4.push(25);
+    f4.extend_from_slice(&[0x22, 5, 0x41, 1]);
+    push_i32(&mut f4, 51);
+    push_gc(&mut f4, 0x1c);
+    push_gc(&mut f4, 0x1b);
+    push_gc(&mut f4, 0x0e);
+    f4.push(25);
+    f4.extend_from_slice(&[0x20, 7, 0x20, 5, 0x41, 1]);
+    push_gc(&mut f4, 0x0b);
+    f4.push(25);
+    push_gc(&mut f4, 0x1a);
+    push_gc(&mut f4, 0x16);
+    f4.push(0x6c);
+    push_gc(&mut f4, 0x1d);
+    f4.extend_from_slice(&[0x6a, 0x21, 7]);
+    // a_fn = array.new_fixed 26 2 (ref.func 0, ref.func 1) -> call_ref via ref.cast (ref 27)!
+    f4.extend_from_slice(&[0xd2, 0, 0xd2, 1]);
+    push_gc(&mut f4, 8);
+    f4.extend_from_slice(&[26, 2, 0x21, 6]);
+    f4.extend_from_slice(&[0x20, 7, 0x20, 0, 0x20, 6, 0x41, 0]);
+    push_gc(&mut f4, 0x0b);
+    f4.push(26);
+    push_gc(&mut f4, 0x16);
+    f4.push(27); // fn0 (type 28) is subtype of 27!
+    f4.extend_from_slice(&[0x14, 27, 0x6a]);
+
+    // fn5: gc_casts_and_subtyping(arg: i32) -> i32
+    // Locals: 1=anyref (S12), 2=anyref (S0), 3=anyref (RecA 13), 4=anyref (i31), 5=i32 (acc)
+    let mut f5 = Vec::new();
+    // local 1 = struct.new_default 12 (depth 12!)
+    push_gc(&mut f5, 1);
+    f5.extend_from_slice(&[12, 0x21, 1]);
+    // local 2 = struct.new 0 (arg)
+    f5.extend_from_slice(&[0x20, 0]);
+    push_gc(&mut f5, 0);
+    f5.extend_from_slice(&[0, 0x21, 2]);
+    // local 3 = struct.new 13 (arg, null)
+    f5.extend_from_slice(&[0x20, 0, 0xd0, 14]);
+    push_gc(&mut f5, 0);
+    f5.extend_from_slice(&[13, 0x21, 3]);
+    // local 4 = ref.i31(0x4000_0000) -> signed -0x4000_0000, unsigned 0x4000_0000!
+    push_i32(&mut f5, 0x4000_0000);
+    push_gc(&mut f5, 0x1c);
+    f5.extend_from_slice(&[0x21, 4]);
+    // i31.get_s & i31.get_u edge values + ref.eq tests
+    f5.extend_from_slice(&[0x20, 4]);
+    push_gc(&mut f5, 0x16);
+    f5.push(0x6c);
+    push_gc(&mut f5, 0x1d); // -0x4000_0000
+    f5.extend_from_slice(&[0x20, 4]);
+    push_gc(&mut f5, 0x16);
+    f5.push(0x6c);
+    push_gc(&mut f5, 0x1e); // +0x4000_0000
+    f5.push(0x73); // xor -> 0x8000_0000
+    // Pack boolean bitmask of ref.eq & ref.test results into acc (local 5)
+    let mut bit = 0u32;
+    let push_bit = |code: &mut Vec<u8>, b: &mut u32| {
+        push_i32(code, *b as i32);
+        code.extend_from_slice(&[0x74, 0x72]); // shl, or
+        *b += 1;
+    };
+    // ref.eq: null == null (1), null == i31 (0), i31 == same i31 (1), s0 == s0 (1), s0 == fresh s0 (0)
+    f5.extend_from_slice(&[0xd0, 0x6d, 0xd0, 0x6d, 0xd3]);
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0xd0, 0x6d, 0x20, 4]);
+    push_gc(&mut f5, 0x16);
+    f5.extend_from_slice(&[0x6d, 0xd3]);
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0x20, 4]);
+    push_gc(&mut f5, 0x16);
+    f5.push(0x6d);
+    push_i32(&mut f5, 0x4000_0000);
+    push_gc(&mut f5, 0x1c);
+    f5.push(0xd3);
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f5, 0x16);
+    f5.push(0x6d);
+    f5.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f5, 0x16);
+    f5.extend_from_slice(&[0x6d, 0xd3]);
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f5, 0x16);
+    f5.push(0x6d);
+    f5.extend_from_slice(&[0x20, 0]);
+    push_gc(&mut f5, 0);
+    f5.extend_from_slice(&[0, 0xd3]);
+    push_bit(&mut f5, &mut bit);
+    // Deep subtyping ref.test on S12 (depth 12): test S0 (1), S9 (1), S10 (1), S11 (1), S12 (1), struct (1), eq (1), any (1), array (0), i31 (0), none (0)
+    for (nullable, ht) in [
+        (false, 0u8),
+        (false, 9),
+        (false, 10),
+        (false, 11),
+        (false, 12),
+        (false, 0x6b),
+        (false, 0x6d),
+        (false, 0x6e),
+        (false, 0x6a),
+        (false, 0x6c),
+        (false, 0x71),
+        (true, 0x71), // nullref on non-null S12 -> 0
+    ] {
+        f5.extend_from_slice(&[0x20, 1]);
+        push_gc(&mut f5, if nullable { 0x15 } else { 0x14 });
+        f5.push(ht);
+        push_bit(&mut f5, &mut bit);
+    }
+    // Cross-rec structural equivalence: local 3 (type 13, RecA) tested against type 15 (RecB) -> 1!
+    f5.extend_from_slice(&[0x20, 3]);
+    push_gc(&mut f5, 0x14);
+    f5.push(15);
+    push_bit(&mut f5, &mut bit);
+    // S0 tested against S12 -> 0; null tested against nullable S12 -> 1; null tested against non-null S12 -> 0
+    f5.extend_from_slice(&[0x20, 2]);
+    push_gc(&mut f5, 0x14);
+    f5.push(12);
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0xd0, 0x6e]);
+    push_gc(&mut f5, 0x15);
+    f5.push(12);
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0xd0, 0x6e]);
+    push_gc(&mut f5, 0x14);
+    f5.push(12);
+    push_bit(&mut f5, &mut bit);
+    // extern.convert_any / any.convert_extern round-trip on null, i31, S12 + ref.test extern/noextern
+    f5.extend_from_slice(&[0xd0, 0x6e]);
+    push_gc(&mut f5, 0x1b); // extern.convert_any(null) -> null extern
+    push_gc(&mut f5, 0x15);
+    f5.push(0x72); // ref.test (ref null noextern) -> 1
+    push_bit(&mut f5, &mut bit);
+    f5.extend_from_slice(&[0x20, 1]);
+    push_gc(&mut f5, 0x1b); // extern.convert_any(S12)
+    push_gc(&mut f5, 0x1a); // any.convert_extern -> S12
+    push_gc(&mut f5, 0x14);
+    f5.push(12); // ref.test (ref 12) -> 1
+    push_bit(&mut f5, &mut bit);
+    // br_on_cast (success path: S12 -> S11) & br_on_cast_fail (fail path: S0 -> S12)
+    f5.extend_from_slice(&[0x21, 5]);
+    // block (result i32) { block (result anyref) { local.get 1; br_on_cast 0 any -> 11 (flags=0x01: ht1 nullable, ht2 non-null); drop; i32.const 100; br 1 } drop; i32.const 200 }
+    f5.extend_from_slice(&[0x02, 0x7f, 0x02, 0x6e, 0x20, 1]);
+    push_gc(&mut f5, 0x18);
+    f5.extend_from_slice(&[0x01, 0, 0x6e, 11, 0x1a]);
+    push_i32(&mut f5, 100);
+    f5.extend_from_slice(&[0x0c, 1, 0x0b, 0x1a]);
+    push_i32(&mut f5, 200);
+    f5.extend_from_slice(&[0x0b, 0x20, 5, 0x6a, 0x21, 5]);
+    // br_on_cast_fail: S0 -> S12 fails and branches!
+    f5.extend_from_slice(&[0x02, 0x7f, 0x02, 0x6e, 0x20, 2]);
+    push_gc(&mut f5, 0x19);
+    f5.extend_from_slice(&[0x01, 0, 0x6e, 12, 0x1a]);
+    push_i32(&mut f5, 300);
+    f5.extend_from_slice(&[0x0c, 1, 0x0b, 0x1a]);
+    push_i32(&mut f5, 400);
+    f5.extend_from_slice(&[0x0b, 0x20, 5, 0x6a]);
+
+    // fn6: gc_const_and_exn(arg: i32) -> i32
+    // Reads globals 0..3, table 1 slots 0..3, dynamic call_indirect (type 27) on slots 0 & 1,
+    // and throws + catches a GC struct inside Tag 0 via try_table!
+    let mut f6 = Vec::new();
+    // g0 (S0(42)) + g1 (i32[4] of 9, len + elem[2]) + g2 (i31 -7) + g3 (extern(S0(0)))
+    f6.extend_from_slice(&[0x23, 0]);
+    push_gc(&mut f6, 0x16);
+    f6.push(0);
+    push_gc(&mut f6, 2);
+    f6.extend_from_slice(&[0, 0]);
+    f6.extend_from_slice(&[0x23, 1]);
+    push_gc(&mut f6, 0x16);
+    f6.push(19);
+    f6.extend_from_slice(&[0x41, 2]);
+    push_gc(&mut f6, 0x0b);
+    f6.extend_from_slice(&[19, 0x6a]);
+    f6.extend_from_slice(&[0x23, 2]);
+    push_gc(&mut f6, 0x16);
+    f6.push(0x6c);
+    push_gc(&mut f6, 0x1d);
+    f6.push(0x6a);
+    f6.extend_from_slice(&[0x23, 3]);
+    push_gc(&mut f6, 0x1a);
+    push_gc(&mut f6, 0x16);
+    f6.push(0);
+    push_gc(&mut f6, 2);
+    f6.extend_from_slice(&[0, 0, 0x6a]);
+    // table 1 slot 0 (explicit table init: S0(555)) + slot 1 (active elem: i31(1234)) + slot 2 (i32[3] len)
+    f6.extend_from_slice(&[0x41, 0, 0x25, 1]);
+    push_gc(&mut f6, 0x16);
+    f6.push(0);
+    push_gc(&mut f6, 2);
+    f6.extend_from_slice(&[0, 0, 0x6a]);
+    f6.extend_from_slice(&[0x41, 1, 0x25, 1]);
+    push_gc(&mut f6, 0x16);
+    f6.push(0x6c);
+    push_gc(&mut f6, 0x1d);
+    f6.push(0x6a);
+    f6.extend_from_slice(&[0x41, 2, 0x25, 1]);
+    push_gc(&mut f6, 0x16);
+    f6.push(19);
+    push_gc(&mut f6, 0x0f);
+    f6.push(0x6a);
+    // Dynamic call_indirect (type 27, table 0) on slot 0 (fn_sub28 <: 27!) and slot 1 (fn_base27)
+    f6.extend_from_slice(&[0x20, 0, 0x41, 0, 0x11, 27, 0, 0x6a]);
+    f6.extend_from_slice(&[0x20, 0, 0x41, 1, 0x11, 27, 0, 0x6a]);
+    // Throw + catch GC struct via Tag 0 (type 30: anyref, i32) into block (type 31)
+    f6.extend_from_slice(&[0x02, 31, 0x1f, 0x40, 1, 0x00, 0, 0]);
+    f6.extend_from_slice(&[0x20, 0, 0x41, 77, 0x6a]);
+    push_gc(&mut f6, 0);
+    f6.push(0); // struct.new 0 (arg + 77)
+    push_i32(&mut f6, 333);
+    f6.extend_from_slice(&[0x08, 0, 0x0b, 0x00, 0x0b]); // throw 0; end try_table; unreachable; end block
+    // Stack: [acc, caught_anyref, caught_i32]
+    f6.extend_from_slice(&[0x21, 1]); // save caught_i32 in local 1
+    push_gc(&mut f6, 0x16);
+    f6.push(0);
+    push_gc(&mut f6, 2);
+    f6.extend_from_slice(&[0, 0, 0x6a, 0x20, 1, 0x6a]);
+
+    // fn7: gc_traps(case: i32) -> i32
+    let mut f7 = Vec::new();
+    let push_case = |code: &mut Vec<u8>, id: i32, body: &[u8]| {
+        code.push(0x20);
+        code.push(0);
+        push_i32(code, id);
+        code.extend_from_slice(&[0x46, 0x04, 0x40]); // i32.eq; if
+        code.extend_from_slice(body);
+        code.push(0x0b); // end
+    };
+    // 0: struct.get on null
+    push_case(&mut f7, 0, &[0xd0, 0, 0xfb, 0x02, 0, 0, 0x0f]);
+    // 1: struct.set on null
+    push_case(&mut f7, 1, &[0xd0, 0, 0x41, 1, 0xfb, 0x05, 0, 0]);
+    // 2: array.get on null
+    push_case(&mut f7, 2, &[0xd0, 19, 0x41, 0, 0xfb, 0x0b, 19, 0x0f]);
+    // 3: array.set on null
+    push_case(&mut f7, 3, &[0xd0, 19, 0x41, 0, 0x41, 1, 0xfb, 0x0e, 19]);
+    // 4: array.len on null
+    push_case(&mut f7, 4, &[0xd0, 19, 0xfb, 0x0f, 0x0f]);
+    // 5: i31.get_s on null
+    push_case(&mut f7, 5, &[0xd0, 0x6c, 0xfb, 0x1d, 0x0f]);
+    // 6: i31.get_u on null
+    push_case(&mut f7, 6, &[0xd0, 0x6c, 0xfb, 0x1e, 0x0f]);
+    // 7: array.get OOB (idx == len)
+    push_case(
+        &mut f7,
+        7,
+        &[0x41, 3, 0xfb, 0x07, 19, 0x41, 3, 0xfb, 0x0b, 19, 0x0f],
+    );
+    // 8: array.set OOB (idx == -1 / u32::MAX)
+    push_case(
+        &mut f7,
+        8,
+        &[0x41, 3, 0xfb, 0x07, 19, 0x41, 0x7f, 0x41, 1, 0xfb, 0x0e, 19],
+    );
+    // 9: array.fill OOB with u32 wrap (off = 2, len = -1)
+    push_case(
+        &mut f7,
+        9,
+        &[
+            0x41, 4, 0xfb, 0x07, 19, 0x41, 2, 0x41, 0, 0x41, 0x7f, 0xfb, 0x10, 19,
+        ],
+    );
+    // 10: array.copy OOB (src_off + len > src.len)
+    push_case(
+        &mut f7,
+        10,
+        &[
+            0x41, 4, 0xfb, 0x07, 19, 0x41, 0, 0x41, 2, 0xfb, 0x07, 19, 0x41, 1, 0x41, 2, 0xfb,
+            0x11, 19, 19,
+        ],
+    );
+    // 11: array.new_data OOB (data 0 has 16 bytes -> 4 i32s; ask for off=12, len=2 -> 20 > 16)
+    push_case(&mut f7, 11, &[0x41, 12, 0x41, 2, 0xfb, 0x09, 19, 0, 0x1a]);
+    // 12: array.new_data u32 byte-length overflow (len = 0x4000_0001 on i32 array!)
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 0);
+        push_i32(&mut b, 0x4000_0001);
+        b.extend_from_slice(&[0xfb, 0x09, 19, 0, 0x1a]);
+        push_case(&mut f7, 12, &b);
+    }
+    // 13: array.init_data after data.drop 1
+    push_case(
+        &mut f7,
+        13,
+        &[
+            0xfc, 0x09, 1, 0x41, 2, 0xfb, 0x07, 17, 0x41, 0, 0x41, 0, 0x41, 1, 0xfb, 0x12, 17, 1,
+        ],
+    );
+    // 14: array.new_elem OOB (elem 0 has 4 entries; ask for off=3, len=2)
+    push_case(&mut f7, 14, &[0x41, 3, 0x41, 2, 0xfb, 0x0a, 24, 0, 0x1a]);
+    // 15: array.init_elem after elem.drop 1
+    push_case(
+        &mut f7,
+        15,
+        &[
+            0xfc, 0x0d, 1, 0x41, 2, 0xfb, 0x07, 24, 0x41, 0, 0x41, 0, 0x41, 1, 0xfb, 0x13, 24, 1,
+        ],
+    );
+    // 16: ref.cast (ref S12) on S0
+    push_case(&mut f7, 16, &[0x41, 1, 0xfb, 0x00, 0, 0xfb, 0x16, 12, 0x1a]);
+    // 17: ref.cast (ref S0) on ref.null any
+    push_case(&mut f7, 17, &[0xd0, 0x6e, 0xfb, 0x16, 0, 0x1a]);
+    // 18: ref.cast (ref i31) on struct
+    push_case(
+        &mut f7,
+        18,
+        &[0x41, 1, 0xfb, 0x00, 0, 0xfb, 0x16, 0x6c, 0x1a],
+    );
+    // 19: call_indirect (type 27) on slot 2 (fn_unrelated29 -> type mismatch!)
+    push_case(&mut f7, 19, &[0x41, 5, 0x41, 2, 0x11, 27, 0, 0x0f]);
+    f7.extend_from_slice(&[0x41, 0]);
+
+    let wasm = wasm_module(&[
+        section(1, &tsec),
+        funcs,
+        section(4, &tbl_sec),
+        tag_sec,
+        section(6, &gsec),
+        export_sec(&[
+            ("gc_structs", 0, 3),
+            ("gc_arrays", 0, 4),
+            ("gc_casts_and_subtyping", 0, 5),
+            ("gc_const_and_exn", 0, 6),
+            ("gc_traps", 0, 7),
+        ]),
+        section(9, &esec),
+        dcount_sec,
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[], &f2),
+            enc_body(&[], &{
+                // Prepend locals for f3: (ref null 12) x2, (ref null 0) x1, i32 x1
+                // Use raw body encoding with custom local types!
+                let _ = &f3;
+                Vec::new()
+            }),
+        ]),
+        section(11, &dsec),
+    ]);
+    // Build code section directly with GC local types (enc_body only takes single-byte valtypes).
+    fn enc_gc_body(locals: &[(u32, &[u8])], body: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        leb_u32(&mut inner, locals.len() as u32);
+        for &(cnt, ty_bytes) in locals {
+            leb_u32(&mut inner, cnt);
+            inner.extend_from_slice(ty_bytes);
+        }
+        inner.extend_from_slice(body);
+        inner.push(0x0b);
+        let mut out = Vec::new();
+        leb_u32(&mut out, inner.len() as u32);
+        out.extend_from_slice(&inner);
+        out
+    }
+    let _ = wasm;
+    let wasm = wasm_module(&[
+        section(1, &tsec),
+        func_sec(&[28, 27, 29, 29, 29, 29, 29, 29]),
+        section(4, &tbl_sec),
+        section(13, &[1, 0x00, 30]),
+        section(6, &gsec),
+        export_sec(&[
+            ("gc_structs", 0, 3),
+            ("gc_arrays", 0, 4),
+            ("gc_casts_and_subtyping", 0, 5),
+            ("gc_const_and_exn", 0, 6),
+            ("gc_traps", 0, 7),
+        ]),
+        section(9, &esec),
+        section(12, &[2]),
+        code_sec(&[
+            enc_gc_body(&[], &f0),
+            enc_gc_body(&[], &f1),
+            enc_gc_body(&[], &f2),
+            enc_gc_body(&[(2, &[0x63, 12]), (1, &[0x63, 0]), (1, &[0x7f])], &f3),
+            enc_gc_body(
+                &[
+                    (1, &[0x63, 17]),
+                    (1, &[0x63, 18]),
+                    (1, &[0x63, 19]),
+                    (1, &[0x63, 24]),
+                    (1, &[0x63, 25]),
+                    (1, &[0x63, 26]),
+                    (1, &[0x7f]),
+                ],
+                &f4,
+            ),
+            enc_gc_body(&[(4, &[0x6e]), (1, &[0x7f])], &f5),
+            enc_gc_body(&[(1, &[0x7f])], &f6),
+            enc_gc_body(&[], &f7),
+        ]),
+        section(11, &dsec),
+    ]);
+
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    let mut calls = vec![
+        c("gc_structs", ArgSpec::I32(17)),
+        c("gc_structs", ArgSpec::I32(-999)),
+        c("gc_arrays", ArgSpec::I32(23)),
+        c("gc_casts_and_subtyping", ArgSpec::I32(123)),
+        c("gc_const_and_exn", ArgSpec::I32(11)),
+    ];
+    for tc in 0..=19 {
+        calls.push(c("gc_traps", ArgSpec::I32(tc)));
+    }
+    assert_oracle_matrix("x64_wasm_gc_all_opcodes", &wasm, &calls, &[], &[]);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_wasm_gc_cheney_4kib_stress_cycles_deep_stack_and_growth() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn push_sleb_i32(out: &mut Vec<u8>, mut v: i32) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_i32(out: &mut Vec<u8>, v: i32) {
+        out.push(0x41);
+        push_sleb_i32(out, v);
+    }
+    fn enc_gc_body(locals: &[(u32, &[u8])], body: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        leb_u32(&mut inner, locals.len() as u32);
+        for &(cnt, ty_bytes) in locals {
+            leb_u32(&mut inner, cnt);
+            inner.extend_from_slice(ty_bytes);
+        }
+        inner.extend_from_slice(body);
+        inner.push(0x0b);
+        let mut out = Vec::new();
+        leb_u32(&mut out, inner.len() as u32);
+        out.extend_from_slice(&inner);
+        out
+    }
+
+    // Types:
+    // 0: Node = (struct (mut i32) (mut (ref null 0)) (mut (ref null 0)) (mut anyref) (mut externref))
+    // 1: I32Arr = (array (mut i32))
+    // 2: AnyArr = (array (mut anyref))
+    // 3: (func (param i32) (result i32))
+    // 4: (func (param i32 (ref null 0)) (result i32)) [recursive churn worker]
+    // 5: (func (param anyref))                        [Tag 0: GC ref in caught exception]
+    // 6: (func (result anyref))                       [try_table catch block]
+    let mut tsec = Vec::new();
+    tsec.push(7);
+    // 0: Node
+    tsec.extend_from_slice(&[0x5f, 5, 0x7f, 1, 0x63, 0, 1, 0x63, 0, 1, 0x6e, 1, 0x6f, 1]);
+    // 1: I32Arr
+    tsec.extend_from_slice(&[0x5e, 0x7f, 1]);
+    // 2: AnyArr
+    tsec.extend_from_slice(&[0x5e, 0x6e, 1]);
+    // 3..=6: funcs
+    tsec.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // 3
+    tsec.extend_from_slice(&[0x60, 2, 0x7f, 0x63, 0, 1, 0x7f]); // 4
+    tsec.extend_from_slice(&[0x60, 1, 0x6e, 0]); // 5
+    tsec.extend_from_slice(&[0x60, 0, 1, 0x6e]); // 6
+
+    // Table 0: (table 4 anyref)
+    let tbl_sec = section(4, &[1, 0x6e, 0x00, 4]);
+    // Tag 0: type 5
+    let tag_sec = section(13, &[1, 0x00, 5]);
+    // Global 0: (mut anyref) = ref.null any
+    let gsec = section(6, &[1, 0x6e, 1, 0xd0, 0x6e, 0x0b]);
+    // Passive Elem 0 (anyref): [struct.new 0 (9001, null, null, null, null), array.new_fixed 1 2 (77, 88)]
+    // Verifies passive GC elem buffer entries are traced & forwarded across 500+ collections!
+    let mut esec = Vec::new();
+    esec.extend_from_slice(&[1, 0x05, 0x6e, 2]);
+    push_i32(&mut esec, 9001);
+    esec.extend_from_slice(&[
+        0xd0, 0, 0xd0, 0, 0xd0, 0x6e, 0xd0, 0x6f, 0xfb, 0x00, 0, 0x0b,
+    ]);
+    push_i32(&mut esec, 77);
+    push_i32(&mut esec, 88);
+    esec.extend_from_slice(&[0xfb, 0x08, 1, 2, 0x0b]);
+
+    // fn0 (type 4): recurse_churn(depth: i32, pinned: (ref null 0)) -> i32
+    // Keeps `pinned` + `f64` + `v128` live across 40 temp structs & 40 temp arrays AND a
+    // recursive call, forcing hundreds of Cheney collections in a 4 KiB heap while verifying
+    // both stack-map forwarding AND XMM register preservation across HELPER_GC_COLLECT!
+    // Locals: 0=depth, 1=pinned, 2=i32 i, 3=f64 live_f, 4=v128 live_v, 5=(ref null 0) tmp_s, 6=(ref null 1) tmp_a, 7=i32 acc
+    let mut f0 = Vec::new();
+    // live_f = f64(depth) + 0.25
+    f0.extend_from_slice(&[0x20, 0, 0xb7, 0x44]);
+    f0.extend_from_slice(&0.25f64.to_le_bytes());
+    f0.extend_from_slice(&[0xa0, 0x21, 3]);
+    // live_v = i32x4.splat(depth * 17 + 3)
+    f0.extend_from_slice(&[0x20, 0, 0x41, 17, 0x6c, 0x41, 3, 0x6a, 0xfd, 0x11, 0x21, 4]);
+    // Loop i = 0..40 allocating temp Node + temp i32[12]
+    f0.extend_from_slice(&[0x41, 0, 0x21, 2, 0x03, 0x40]);
+    // tmp_a = array.new 1 (i + depth, 12)
+    f0.extend_from_slice(&[0x20, 2, 0x20, 0, 0x6a, 0x41, 12, 0xfb, 0x06, 1, 0x21, 6]);
+    // tmp_s = struct.new 0 (i, pinned, null, tmp_a, extern.convert_any(tmp_a))
+    f0.extend_from_slice(&[
+        0x20, 2, 0x20, 1, 0xd0, 0, 0x20, 6, 0x20, 6, 0xfb, 0x1b, 0xfb, 0x00, 0, 0x21, 5,
+    ]);
+    // acc += tmp_s.id + tmp_a[11]
+    f0.extend_from_slice(&[
+        0x20, 7, 0x20, 5, 0xfb, 0x02, 0, 0, 0x6a, 0x20, 6, 0x41, 11, 0xfb, 0x0b, 1, 0x6a, 0x21, 7,
+    ]);
+    // i += 1; br_if loop (i < 40)
+    f0.extend_from_slice(&[
+        0x20, 2, 0x41, 1, 0x6a, 0x22, 2, 0x41, 40, 0x49, 0x0d, 0, 0x0b,
+    ]);
+    // Recurse if depth > 0
+    f0.extend_from_slice(&[0x20, 0, 0x41, 0, 0x4a, 0x04, 0x40]);
+    f0.extend_from_slice(&[
+        0x20, 0, 0x41, 1, 0x6b, 0x20, 1, 0x10, 0, 0x20, 7, 0x6a, 0x21, 7,
+    ]);
+    f0.push(0x0b);
+    // Combine acc + pinned.id + trunc(live_f * 4.0) + i32x4.extract_lane 2 (live_v)
+    f0.extend_from_slice(&[0x20, 7, 0x20, 1, 0xfb, 0x02, 0, 0, 0x6a]);
+    f0.extend_from_slice(&[0x20, 3, 0x44]);
+    f0.extend_from_slice(&4.0f64.to_le_bytes());
+    f0.extend_from_slice(&[0xa2, 0xaa, 0x6a]); // f64.mul; i32.trunc_f64_s; add
+    f0.extend_from_slice(&[0x20, 4, 0xfd, 0x1b, 2, 0x6a]);
+
+    // fn1 (type 3): stress_ring(depth: i32) -> i32
+    // Builds a 16-node cyclic doubly-linked ring, roots it across global 0, table 0, local,
+    // and caught exception payload, runs `recurse_churn(depth, node8)` + extra churn,
+    // then verifies every forward/backward link, ref.eq cycle identity, payloads, ext refs,
+    // and passive elem segment 0!
+    // Locals: 0=depth, 1=(ref null 0) head, 2=(ref null 0) prev, 3=(ref null 0) cur,
+    //         4=(ref null 0) n8, 5=(ref null 0) n12, 6=i32 i, 7=i32 sum, 8=(ref null 2) elem_arr
+    let mut f1 = Vec::new();
+    // Build 16 nodes i = 0..16
+    f1.extend_from_slice(&[0x41, 0, 0x21, 6, 0x03, 0x40]);
+    // payload = array.new_fixed 1 2 (i * 10 + 1, i * 10 + 2)
+    // ext = extern.convert_any(array.new_fixed 1 1 (i + 100))
+    // cur = struct.new 0 (i + 1, null, prev, payload, ext)
+    f1.extend_from_slice(&[
+        0x20, 6, 0x41, 1, 0x6a, // id
+        0xd0, 0, // next = null
+        0x20, 2, // prev
+        0x20, 6, 0x41, 10, 0x6c, 0x41, 1, 0x6a, // p[0]
+        0x20, 6, 0x41, 10, 0x6c, 0x41, 2, 0x6a, // p[1]
+        0xfb, 0x08, 1, 2, // array.new_fixed 1 2
+        0x20, 6,
+    ]);
+    push_i32(&mut f1, 100);
+    f1.extend_from_slice(&[0x6a, 0xfb, 0x08, 1, 1, 0xfb, 0x1b, 0xfb, 0x00, 0, 0x21, 3]);
+    // if i == 0 { head = cur; global.set 0 cur } else { prev.next = cur }
+    f1.extend_from_slice(&[0x20, 6, 0x45, 0x04, 0x40, 0x20, 3, 0x22, 1, 0x24, 0, 0x05]);
+    f1.extend_from_slice(&[0x20, 2, 0x20, 3, 0xfb, 0x05, 0, 1, 0x0b]);
+    // if i == 4 { table.set 0 (0, cur) }
+    f1.extend_from_slice(&[
+        0x20, 6, 0x41, 4, 0x46, 0x04, 0x40, 0x41, 0, 0x20, 3, 0x26, 0, 0x0b,
+    ]);
+    // if i == 8 { n8 = cur }
+    f1.extend_from_slice(&[0x20, 6, 0x41, 8, 0x46, 0x04, 0x40, 0x20, 3, 0x21, 4, 0x0b]);
+    // if i == 12 { n12 = cur }
+    f1.extend_from_slice(&[0x20, 6, 0x41, 12, 0x46, 0x04, 0x40, 0x20, 3, 0x21, 5, 0x0b]);
+    // prev = cur; i += 1; br_if loop (i < 16)
+    f1.extend_from_slice(&[
+        0x20, 3, 0x21, 2, 0x20, 6, 0x41, 1, 0x6a, 0x22, 6, 0x41, 16, 0x49, 0x0d, 0, 0x0b,
+    ]);
+    // Close the cycle: prev.next = head; head.prev = prev
+    f1.extend_from_slice(&[0x20, 2, 0x20, 1, 0xfb, 0x05, 0, 1]);
+    f1.extend_from_slice(&[0x20, 1, 0x20, 2, 0xfb, 0x05, 0, 2]);
+    // Throw n12 inside try_table -> catch -> run recurse_churn(depth, n8) while caught ref is live on stack/local!
+    f1.extend_from_slice(&[
+        0x02, 6, 0x1f, 0x40, 1, 0x00, 0, 0, 0x20, 5, 0x08, 0, 0x0b, 0x00, 0x0b,
+    ]);
+    // Caught anyref is on stack -> store back into n12 after casting to (ref null 0)
+    f1.extend_from_slice(&[0xfb, 0x17, 0, 0x21, 5]);
+    // Run heavy recursive churn!
+    f1.extend_from_slice(&[0x20, 0, 0x20, 4, 0x10, 0, 0x21, 7]);
+    // Re-read head from global 0 and verify ref.eq(head, local head) == 1
+    f1.extend_from_slice(&[
+        0x23, 0, 0xfb, 0x17, 0, 0x20, 1, 0xd3, 0x20, 7, 0x6a, 0x21, 7,
+    ]);
+    // Verify table 0[0] == node 4 and n12.id == 13
+    f1.extend_from_slice(&[
+        0x41, 0, 0x25, 0, 0xfb, 0x16, 0, 0xfb, 0x02, 0, 0, 0x20, 7, 0x6a, 0x21, 7,
+    ]);
+    f1.extend_from_slice(&[0x20, 5, 0xfb, 0x02, 0, 0, 0x20, 7, 0x6a, 0x21, 7]);
+    // Walk 16 hops forward around the ring, summing id + payload[0] + payload[1] + ext[0]
+    f1.extend_from_slice(&[0x20, 1, 0x21, 3, 0x41, 0, 0x21, 6, 0x03, 0x40]);
+    f1.extend_from_slice(&[
+        0x20, 7, 0x20, 3, 0xfb, 0x02, 0, 0, 0x6a, // + cur.id
+        0x20, 3, 0xfb, 0x02, 0, 3, 0xfb, 0x16, 1, 0x41, 0, 0xfb, 0x0b, 1,
+        0x6a, // + payload[0]
+        0x20, 3, 0xfb, 0x02, 0, 3, 0xfb, 0x16, 1, 0x41, 1, 0xfb, 0x0b, 1,
+        0x6a, // + payload[1]
+        0x20, 3, 0xfb, 0x02, 0, 4, 0xfb, 0x1a, 0xfb, 0x16, 1, 0x41, 0, 0xfb, 0x0b, 1,
+        0x6a, // + ext[0]
+        0x21, 7, 0x20, 3, 0xfb, 0x02, 0, 1, 0x21, 3, // cur = cur.next
+        0x20, 6, 0x41, 1, 0x6a, 0x22, 6, 0x41, 16, 0x49, 0x0d, 0, 0x0b,
+    ]);
+    // Verify cur == head after 16 forward hops!
+    f1.extend_from_slice(&[0x20, 3, 0x20, 1, 0xd3]);
+    push_i32(&mut f1, 1000);
+    f1.extend_from_slice(&[0x6c, 0x20, 7, 0x6a, 0x21, 7]);
+    // Walk 16 hops backward!
+    f1.extend_from_slice(&[0x41, 0, 0x21, 6, 0x03, 0x40]);
+    f1.extend_from_slice(&[
+        0x20, 3, 0xfb, 0x02, 0, 2, 0x21, 3, 0x20, 7, 0x20, 3, 0xfb, 0x02, 0, 0, 0x6a, 0x21, 7,
+        0x20, 6, 0x41, 1, 0x6a, 0x22, 6, 0x41, 16, 0x49, 0x0d, 0, 0x0b,
+    ]);
+    // Verify cur == head after 16 backward hops!
+    f1.extend_from_slice(&[0x20, 3, 0x20, 1, 0xd3]);
+    push_i32(&mut f1, 2000);
+    f1.extend_from_slice(&[0x6c, 0x20, 7, 0x6a, 0x21, 7]);
+    // Read passive elem segment 0 AFTER hundreds of collections!
+    f1.extend_from_slice(&[0x41, 0, 0x41, 2, 0xfb, 0x0a, 2, 0, 0x21, 8]);
+    f1.extend_from_slice(&[
+        0x20, 7, 0x20, 8, 0x41, 0, 0xfb, 0x0b, 2, 0xfb, 0x16, 0, 0xfb, 0x02, 0, 0, 0x6a, 0x20, 8,
+        0x41, 1, 0xfb, 0x0b, 2, 0xfb, 0x16, 1, 0x41, 1, 0xfb, 0x0b, 1, 0x6a,
+    ]);
+
+    // fn2 (type 3): stress_growth(count: i32) -> i32
+    // Retains `count` live `i32[16]` arrays inside an `anyref[count]` outer array (~80 bytes each ->
+    // 2000 elements = ~160 KiB live working set, 40x the 4 KiB initial semi-space!), then sums all.
+    // Locals: 0=count, 1=(ref null 2) outer, 2=i32 i, 3=i32 sum, 4=(ref null 1) inner
+    let mut f2 = Vec::new();
+    f2.extend_from_slice(&[0x20, 0, 0xfb, 0x07, 2, 0x21, 1]); // outer = array.new_default 2 (count)
+    f2.extend_from_slice(&[0x41, 0, 0x21, 2, 0x03, 0x40]);
+    f2.extend_from_slice(&[0x20, 2, 0x20, 0, 0x48, 0x04, 0x40]); // if i < count
+    f2.extend_from_slice(&[
+        0x20, 1, 0x20, 2, 0x20, 2, 0x41, 16, 0xfb, 0x06, 1, 0xfb, 0x0e,
+        2, // outer[i] = array.new 1 (i, 16)
+        0x20, 2, 0x41, 1, 0x6a, 0x21, 2, 0x0c, 1, 0x0b, 0x0b,
+    ]);
+    // Sum outer[i][15] for all i = 0..count
+    f2.extend_from_slice(&[0x41, 0, 0x21, 2, 0x03, 0x40]);
+    f2.extend_from_slice(&[0x20, 2, 0x20, 0, 0x48, 0x04, 0x40]);
+    f2.extend_from_slice(&[
+        0x20, 1, 0x20, 2, 0xfb, 0x0b, 2, 0xfb, 0x16, 1, 0x21, 4, 0x20, 3, 0x20, 4, 0x41, 15, 0xfb,
+        0x0b, 1, 0x6a, 0x21, 3, 0x20, 2, 0x41, 1, 0x6a, 0x21, 2, 0x0c, 1, 0x0b, 0x0b,
+    ]);
+    f2.extend_from_slice(&[0x20, 3]);
+
+    let wasm = wasm_module(&[
+        section(1, &tsec),
+        func_sec(&[4, 3, 3]),
+        tbl_sec,
+        tag_sec,
+        gsec,
+        export_sec(&[("stress_ring", 0, 1), ("stress_growth", 0, 2)]),
+        section(9, &esec),
+        code_sec(&[
+            enc_gc_body(
+                &[
+                    (1, &[0x7f]),
+                    (1, &[0x7c]),
+                    (1, &[0x7b]),
+                    (1, &[0x63, 0]),
+                    (1, &[0x63, 1]),
+                    (1, &[0x7f]),
+                ],
+                &f0,
+            ),
+            enc_gc_body(&[(5, &[0x63, 0]), (2, &[0x7f]), (1, &[0x63, 2])], &f1),
+            enc_gc_body(&[(1, &[0x63, 2]), (2, &[0x7f]), (1, &[0x63, 1])], &f2),
+        ]),
+    ]);
+
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+
+    // 1. Differential oracle across ALL 4 cells with forced 4 KiB initial GC heap!
+    //    `stress_ring(20)` runs depth-20 recursion * 40 iter * (Node + i32[12]) = 1,680+ objects
+    //    (~120 KiB churn -> 30+ Cheney flips per call) + `stress_growth(2000)` grows 4 KiB -> 256 KiB!
+    assert_oracle_matrix_with_gc_heap(
+        "x64_wasm_gc_cheney_4kib_stress",
+        &wasm,
+        &[
+            c("stress_ring", ArgSpec::I32(20)),
+            c("stress_ring", ArgSpec::I32(12)),
+            c("stress_growth", ArgSpec::I32(2000)),
+        ],
+        &[],
+        &[],
+        4096,
+        0,
+    );
+
+    // 2. Forced OOM cap: 4 KiB initial, 8 KiB max -> `stress_growth(500)` MUST cleanly trap
+    //    `TRAP_ALLOC_FAILED (12)` without crashing!
+    if let Some(driver) = get_oracle_driver() {
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-gc-oom");
+        let so_bytes = compile_wasm_to_x64_so(
+            &wasm,
+            &X64CompileOptions {
+                opt: true,
+                verify: true,
+                gc_initial_heap_bytes: 4096,
+                gc_max_heap_bytes: 8192,
+                ..Default::default()
+            },
+        )
+        .expect("compile OOM-capped GC module");
+        let so_path = root.0.join("gc_oom.so");
+        fs::write(&so_path, &so_bytes).unwrap();
+        let oom_trace = run_blot_so(
+            driver,
+            &so_path,
+            &[c("stress_growth", ArgSpec::I32(500))],
+            &[],
+            &[],
+            false,
+        );
+        assert_eq!(
+            oom_trace.outcomes[0].0,
+            Outcome::Trap(12),
+            "expected TRAP_ALLOC_FAILED (12) when exceeding gc_max_heap_bytes=8192"
+        );
+    }
+
+    // 3. Standalone executable (`X64Target::StandaloneExec`) with 4 KiB initial GC heap!
+    //    Reuses the same stress module with a `_start() -> i32` wrapper that compares
+    //    `stress_ring(10)` against the known interpreter oracle result and returns 0 on match.
+    let expected_ring10 =
+        match &run_wtime_oracle(&wasm, &[c("stress_ring", ArgSpec::I32(10))], &[], &[]).outcomes[0]
+            .0
+        {
+            Outcome::Ok(v) => *v as u32 as i32,
+            other => panic!("unexpected oracle outcome: {other:?}"),
+        };
+    let mut tsec_sa = tsec.clone();
+    tsec_sa[0] = 8;
+    tsec_sa.extend_from_slice(&[0x60, 0, 1, 0x7f]); // type 7: () -> i32
+    let mut f_start = Vec::new();
+    push_i32(&mut f_start, 10);
+    f_start.extend_from_slice(&[0x10, 1]); // call stress_ring(10)
+    push_i32(&mut f_start, expected_ring10);
+    f_start.push(0x47); // i32.ne -> 0 on exact match, 1 on mismatch!
+    let wasm_sa = wasm_module(&[
+        section(1, &tsec_sa),
+        func_sec(&[4, 3, 3, 7]),
+        section(4, &[1, 0x6e, 0x00, 4]),
+        section(13, &[1, 0x00, 5]),
+        section(6, &[1, 0x6e, 1, 0xd0, 0x6e, 0x0b]),
+        export_sec(&[("_start", 0, 3)]),
+        section(9, &esec),
+        code_sec(&[
+            enc_gc_body(
+                &[
+                    (1, &[0x7f]),
+                    (1, &[0x7c]),
+                    (1, &[0x7b]),
+                    (1, &[0x63, 0]),
+                    (1, &[0x63, 1]),
+                    (1, &[0x7f]),
+                ],
+                &f0,
+            ),
+            enc_gc_body(&[(5, &[0x63, 0]), (2, &[0x7f]), (1, &[0x63, 2])], &f1),
+            enc_gc_body(&[(1, &[0x63, 2]), (2, &[0x7f]), (1, &[0x63, 1])], &f2),
+            enc_gc_body(&[], &f_start),
+        ]),
+    ]);
+    let root_sa = crate::build::create_fresh_test_root("wtime-aot-x64-gc-standalone");
+    let elf = compile_wasm_to_x64_so(
+        &wasm_sa,
+        &X64CompileOptions {
+            target: super::module::X64Target::StandaloneExec,
+            opt: true,
+            verify: true,
+            gc_initial_heap_bytes: 4096,
+            ..Default::default()
+        },
+    )
+    .expect("compile standalone x64 GC executable");
+    let bin_path = root_sa.0.join("gc_stress.bin");
+    fs::write(&bin_path, &elf).unwrap();
+    fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let st = Command::new(&bin_path)
+        .status()
+        .expect("run standalone GC binary");
+    assert!(
+        st.success(),
+        "standalone x64 GC executable failed with status {st}"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_wasm_threads_atomics_all_opcodes_and_traps() {
+    fn push_sleb_i32(out: &mut Vec<u8>, mut v: i32) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_sleb_i64(out: &mut Vec<u8>, mut v: i64) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0) {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn push_i32(out: &mut Vec<u8>, v: i32) {
+        out.push(0x41);
+        push_sleb_i32(out, v);
+    }
+    fn push_i64(out: &mut Vec<u8>, v: i64) {
+        out.push(0x42);
+        push_sleb_i64(out, v);
+    }
+    fn push_atomic(out: &mut Vec<u8>, sub: u32, align: u8, mem: u32, offset: u32) {
+        out.push(0xfe);
+        leb_u32(out, sub);
+        if sub == 3 {
+            out.push(0); // atomic.fence reserved byte
+            return;
+        }
+        if mem == 0 {
+            out.push(align);
+        } else {
+            out.push(align | 0x40);
+            leb_u32(out, mem);
+        }
+        leb_u32(out, offset);
+    }
+
+    // Memories:
+    // 0: shared 32-bit (min=1, max=4, flags=0x03)
+    // 1: non-shared 32-bit (min=1, max=2, flags=0x01)
+    let mem_sec = section(5, &[2, 0x03, 1, 4, 0x01, 1, 2]);
+
+    // fn0: run_all_atomics(seed: i32) -> i64
+    // Exercises ALL 67 Wasm Threads opcodes (`0xfe00..=0xfe03`, `0xfe10..=0xfe4e`) on BOTH
+    // shared memory 0 and non-shared extra memory 1, plus `memory.grow` on shared memory 0!
+    let mut f0 = Vec::new();
+    // local 1: i64 acc = i64.extend_i32_u(seed)
+    f0.extend_from_slice(&[0x20, 0, 0xad, 0x21, 1]);
+    // atomic.fence
+    push_atomic(&mut f0, 3, 0, 0, 0);
+
+    // For both mem 0 (shared) and mem 1 (non-shared), test all 7 lanes across load, store,
+    // all 6 rmw ops (add/sub/and/or/xor/xchg), and cmpxchg (hit + miss)!
+    let lanes: &[(u32, u8, bool)] = &[
+        (0, 2, false), // i32 (4B)
+        (1, 3, true),  // i64 (8B)
+        (2, 0, false), // i32.8_u (1B)
+        (3, 1, false), // i32.16_u (2B)
+        (4, 0, true),  // i64.8_u (1B)
+        (5, 1, true),  // i64.16_u (2B)
+        (6, 2, true),  // i64.32_u (4B)
+    ];
+    for mem in 0u32..=1 {
+        for &(lane, align, is64) in lanes {
+            let base = (lane * 16 + 16) as i32;
+            // 1. atomic.store (0xfe17 + lane)
+            push_i32(&mut f0, base);
+            if is64 {
+                push_i64(&mut f0, 0x1122_3344_5566_7788 ^ i64::from(lane * 13 + mem * 7));
+            } else {
+                push_i32(&mut f0, 0x1234_5678 ^ ((lane * 19 + mem * 11) as i32));
+            }
+            push_atomic(&mut f0, 23 + lane, align, mem, 0);
+            // 2. atomic.load (0xfe10 + lane)
+            push_i32(&mut f0, base);
+            push_atomic(&mut f0, 16 + lane, align, mem, 0);
+            if !is64 {
+                f0.push(0xad); // i64.extend_i32_u
+            }
+            f0.extend_from_slice(&[0x20, 1, 0x7c, 0x21, 1]);
+            // 3. All 6 RMW ops: add(30), sub(37), and(44), or(51), xor(58), xchg(65)
+            for (gi, base_sub) in [30u32, 37, 44, 51, 58, 65].into_iter().enumerate() {
+                push_i32(&mut f0, base);
+                if is64 {
+                    push_i64(&mut f0, 0x0f0f_1234_abcd_0055i64.wrapping_add(gi as i64 * 17));
+                } else {
+                    push_i32(&mut f0, 0x00ff_55aai32.wrapping_add(gi as i32 * 29));
+                }
+                push_atomic(&mut f0, base_sub + lane, align, mem, 0);
+                if !is64 {
+                    f0.push(0xad);
+                }
+                f0.extend_from_slice(&[0x20, 1, 0x85, 0x21, 1]); // xor into acc
+            }
+            // 4. cmpxchg miss (expected = 0xdead) -> does NOT modify memory
+            push_i32(&mut f0, base);
+            if is64 {
+                push_i64(&mut f0, 0xdead);
+                push_i64(&mut f0, 0xbeef);
+            } else {
+                push_i32(&mut f0, 0xdead);
+                push_i32(&mut f0, 0xbeef);
+            }
+            push_atomic(&mut f0, 72 + lane, align, mem, 0);
+            // Keep returned actual old value to use as expected in the hit cmpxchg!
+            if is64 {
+                // local 2 (i64) = old
+                f0.extend_from_slice(&[0x22, 2, 0x20, 1, 0x7c, 0x21, 1]);
+                push_i32(&mut f0, base);
+                f0.extend_from_slice(&[0x20, 2]);
+                push_i64(&mut f0, 0x7766_5544_3322_1100);
+            } else {
+                // local 3 (i32) = old
+                f0.extend_from_slice(&[0x22, 3, 0xad, 0x20, 1, 0x7c, 0x21, 1]);
+                push_i32(&mut f0, base);
+                f0.extend_from_slice(&[0x20, 3]);
+                push_i32(&mut f0, 0x7654_3210);
+            }
+            push_atomic(&mut f0, 72 + lane, align, mem, 0);
+            if !is64 {
+                f0.push(0xad);
+            }
+            f0.extend_from_slice(&[0x20, 1, 0x7c, 0x21, 1]);
+            // Reload after cmpxchg hit!
+            push_i32(&mut f0, base);
+            push_atomic(&mut f0, 16 + lane, align, mem, 0);
+            if !is64 {
+                f0.push(0xad);
+            }
+            f0.extend_from_slice(&[0x20, 1, 0x7c, 0x21, 1]);
+        }
+    }
+
+    // Test wait32, wait64, and notify return values (0/1/2) on shared mem 0 + notify on non-shared mem 1!
+    // Store 0x1111_2222_3333_4444 at mem0[256]
+    push_i32(&mut f0, 256);
+    push_i64(&mut f0, 0x1111_2222_3333_4444);
+    push_atomic(&mut f0, 24, 3, 0, 0); // i64.atomic.store
+    // wait32 mismatch -> 1
+    push_i32(&mut f0, 256);
+    push_i32(&mut f0, 0x9999_9999u32 as i32);
+    push_i64(&mut f0, -1);
+    push_atomic(&mut f0, 1, 2, 0, 0);
+    f0.extend_from_slice(&[0xad, 0x20, 1, 0x7c, 0x21, 1]);
+    // wait32 match + timeout 0 -> 2
+    push_i32(&mut f0, 256);
+    push_i32(&mut f0, 0x3333_4444);
+    push_i64(&mut f0, 0);
+    push_atomic(&mut f0, 1, 2, 0, 0);
+    f0.extend_from_slice(&[0xad, 0x42, 10, 0x7e, 0x20, 1, 0x7c, 0x21, 1]);
+    // wait32 match + short positive timeout (5000 ns) -> 2
+    push_i32(&mut f0, 256);
+    push_i32(&mut f0, 0x3333_4444);
+    push_i64(&mut f0, 5_000);
+    push_atomic(&mut f0, 1, 2, 0, 0);
+    f0.extend_from_slice(&[0xad, 0x42, 100, 0x7e, 0x20, 1, 0x7c, 0x21, 1]);
+    // wait64 mismatch in HIGH 32 bits only (same low 32 bits!) -> 1
+    push_i32(&mut f0, 256);
+    push_i64(&mut f0, 0x9999_2222_3333_4444u64 as i64);
+    push_i64(&mut f0, 0);
+    push_atomic(&mut f0, 2, 3, 0, 0);
+    f0.extend_from_slice(&[0xad, 0x42]);
+    push_sleb_i64(&mut f0, 1000);
+    f0.extend_from_slice(&[0x7e, 0x20, 1, 0x7c, 0x21, 1]);
+    // wait64 match + timeout 0 -> 2
+    push_i32(&mut f0, 256);
+    push_i64(&mut f0, 0x1111_2222_3333_4444);
+    push_i64(&mut f0, 0);
+    push_atomic(&mut f0, 2, 3, 0, 0);
+    f0.extend_from_slice(&[0xad, 0x42]);
+    push_sleb_i64(&mut f0, 10000);
+    f0.extend_from_slice(&[0x7e, 0x20, 1, 0x7c, 0x21, 1]);
+    // notify on mem0 (0 waiters, count=u32::MAX) -> 0; notify on non-shared mem1 -> 0
+    push_i32(&mut f0, 256);
+    push_i32(&mut f0, -1);
+    push_atomic(&mut f0, 0, 2, 0, 0);
+    f0.extend_from_slice(&[0xad, 0x20, 1, 0x7c, 0x21, 1]);
+    push_i32(&mut f0, 256);
+    push_i32(&mut f0, 1);
+    push_atomic(&mut f0, 0, 2, 1, 0);
+    f0.extend_from_slice(&[0xad, 0x20, 1, 0x7c, 0x21, 1]);
+
+    // Grow shared memory 0 by 1 page and do atomic RMW at offset 65536!
+    f0.extend_from_slice(&[0x41, 1, 0x40, 0]); // memory.grow 0 (1)
+    f0.extend_from_slice(&[0xad, 0x20, 1, 0x7c, 0x21, 1]);
+    push_i32(&mut f0, 65536);
+    push_i64(&mut f0, 0x1234_5678_9abc_def0);
+    push_atomic(&mut f0, 31, 3, 0, 0); // i64.atomic.rmw.add
+    f0.extend_from_slice(&[0x20, 1, 0x7c, 0x21, 1]);
+    push_i32(&mut f0, 65536);
+    push_atomic(&mut f0, 17, 3, 0, 0); // i64.atomic.load
+    f0.extend_from_slice(&[0x20, 1, 0x7c]);
+
+    // fn1: atomic_traps(case: i32) -> i32
+    let mut f1 = Vec::new();
+    let push_case = |code: &mut Vec<u8>, id: i32, body: &[u8]| {
+        code.push(0x20);
+        code.push(0);
+        push_i32(code, id);
+        code.extend_from_slice(&[0x46, 0x04, 0x40]);
+        code.extend_from_slice(body);
+        code.push(0x0b);
+    };
+    // 0: unaligned i32.atomic.load (addr=2) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 2);
+        push_atomic(&mut b, 16, 2, 0, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 0, &b);
+    }
+    // 1: unaligned i64.atomic.load (addr=4) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 4);
+        push_atomic(&mut b, 17, 3, 0, 0);
+        b.extend_from_slice(&[0xa7, 0x0f]);
+        push_case(&mut f1, 1, &b);
+    }
+    // 2: unaligned i32.atomic.load16_u (addr=1) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 1);
+        push_atomic(&mut b, 19, 1, 0, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 2, &b);
+    }
+    // 3: unaligned i32.atomic.rmw.cmpxchg (addr=3) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 3);
+        push_i32(&mut b, 0);
+        push_i32(&mut b, 1);
+        push_atomic(&mut b, 72, 2, 0, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 3, &b);
+    }
+    // 4: unaligned wait32 (addr=2) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 2);
+        push_i32(&mut b, 0);
+        push_i64(&mut b, 0);
+        push_atomic(&mut b, 1, 2, 0, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 4, &b);
+    }
+    // 5: unaligned wait64 (addr=4) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 4);
+        push_i64(&mut b, 0);
+        push_i64(&mut b, 0);
+        push_atomic(&mut b, 2, 3, 0, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 5, &b);
+    }
+    // 6: unaligned notify on non-shared mem 1 (addr=2) -> trap 13
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 2);
+        push_i32(&mut b, 1);
+        push_atomic(&mut b, 0, 2, 1, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 6, &b);
+    }
+    // 7: aligned OOB i32.atomic.load (addr=65536 on 1-page mem 1) -> trap 2
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 65536);
+        push_atomic(&mut b, 16, 2, 1, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 7, &b);
+    }
+    // 8: aligned OOB notify on mem 1 (addr=65536) -> trap 2
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 65536);
+        push_i32(&mut b, 1);
+        push_atomic(&mut b, 0, 2, 1, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 8, &b);
+    }
+    // 9: wait32 on non-shared mem 1 -> trap 1
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 0);
+        push_i32(&mut b, 0);
+        push_i64(&mut b, 0);
+        push_atomic(&mut b, 1, 2, 1, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 9, &b);
+    }
+    // 10: wait64 on non-shared mem 1 -> trap 1
+    {
+        let mut b = Vec::new();
+        push_i32(&mut b, 0);
+        push_i64(&mut b, 0);
+        push_i64(&mut b, 0);
+        push_atomic(&mut b, 2, 3, 1, 0);
+        b.push(0x0f);
+        push_case(&mut f1, 10, &b);
+    }
+    f1.extend_from_slice(&[0x41, 0]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7e]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 1]),
+        mem_sec,
+        export_sec(&[("run_all_atomics", 0, 0), ("atomic_traps", 0, 1)]),
+        code_sec(&[
+            enc_body(&[(2, 0x7e), (1, 0x7f)], &f0),
+            enc_body(&[], &f1),
+        ]),
+    ]);
+
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    let mut calls = vec![c("run_all_atomics", ArgSpec::I32(42))];
+    for tc in 0..=10 {
+        calls.push(c("atomic_traps", ArgSpec::I32(tc)));
+    }
+    assert_oracle_matrix("x64_wasm_threads_atomics", &wasm, &calls, &[], &[]);
 }

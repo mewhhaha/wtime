@@ -270,6 +270,8 @@ pub enum RelocTarget {
     GuestCodeEnd,
     /// Virtual address of the 64-byte writable `GuardState` tail in `PT_LOAD 2` (`--guard-pages`).
     GuardState,
+    /// Virtual address of the post-link sorted GC `SafepointHeader` table in `.rodata` (GC modules only).
+    GcSafepointHeader,
 }
 
 /// A PC-relative 32-bit displacement inside emitted code:
@@ -287,6 +289,21 @@ pub struct JumpTablePatch {
     pub rodata_off: u32,
     pub table_rodata_off: u32,
     pub label: Label,
+}
+
+/// Machine-code safepoint record emitted immediately after a GC-safepoint `call`.
+///
+/// `code_off` is the function-relative return address offset (adjusted automatically by
+/// `finish_labels()` across both branch relaxation and loop-header alignment NOP padding).
+/// `frame_caller_ret_off` equals `frame_size + used_callee_gp.len() * 8`: when unwinding from
+/// this return address (`frame_rsp = ret_addr_rsp + 8`), the caller's return address sits at
+/// `[frame_rsp + frame_caller_ret_off]`, and live GC/extern roots sit at `[frame_rsp + slot]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SafepointRecord {
+    pub code_off: u32,
+    pub frame_caller_ret_off: u32,
+    pub gc_slots: Vec<i32>,
+    pub ext_slots: Vec<i32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,6 +330,8 @@ pub struct Asm {
     pub relocs: Vec<Reloc>,
     pub local_rodata: Vec<u8>,
     pub jt_patches: Vec<JumpTablePatch>,
+    /// GC safepoint records emitted after safepoint `call`s (empty for non-GC modules).
+    pub safepoints: Vec<SafepointRecord>,
     labels: Vec<Option<u32>>,
     /// Optional per-label code alignment (`0` = none, `16` = loop header, `32` = hot AVX2 loop).
     align_labels: Vec<u8>,
@@ -338,6 +357,7 @@ impl Asm {
             relocs: Vec::new(),
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
+            safepoints: Vec::new(),
             labels: Vec::new(),
             align_labels: Vec::new(),
             has_align32: false,
@@ -356,6 +376,7 @@ impl Asm {
             relocs: Vec::new(),
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
+            safepoints: Vec::new(),
             labels: Vec::new(),
             align_labels: Vec::new(),
             has_align32: false,
@@ -390,6 +411,22 @@ impl Asm {
     #[inline]
     pub fn pos(&self) -> u32 {
         u32::try_from(self.code.len()).expect("function machine code exceeded u32::MAX")
+    }
+
+    /// Records a precise GC safepoint at the current code offset (the return address immediately
+    /// following a `call` instruction).
+    pub fn record_safepoint(
+        &mut self,
+        frame_caller_ret_off: u32,
+        gc_slots: Vec<i32>,
+        ext_slots: Vec<i32>,
+    ) {
+        self.safepoints.push(SafepointRecord {
+            code_off: self.pos(),
+            frame_caller_ret_off,
+            gc_slots,
+            ext_slots,
+        });
     }
 
     #[inline]
@@ -592,6 +629,9 @@ impl Asm {
                 let sh = shift_of(rel.patch_off);
                 rel.patch_off -= sh;
                 rel.next_ip_off -= sh;
+            }
+            for sp in &mut self.safepoints {
+                sp.code_off -= shift_of(sp.code_off);
             }
 
             let total_saved = saved_prefix[n_fix] as usize;
@@ -800,6 +840,13 @@ impl Asm {
                     rel.patch_off += sh;
                     rel.next_ip_off += sh;
                 }
+                // A safepoint's `code_off` is the return address pushed by the preceding `call`.
+                // Padding inserted AT `poff == sp.code_off` sits AFTER the `call` (before the next
+                // aligned label), so only padding strictly BEFORE `sp.code_off` shifts it.
+                for sp in &mut self.safepoints {
+                    let idx = pads.partition_point(|&(poff, _)| poff < sp.code_off);
+                    sp.code_off += pad_prefix[idx];
+                }
                 self.code = padded;
                 self.pre_relax_code_len = self.pre_relax_code_len.max(self.code.len() as u32);
             }
@@ -835,6 +882,7 @@ impl Asm {
             relocs,
             local_rodata,
             jt_patches,
+            safepoints: Vec::new(),
             labels,
             align_labels: Vec::new(),
             has_align32: false,
@@ -1072,6 +1120,10 @@ impl Asm {
         self.code.extend_from_slice(&[0x0f, 0xae, 0xe8]);
     }
 
+    pub fn mfence(&mut self) {
+        self.code.extend_from_slice(&[0x0f, 0xae, 0xf0]);
+    }
+
     pub fn nop(&mut self) {
         self.emit_u8(0x90);
     }
@@ -1112,9 +1164,23 @@ impl Asm {
         self.emit_u8(0x58 + r.lo());
     }
 
+    pub fn cld(&mut self) {
+        self.emit_u8(0xfc);
+    }
+
+    pub fn std_dir(&mut self) {
+        self.emit_u8(0xfd);
+    }
+
     pub fn rep_movsb(&mut self) {
         self.emit_u8(0xf3);
         self.emit_u8(0xa4);
+    }
+
+    pub fn rep_movsq(&mut self) {
+        self.emit_u8(0xf3);
+        self.emit_u8(0x48);
+        self.emit_u8(0xa5);
     }
 
     pub fn rep_stosb(&mut self) {
@@ -1122,7 +1188,29 @@ impl Asm {
         self.emit_u8(0xaa);
     }
 
+    pub fn rep_stosq(&mut self) {
+        self.emit_u8(0xf3);
+        self.emit_u8(0x48);
+        self.emit_u8(0xab);
+    }
+
     // ---- Branches & calls ----
+
+    pub fn call_label(&mut self, label: Label) {
+        self.maybe_vzeroupper();
+        let inst_off = self.pos();
+        self.emit_u8(0xe8);
+        let patch_off = self.pos();
+        self.emit_i32(0);
+        let next_ip_off = self.pos();
+        self.fixups.push(LocalFixup {
+            inst_off,
+            patch_off,
+            next_ip_off,
+            label,
+            kind: FixupKind::LeaRip,
+        });
+    }
 
     pub fn jmp(&mut self, label: Label) {
         let inst_off = self.pos();
@@ -1406,6 +1494,75 @@ impl Asm {
         self.emit_u8(0x0f);
         self.emit_u8(0xb1);
         self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `lock cmpxchg byte ptr [mem], src8` (compares `AL` with `[mem]`).
+    pub fn lock_cmpxchg_mr8(&mut self, mem: Mem, src: Gp) {
+        self.emit_u8(0xf0);
+        self.rex_mem(false, src.hi(), mem, src.id() >= 4);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xb0);
+        self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `lock cmpxchg word ptr [mem], src16` (compares `AX` with `[mem]`).
+    pub fn lock_cmpxchg_mr16(&mut self, mem: Mem, src: Gp) {
+        self.emit_u8(0xf0);
+        self.emit_u8(0x66);
+        self.rex_mem(false, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xb1);
+        self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `lock xadd [mem], src`: atomically adds `src` into `[mem]` and returns old `[mem]` in `src`.
+    pub fn lock_xadd_mr(&mut self, is64: bool, mem: Mem, src: Gp) {
+        self.emit_u8(0xf0);
+        self.rex_mem(is64, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xc1);
+        self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `lock xadd byte ptr [mem], src8`.
+    pub fn lock_xadd_mr8(&mut self, mem: Mem, src: Gp) {
+        self.emit_u8(0xf0);
+        self.rex_mem(false, src.hi(), mem, src.id() >= 4);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xc0);
+        self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `lock xadd word ptr [mem], src16`.
+    pub fn lock_xadd_mr16(&mut self, mem: Mem, src: Gp) {
+        self.emit_u8(0xf0);
+        self.emit_u8(0x66);
+        self.rex_mem(false, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xc1);
+        self.modrm_mem(src.lo(), mem);
+    }
+
+    /// `xchg reg, [mem]` (implicit LOCK on x86-64: full sequential consistency).
+    pub fn xchg_rm(&mut self, is64: bool, reg: Gp, mem: Mem) {
+        self.rex_mem(is64, reg.hi(), mem, false);
+        self.emit_u8(0x87);
+        self.modrm_mem(reg.lo(), mem);
+    }
+
+    /// `xchg reg8, byte ptr [mem]` (implicit LOCK on x86-64).
+    pub fn xchg_rm8(&mut self, reg: Gp, mem: Mem) {
+        self.rex_mem(false, reg.hi(), mem, reg.id() >= 4);
+        self.emit_u8(0x86);
+        self.modrm_mem(reg.lo(), mem);
+    }
+
+    /// `xchg reg16, word ptr [mem]` (implicit LOCK on x86-64).
+    pub fn xchg_rm16(&mut self, reg: Gp, mem: Mem) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, reg.hi(), mem, false);
+        self.emit_u8(0x87);
+        self.modrm_mem(reg.lo(), mem);
     }
 
     /// `pause` (`F3 90`): spin-wait hint.

@@ -10,16 +10,19 @@ use super::module::{X64ConstVal, X64Module};
 use super::{
     CtxLayout, EXN_SLAB_BYTES, GUARD_RESERVE_BYTES, GUEST_STACK_FLOOR_HEADROOM,
     GUEST_STACK_GUARD_BYTES, GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES,
-    HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_GROW_CORE,
-    HELPER_HOST_CALL, HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW,
-    HELPER_MEM_INIT, HELPER_READ_GLOBAL, HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW,
-    HELPER_TABLE_INIT, HELPER_TRUNC_BASE, INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH,
-    OFF_ACTIVE_DEPTH, OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS, OFF_GUARD_RESUME_PC,
-    OFF_GUARD_RESUME_SP, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES,
-    OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN,
-    OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, RodataConsts, TRAP_ALLOC_FAILED,
-    TRAP_CALL_STACK, TRAP_HOST, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_MEM_LIMIT,
-    TRAP_MEM_TOO_LARGE, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE, TRAP_UNSUPPORTED_ISA,
+    HELPER_ATOMIC_NOTIFY, HELPER_ATOMIC_WAIT, HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL,
+    HELPER_EXTRA_MEM_GROW, HELPER_GC_ARRAY_COPY,
+    HELPER_GC_ARRAY_FILL, HELPER_GC_ARRAY_FILL_RAW, HELPER_GC_ARRAY_INIT_DATA,
+    HELPER_GC_ARRAY_INIT_ELEM, HELPER_GC_COLLECT, HELPER_GROW_CORE, HELPER_HOST_CALL,
+    HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT,
+    HELPER_READ_GLOBAL, HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT,
+    HELPER_TRUNC_BASE, INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH, OFF_ACTIVE_DEPTH,
+    OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS, OFF_GUARD_RESUME_PC, OFF_GUARD_RESUME_SP,
+    OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP,
+    OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES,
+    OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, RodataConsts, TRAP_ALLOC_FAILED, TRAP_CALL_STACK,
+    TRAP_HOST, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB,
+    TRAP_TABLE_OOB, TRAP_UNREACHABLE, TRAP_UNSUPPORTED_ISA, gc_rt,
 };
 
 const SYS_WRITE: u32 = 1;
@@ -1134,8 +1137,10 @@ pub fn emit_helper_initialize(
     let mut a = Asm::with_capacity(256);
     let lbl_trap_table_oob = a.new_label();
     let lbl_trap_oob = a.new_label();
+    let lbl_trap_alloc = a.new_label();
     let mut need_table_oob = false;
     let mut need_oob = false;
+    let mut need_alloc_trap = false;
 
     // 1. Initialize all non-folded globals in Ctx.
     let mut v128_iter = tables.v128_global_inits.iter().peekable();
@@ -1169,6 +1174,19 @@ pub fn emit_helper_initialize(
                 a.mov_ri64(Gp::Rax, u64::from(f) + 1);
                 a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
             }
+            X64ConstVal::I31(enc) => {
+                a.mov_ri64(Gp::Rax, u64::from(enc));
+                a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
+            }
+            X64ConstVal::ExternI31(enc) => {
+                a.mov_ri64(Gp::Rax, super::module::GC_EXT_I31_TAG_HI | u64::from(enc));
+                a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
+            }
+            X64ConstVal::RuntimeGc => {
+                // Zero-initialized now; evaluated by the GC const-expr section below.
+                a.xor_rr(false, Gp::Rax, Gp::Rax);
+                a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
+            }
             X64ConstVal::V128(bytes) => {
                 if bytes == [0u8; 16] {
                     a.xorps(Xmm::Xmm15, Xmm::Xmm15);
@@ -1198,6 +1216,17 @@ pub fn emit_helper_initialize(
             a.jcc(Cond::B, lp);
         }
     }
+
+    // 3-gc. Runtime GC constant-expression initializers (globals, table inits, GC elem segments).
+    gc_rt::emit_gc_const_inits(
+        &mut a,
+        module,
+        layout,
+        lbl_trap_table_oob,
+        lbl_trap_alloc,
+        &mut need_table_oob,
+        &mut need_alloc_trap,
+    )?;
 
     // 3a. Active element bounds checks using 64-bit unsigned arithmetic `(base + len) > table_len`.
     for &(table_len, base_u64, elem_len) in &module.active_elem_checks {
@@ -1294,7 +1323,23 @@ pub fn emit_helper_initialize(
     // 5. Optional start function (defined or imported `wt_import{k}` via `RelocTarget::Func`).
     if let Some(start_idx) = module.start {
         a.sub_ri(true, Gp::Rsp, 8);
+        if let Some(ref gc) = layout.gc {
+            a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rsp, -8));
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+                Gp::Rax,
+            );
+        }
         a.call_reloc(RelocTarget::Func(start_idx));
+        if let Some(ref gc) = layout.gc {
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+                Gp::Rax,
+            );
+        }
         a.add_ri(true, Gp::Rsp, 8);
         a.ret();
     } else {
@@ -1310,6 +1355,11 @@ pub fn emit_helper_initialize(
     if need_oob {
         a.bind(lbl_trap_oob);
         a.mov_ri32(Gp::R11, u32::from(TRAP_OOB));
+        a.ret();
+    }
+    if need_alloc_trap {
+        a.bind(lbl_trap_alloc);
+        a.mov_ri32(Gp::R11, u32::from(TRAP_ALLOC_FAILED));
         a.ret();
     }
 
@@ -2016,6 +2066,9 @@ fn emit_export_new(
         }
     }
 
+    // ---- Step C3d2: Wasm GC semi-space heap + passive GC elem buffer (GC modules only) ----
+    gc_rt::emit_gc_heap_init(&mut a, layout, lbl_fail_alloc_cleanup);
+
     // ---- Step C3e: Native PGO counter buffer (`--pgo-gen` only) ----
     if let Some(ref pgo) = layout.pgo_gen {
         a.xor_rr(false, Gp::Rdi, Gp::Rdi);
@@ -2404,6 +2457,8 @@ fn emit_x64_cleanup_ctx(a: &mut Asm, ctx_reg: Gp, layout: &CtxLayout) {
         a.syscall();
         a.bind(lbl_skip);
     }
+    gc_rt::emit_gc_heap_cleanup(a, ctx_reg, layout);
+
     if let Some(ref pgo) = layout.pgo_gen {
         let lbl_skip = a.new_label();
         a.mov_rm(true, Gp::Rdi, Mem::base_disp(ctx_reg, pgo.ctx_ptr_off));
@@ -2678,10 +2733,26 @@ fn emit_export_call_export(
     a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_mr(true, Mem::base_disp(Gp::Rdx, -8), Gp::Rsp);
     a.lea(true, Gp::Rsp, Mem::base_disp(Gp::Rdx, -16));
+    if let Some(ref gc) = layout.gc {
+        a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rsp, -8));
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+            Gp::Rax,
+        );
+    }
     a.ldmxcsr_rip(RelocTarget::Rodata(ro.mxcsr_wasm));
     a.call_reg(Gp::Rbx);
 
     // Return to host stack, sync pinned global, clear in_call, restore host MXCSR (preserve Rax, Xmm0, R11d!).
+    if let Some(ref gc) = layout.gc {
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+            Gp::Rcx,
+        );
+    }
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rcx, -8));
     if layout.use_guard_pages {
@@ -2746,6 +2817,13 @@ fn emit_export_call_export(
         }
         a.xor_rr(false, Gp::Rcx, Gp::Rcx);
         a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+        if let Some(ref gc) = layout.gc {
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+                Gp::Rcx,
+            );
+        }
         emit_pinned_store(&mut a, module, layout);
         a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
         a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
@@ -2915,10 +2993,26 @@ fn emit_export_call_fixed(
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_mr(true, Mem::base_disp(Gp::Rax, -8), Gp::Rsp);
     a.lea(true, Gp::Rsp, Mem::base_disp(Gp::Rax, -16));
+    if let Some(ref gc) = layout.gc {
+        a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rsp, -8));
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+            Gp::Rax,
+        );
+    }
     a.ldmxcsr_rip(RelocTarget::Rodata(ro.mxcsr_wasm));
     a.call_reloc(RelocTarget::Func(target_fn));
 
     // Return to host stack, sync pinned global, clear in_call, restore host MXCSR (preserve Rax & R11d!).
+    if let Some(ref gc) = layout.gc {
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+            Gp::Rcx,
+        );
+    }
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP));
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::Rcx, -8));
     if layout.use_guard_pages {
@@ -2947,6 +3041,13 @@ fn emit_export_call_fixed(
         }
         a.xor_rr(false, Gp::Rcx, Gp::Rcx);
         a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+        if let Some(ref gc) = layout.gc {
+            a.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, gc.gc_state_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+                Gp::Rcx,
+            );
+        }
         emit_pinned_store(&mut a, module, layout);
         a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 0);
         a.ldmxcsr(Mem::base_disp(Gp::Rsp, 0));
@@ -3294,15 +3395,47 @@ fn emit_export_active_fixed(
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
     emit_pinned_load(&mut a, module, layout);
 
-    // new_guest_rsp = (suspended & !15) - 32 (guaranteed >= stack_floor, <= guest_stack_top - 48, % 16 == 0).
+    // new_guest_rsp = (suspended & !15) - 32 (or -48 with GC stack chain node).
     a.mov_rm(true, Gp::Rbx, Mem::base_disp(Gp::R15, OFF_ACTIVE_GUEST_RSP));
     a.and_ri(true, Gp::Rbx, -16);
-    a.sub_ri(true, Gp::Rbx, 32);
+    a.sub_ri(true, Gp::Rbx, if layout.gc.is_some() { 48 } else { 32 });
 
     // Link record at [rbx + 0..16]: [0] = prev ctx->host_rsp, [8] = current host rsp.
+    // With GC: [16] = prev gc_stack_chain, [24] = prev gc_walk_stop_rsp, [32] = paused outer ret_rsp.
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_HOST_RSP));
     a.mov_mr(true, Mem::base_disp(Gp::Rbx, 0), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rbx, 8), Gp::Rsp);
+    if let Some(ref gc) = layout.gc {
+        let gc_off = gc.gc_state_off;
+        let host_link_frame: i32 = if layout.use_guard_pages { 136 } else { 120 };
+        a.mov_rm(
+            true,
+            Gp::Rax,
+            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_STACK_CHAIN),
+        );
+        a.mov_mr(true, Mem::base_disp(Gp::Rbx, 16), Gp::Rax);
+        a.mov_rm(
+            true,
+            Gp::Rax,
+            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+        );
+        a.mov_mr(true, Mem::base_disp(Gp::Rbx, 24), Gp::Rax);
+        a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_ACTIVE_GUEST_RSP));
+        a.add_ri(true, Gp::Rax, host_link_frame + 16);
+        a.mov_mr(true, Mem::base_disp(Gp::Rbx, 32), Gp::Rax);
+        a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rbx, 16));
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_STACK_CHAIN),
+            Gp::Rax,
+        );
+        a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rbx, -8));
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+            Gp::Rax,
+        );
+    }
 
     // active_depth += 1; ctx->host_rsp = current host rsp.
     a.mov_rm(false, Gp::Rax, Mem::base_disp(Gp::R15, OFF_ACTIVE_DEPTH));
@@ -3328,6 +3461,21 @@ fn emit_export_active_fixed(
     if layout.use_guard_pages {
         a.xor_rr(false, Gp::Rcx, Gp::Rcx);
         a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUARD_RESUME_PC), Gp::Rcx);
+    }
+    if let Some(ref gc) = layout.gc {
+        let gc_off = gc.gc_state_off;
+        a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 16));
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_STACK_CHAIN),
+            Gp::Rcx,
+        );
+        a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 24));
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_WALK_STOP_RSP),
+            Gp::Rcx,
+        );
     }
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rcx);
@@ -3588,6 +3736,7 @@ pub fn emit_all_helpers(
         helpers.push(emit_helper_table_init(
             tables.elem_seg_table_off,
             drop_off,
+            layout.gc.as_ref(),
             spectre,
         )?);
     } else {
@@ -3609,8 +3758,188 @@ pub fn emit_all_helpers(
             helpers.push(stub);
         }
     }
+    debug_assert_eq!(helpers.len(), HELPER_GC_COLLECT as usize);
+    if let Some(ref gc) = layout.gc {
+        helpers.push(gc_rt::emit_helper_gc_collect(module, layout)?);
+        debug_assert_eq!(helpers.len(), HELPER_GC_ARRAY_FILL_RAW as usize);
+        helpers.push(gc_rt::emit_helper_gc_array_fill_raw()?);
+        debug_assert_eq!(helpers.len(), HELPER_GC_ARRAY_FILL as usize);
+        helpers.push(gc_rt::emit_helper_gc_array_fill()?);
+        debug_assert_eq!(helpers.len(), HELPER_GC_ARRAY_COPY as usize);
+        helpers.push(gc_rt::emit_helper_gc_array_copy()?);
+        debug_assert_eq!(helpers.len(), HELPER_GC_ARRAY_INIT_DATA as usize);
+        if let Some(drop_off) = layout.data_dropped_off {
+            helpers.push(gc_rt::emit_helper_gc_array_init_data(
+                tables.passive_data_table_off,
+                drop_off,
+            )?);
+        } else {
+            let mut stub = Asm::with_capacity(4);
+            stub.ret();
+            helpers.push(stub);
+        }
+        debug_assert_eq!(helpers.len(), HELPER_GC_ARRAY_INIT_ELEM as usize);
+        if let Some(drop_off) = layout.elem_dropped_off {
+            helpers.push(gc_rt::emit_helper_gc_array_init_elem(gc, drop_off)?);
+        } else {
+            let mut stub = Asm::with_capacity(4);
+            stub.ret();
+            helpers.push(stub);
+        }
+    } else {
+        for _ in 0..6 {
+            let mut stub = Asm::with_capacity(4);
+            stub.ret();
+            helpers.push(stub);
+        }
+    }
+    debug_assert_eq!(helpers.len(), HELPER_ATOMIC_WAIT as usize);
+    if module.uses_threads {
+        helpers.push(emit_helper_atomic_wait()?);
+        debug_assert_eq!(helpers.len(), HELPER_ATOMIC_NOTIFY as usize);
+        helpers.push(emit_helper_atomic_notify()?);
+    } else {
+        for _ in 0..2 {
+            let mut stub = Asm::with_capacity(4);
+            stub.ret();
+            helpers.push(stub);
+        }
+    }
+    debug_assert_eq!(helpers.len(), super::HELPER_STORE_EXN_ALLOC as usize);
+    {
+        let mut stub = Asm::with_capacity(4);
+        stub.ud2();
+        helpers.push(stub);
+    }
     debug_assert_eq!(helpers.len(), super::NUM_HELPERS);
     Ok(helpers)
+}
+
+/// Wasm `memory.atomic.wait32/wait64`:
+/// `Rdi = host_ptr`, `Rsi = expected (u64)`, `Rdx = timeout_ns (i64)`, `Rcx = is_64 (0|1)`
+/// -> `Rax = 0 (notified) | 1 (not-equal) | 2 (timed out)`.
+fn emit_helper_atomic_wait() -> Result<Asm, String> {
+    const SYS_FUTEX: u32 = 202;
+    const FUTEX_WAIT_PRIVATE: u32 = 128;
+    let mut a = Asm::with_capacity(192);
+    let lbl_check_val = a.new_label();
+    let lbl_check_32 = a.new_label();
+    let lbl_val_ok = a.new_label();
+    let lbl_inf = a.new_label();
+    let lbl_wait_lp = a.new_label();
+    let lbl_lp_32 = a.new_label();
+    let lbl_do_futex = a.new_label();
+    let lbl_notified = a.new_label();
+    let lbl_not_eq = a.new_label();
+    let lbl_timeout = a.new_label();
+    let lbl_ret = a.new_label();
+
+    // 24-byte local frame (8B return addr + 24B = 32B, 16-byte aligned):
+    //   [rsp+0]  = timespec.tv_sec
+    //   [rsp+8]  = timespec.tv_nsec
+    //   [rsp+16] = timespec pointer (rsp if timeout > 0, else 0)
+    a.sub_ri(true, Gp::Rsp, 24);
+    a.mov_rr(true, Gp::R8, Gp::Rsi); // R8 = expected
+    a.mov_rr(false, Gp::R9, Gp::Rcx); // R9 = is_64
+
+    // Initial value check before touching timeout.
+    a.bind(lbl_check_val);
+    a.test_rr(false, Gp::R9, Gp::R9);
+    a.jcc(Cond::E, lbl_check_32);
+    a.cmp_rm(true, Gp::R8, Mem::base(Gp::Rdi));
+    a.jcc(Cond::Ne, lbl_not_eq);
+    a.jmp(lbl_val_ok);
+    a.bind(lbl_check_32);
+    a.cmp_rm(false, Gp::R8, Mem::base(Gp::Rdi));
+    a.jcc(Cond::Ne, lbl_not_eq);
+
+    a.bind(lbl_val_ok);
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_timeout); // timeout == 0 -> immediate timeout (2)
+    a.jcc(Cond::L, lbl_inf); // timeout < 0 -> infinite wait
+    // timeout > 0: split into (tv_sec, tv_nsec) = timeout / 1_000_000_000, % 1_000_000_000.
+    a.mov_rr(true, Gp::Rax, Gp::Rdx);
+    a.xor_rr(false, Gp::Rdx, Gp::Rdx);
+    a.mov_ri64(Gp::R10, 1_000_000_000);
+    a.div_r(true, Gp::R10);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rax);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::Rdx);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rsp);
+    a.jmp(lbl_wait_lp);
+
+    a.bind(lbl_inf);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rax);
+
+    a.bind(lbl_wait_lp);
+    a.test_rr(false, Gp::R9, Gp::R9);
+    a.jcc(Cond::E, lbl_lp_32);
+    a.cmp_rm(true, Gp::R8, Mem::base(Gp::Rdi));
+    a.jcc(Cond::Ne, lbl_not_eq);
+    a.jmp(lbl_do_futex);
+    a.bind(lbl_lp_32);
+    a.cmp_rm(false, Gp::R8, Mem::base(Gp::Rdi));
+    a.jcc(Cond::Ne, lbl_not_eq);
+
+    a.bind(lbl_do_futex);
+    a.mov_ri32(Gp::Rsi, FUTEX_WAIT_PRIVATE);
+    a.mov_rr(false, Gp::Rdx, Gp::R8); // low 32 bits of expected
+    a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::Rsp, 16));
+    a.mov_ri32(Gp::Rax, SYS_FUTEX);
+    a.syscall();
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_notified);
+    a.cmp_ri(true, Gp::Rax, -11); // EAGAIN
+    a.jcc(Cond::E, lbl_not_eq);
+    a.cmp_ri(true, Gp::Rax, -110); // ETIMEDOUT
+    a.jcc(Cond::E, lbl_timeout);
+    a.cmp_ri(true, Gp::Rax, -4); // EINTR
+    a.jcc(Cond::E, lbl_wait_lp);
+    a.jmp(lbl_not_eq);
+
+    a.bind(lbl_notified);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.jmp(lbl_ret);
+    a.bind(lbl_not_eq);
+    a.mov_ri32(Gp::Rax, 1);
+    a.jmp(lbl_ret);
+    a.bind(lbl_timeout);
+    a.mov_ri32(Gp::Rax, 2);
+
+    a.bind(lbl_ret);
+    a.add_ri(true, Gp::Rsp, 24);
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Wasm `memory.atomic.notify`:
+/// `Rdi = host_ptr`, `Rsi = count (u32)` -> `Rax = woken count (u32)`.
+fn emit_helper_atomic_notify() -> Result<Asm, String> {
+    const SYS_FUTEX: u32 = 202;
+    const FUTEX_WAKE_PRIVATE: u32 = 129;
+    let mut a = Asm::with_capacity(64);
+    let lbl_zero = a.new_label();
+    a.mov_rr(false, Gp::Rdx, Gp::Rsi); // zero-ext u32 count
+    a.test_rr(false, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_zero);
+    // Clamp count > i32::MAX to i32::MAX so Linux futex(FUTEX_WAKE) never returns EINVAL.
+    a.mov_ri32(Gp::Rcx, i32::MAX as u32);
+    a.cmp_rr(false, Gp::Rdx, Gp::Rcx);
+    a.cmovcc(Cond::A, false, Gp::Rdx, Gp::Rcx);
+    a.mov_ri32(Gp::Rsi, FUTEX_WAKE_PRIVATE);
+    a.xor_rr(false, Gp::R10, Gp::R10);
+    a.mov_ri32(Gp::Rax, SYS_FUTEX);
+    a.syscall();
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::L, lbl_zero);
+    a.mov_rr(false, Gp::Rax, Gp::Rax);
+    a.ret();
+    a.bind(lbl_zero);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
 }
 
 /// Multi-memory `memory.grow(Rdi = delta, Rsi = desc_off) -> Rax (old_pages | u64::MAX)`.
@@ -3793,58 +4122,133 @@ fn emit_helper_mem_init(
 fn emit_helper_table_init(
     elem_table_off: u32,
     drop_off: i32,
+    gc: Option<&gc_rt::GcCtxLayout>,
     spectre: bool,
 ) -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(144);
+    let mut a = Asm::with_capacity(192);
     let lbl_not_dropped = a.new_label();
     let lbl_loop = a.new_label();
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
 
-    a.lea_rip(Gp::R9, RelocTarget::Rodata(elem_table_off));
-    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R9, Gp::Rcx, 8, 4)); // elem_len
-    a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R15, Gp::Rcx, 1, drop_off));
-    a.test_rr(false, Gp::R10, Gp::R10);
-    a.jcc(Cond::E, lbl_not_dropped);
-    a.xor_rr(false, Gp::Rax, Gp::Rax);
-    a.bind(lbl_not_dropped);
+    if let Some(gc_lay) = gc {
+        let lbl_dynamic = a.new_label();
+        let lbl_lp_dyn = a.new_label();
+        a.lea_rip(Gp::R9, RelocTarget::Rodata(gc_lay.gc_elem_desc_ro_off));
+        a.mov_rr(true, Gp::R11, Gp::Rcx);
+        a.shl_imm(true, Gp::R11, 4); // elem_idx * 16
+        a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R9, Gp::R11, 1, 4)); // elem_len
+        a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R15, Gp::Rcx, 1, drop_off));
+        a.test_rr(false, Gp::R10, Gp::R10);
+        a.jcc(Cond::E, lbl_not_dropped);
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.bind(lbl_not_dropped);
 
-    // Check `src + len <= elem_len`.
-    a.mov_rr(true, Gp::R10, Gp::Rsi);
-    a.add_rr(true, Gp::R10, Gp::Rdx);
-    a.jcc(Cond::B, lbl_oob);
-    a.cmp_rr(true, Gp::R10, Gp::Rax);
-    a.jcc(Cond::A, lbl_oob);
+        a.mov_rr(true, Gp::R10, Gp::Rsi);
+        a.add_rr(true, Gp::R10, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::R10, Gp::Rax);
+        a.jcc(Cond::A, lbl_oob);
 
-    // Check `dst + len <= tbl_cur_len`.
-    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 8));
-    a.mov_rr(true, Gp::R10, Gp::Rdi);
-    a.add_rr(true, Gp::R10, Gp::Rdx);
-    a.jcc(Cond::B, lbl_oob);
-    a.cmp_rr(true, Gp::R10, Gp::Rax);
-    a.jcc(Cond::A, lbl_oob);
+        a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 8));
+        a.mov_rr(true, Gp::R10, Gp::Rdi);
+        a.add_rr(true, Gp::R10, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::R10, Gp::Rax);
+        a.jcc(Cond::A, lbl_oob);
 
-    a.test_rr(true, Gp::Rdx, Gp::Rdx);
-    a.jcc(Cond::E, lbl_ok);
-    if spectre {
-        a.lfence();
+        a.test_rr(true, Gp::Rdx, Gp::Rdx);
+        a.jcc(Cond::E, lbl_ok);
+        if spectre {
+            a.lfence();
+        }
+
+        a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 0)); // tbl_u64_base
+        a.lea(true, Gp::Rax, Mem::indexed(Gp::Rax, Gp::Rdi, 8, 0));
+        a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::R11, 1, 8)); // gc_buf_byte_off
+        a.test_rr(true, Gp::R10, Gp::R10);
+        a.jcc(Cond::Ge, lbl_dynamic);
+
+        // Static `u32` entries in `.rodata`
+        a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::R11, 1, 0));
+        a.add_rr(true, Gp::R9, Gp::R10);
+        a.lea(true, Gp::R9, Mem::indexed(Gp::R9, Gp::Rsi, 4, 0));
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.bind(lbl_loop);
+        if spectre {
+            a.lfence();
+        }
+        a.mov_rm(false, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 4, 0));
+        a.mov_mr(true, Mem::indexed(Gp::Rax, Gp::Rcx, 8, 0), Gp::R10);
+        a.add_ri(true, Gp::Rcx, 1);
+        a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+        a.jcc(Cond::B, lbl_loop);
+        a.jmp(lbl_ok);
+
+        // Dynamic `u64` entries in `Ctx.gc_elem_buf_ptr`
+        a.bind(lbl_dynamic);
+        a.add_rm(
+            true,
+            Gp::R10,
+            Mem::base_disp(Gp::R15, gc_lay.gc_state_off + gc_rt::GC_OFF_ELEM_BUF_PTR),
+        );
+        a.lea(true, Gp::R9, Mem::indexed(Gp::R10, Gp::Rsi, 8, 0));
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.bind(lbl_lp_dyn);
+        if spectre {
+            a.lfence();
+        }
+        a.mov_rm(true, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
+        a.mov_mr(true, Mem::indexed(Gp::Rax, Gp::Rcx, 8, 0), Gp::R10);
+        a.add_ri(true, Gp::Rcx, 1);
+        a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+        a.jcc(Cond::B, lbl_lp_dyn);
+    } else {
+        a.lea_rip(Gp::R9, RelocTarget::Rodata(elem_table_off));
+        a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R9, Gp::Rcx, 8, 4)); // elem_len
+        a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R15, Gp::Rcx, 1, drop_off));
+        a.test_rr(false, Gp::R10, Gp::R10);
+        a.jcc(Cond::E, lbl_not_dropped);
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        a.bind(lbl_not_dropped);
+
+        // Check `src + len <= elem_len`.
+        a.mov_rr(true, Gp::R10, Gp::Rsi);
+        a.add_rr(true, Gp::R10, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::R10, Gp::Rax);
+        a.jcc(Cond::A, lbl_oob);
+
+        // Check `dst + len <= tbl_cur_len`.
+        a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 8));
+        a.mov_rr(true, Gp::R10, Gp::Rdi);
+        a.add_rr(true, Gp::R10, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::R10, Gp::Rax);
+        a.jcc(Cond::A, lbl_oob);
+
+        a.test_rr(true, Gp::Rdx, Gp::Rdx);
+        a.jcc(Cond::E, lbl_ok);
+        if spectre {
+            a.lfence();
+        }
+
+        a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
+        a.add_rr(true, Gp::R9, Gp::R10); // seg_u32_base
+        a.lea(true, Gp::R9, Mem::indexed(Gp::R9, Gp::Rsi, 4, 0));
+        a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 0)); // tbl_u64_base
+        a.lea(true, Gp::Rax, Mem::indexed(Gp::Rax, Gp::Rdi, 8, 0));
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.bind(lbl_loop);
+        if spectre {
+            a.lfence();
+        }
+        a.mov_rm(false, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 4, 0));
+        a.mov_mr(true, Mem::indexed(Gp::Rax, Gp::Rcx, 8, 0), Gp::R10);
+        a.add_ri(true, Gp::Rcx, 1);
+        a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+        a.jcc(Cond::B, lbl_loop);
     }
-
-    a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
-    a.add_rr(true, Gp::R9, Gp::R10); // seg_u32_base
-    a.lea(true, Gp::R9, Mem::indexed(Gp::R9, Gp::Rsi, 4, 0));
-    a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 0)); // tbl_u64_base
-    a.lea(true, Gp::Rax, Mem::indexed(Gp::Rax, Gp::Rdi, 8, 0));
-    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
-    a.bind(lbl_loop);
-    if spectre {
-        a.lfence();
-    }
-    a.mov_rm(false, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 4, 0));
-    a.mov_mr(true, Mem::indexed(Gp::Rax, Gp::Rcx, 8, 0), Gp::R10);
-    a.add_ri(true, Gp::Rcx, 1);
-    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
-    a.jcc(Cond::B, lbl_loop);
 
     a.bind(lbl_ok);
     a.xor_rr(false, Gp::R11, Gp::R11);

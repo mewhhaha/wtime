@@ -5236,6 +5236,8 @@ fn aarch64_regalloc_enforces_liveness_memory_cap_and_filters_cross_block() {
     let ir = IrFunc {
         func_index: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         params: Vec::new(),
         result_tys: vec![Ty::I32],
         val_tys,

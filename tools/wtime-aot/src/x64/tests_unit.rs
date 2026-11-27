@@ -713,6 +713,7 @@ fn ctx_layout_enforces_16_mib_cap() {
         dyn_tables: Default::default(),
         memory: None,
         memory64: false,
+        memory_shared: false,
         extra_memories: Vec::new(),
         tags: Vec::new(),
         uses_exceptions: false,
@@ -724,6 +725,24 @@ fn ctx_layout_enforces_16_mib_cap() {
         uses_bulk_data: false,
         elem_segs: Vec::new(),
         uses_bulk_elem: false,
+        uses_gc: false,
+        uses_threads: false,
+        type_canon: Vec::new(),
+        gc_canon_types: Vec::new(),
+        type_kinds: Vec::new(),
+        runtime_global_inits: Vec::new(),
+        runtime_table_inits: Vec::new(),
+        imported_globals: Vec::new(),
+        imported_mems: Vec::new(),
+        imported_tables: Vec::new(),
+        imported_tags: Vec::new(),
+        import_order: Vec::new(),
+        all_mem_declared_max: Vec::new(),
+        all_table_types: Vec::new(),
+        exported_mems: Vec::new(),
+        exported_tables: Vec::new(),
+        exported_tags: Vec::new(),
+        raw_type_groups: Vec::new(),
         start: None,
         target: super::module::X64Target::BlotCdylib,
         standalone_start: None,
@@ -861,6 +880,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         dyn_tables: Default::default(),
         memory: None,
         memory64: false,
+        memory_shared: false,
         extra_memories: Vec::new(),
         tags: Vec::new(),
         uses_exceptions: false,
@@ -872,6 +892,24 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         uses_bulk_data: false,
         elem_segs: Vec::new(),
         uses_bulk_elem: false,
+        uses_gc: false,
+        uses_threads: false,
+        type_canon: Vec::new(),
+        gc_canon_types: Vec::new(),
+        type_kinds: Vec::new(),
+        runtime_global_inits: Vec::new(),
+        runtime_table_inits: Vec::new(),
+        imported_globals: Vec::new(),
+        imported_mems: Vec::new(),
+        imported_tables: Vec::new(),
+        imported_tags: Vec::new(),
+        import_order: Vec::new(),
+        all_mem_declared_max: Vec::new(),
+        all_table_types: Vec::new(),
+        exported_mems: Vec::new(),
+        exported_tables: Vec::new(),
+        exported_tags: Vec::new(),
+        raw_type_groups: Vec::new(),
         start: None,
         target: super::module::X64Target::BlotCdylib,
         standalone_start: None,
@@ -902,6 +940,8 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         early_pruned: 0,
         wide_chains: Vec::new(),
         outer_simd_loops: Vec::new(),
@@ -934,6 +974,8 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         early_pruned: 0,
         wide_chains: Vec::new(),
         outer_simd_loops: Vec::new(),
@@ -995,6 +1037,8 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         early_pruned: 0,
         wide_chains: Vec::new(),
         outer_simd_loops: Vec::new(),
@@ -1032,6 +1076,8 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         early_pruned: 0,
         wide_chains: Vec::new(),
         outer_simd_loops: Vec::new(),
@@ -1229,14 +1275,18 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     ]);
     assert!(compile_admit_only(&tbl64_and_call_ref).is_ok());
 
-    // 5. Rejected: Wasm GC non-final `(sub (func))` (`0x50 0x00 0x60 0x00 0x00`).
+    // 5. Admitted on x64, rejected on aarch64: Wasm GC non-final `(sub (func))` (`0x50 0x00 0x60 0x00 0x00`).
     let gc_sub_func = wasm_module(&[
         section(1, &[1, 0x50, 0x00, 0x60, 0x00, 0x00]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[])]),
     ]);
+    assert!(compile_admit_only(&gc_sub_func).is_ok());
     assert!(matches!(
-        compile_admit_only(&gc_sub_func),
+        crate::aarch64::compile_wasm_to_aarch64(
+            &gc_sub_func,
+            &crate::aarch64::A64CompileOptions::default()
+        ),
         Err(X64CompileError::AdmissionRejected(_))
     ));
 
@@ -1285,12 +1335,16 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     ]);
     assert!(compile_admit_only(&tail_call_mod).is_ok());
 
-    // 11. Admitted: multi-memory (`multi-memory` proposal); rejected: shared memory (`threads`).
+    // 11. Admitted on x64: multi-memory (`multi-memory`) and shared memory (`threads`, rejected on aarch64).
     let multi_mem = wasm_module(&[section(5, &[2, 0x00, 1, 0x00, 1])]);
     assert!(compile_admit_only(&multi_mem).is_ok());
     let shared_mem = wasm_module(&[section(5, &[1, 0x03, 1, 2])]);
+    assert!(compile_admit_only(&shared_mem).is_ok());
     assert!(matches!(
-        compile_admit_only(&shared_mem),
+        crate::aarch64::compile_wasm_to_aarch64(
+            &shared_mem,
+            &crate::aarch64::A64CompileOptions::default()
+        ),
         Err(X64CompileError::AdmissionRejected(_))
     ));
 
@@ -2243,6 +2297,7 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
         allow_r13: true,
         has_bmi2: false,
         allow_xmm16_31: false,
+        ..Default::default()
     };
     let alloc = super::regalloc::allocate_with_config(&irs[1], cfg, None).unwrap();
     super::verify::verify_alloc_with_config(&irs[1], &alloc, cfg).unwrap();
@@ -2378,6 +2433,8 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
         needs_stack_check: false,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         early_pruned: 0,
         wide_chains: Vec::new(),
         outer_simd_loops: Vec::new(),
@@ -2398,6 +2455,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
             allow_r13: false,
             has_bmi2: true,
             allow_xmm16_31: false,
+            ..Default::default()
         },
         None,
     )
@@ -2417,6 +2475,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
             allow_r13: false,
             has_bmi2: true,
             allow_xmm16_31: false,
+            ..Default::default()
         },
     )
     .expect("BMI2 mode must allow RCX live across Shl");
@@ -2429,6 +2488,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
                 allow_r13: false,
                 has_bmi2: false,
                 allow_xmm16_31: false,
+                ..Default::default()
             },
         )
         .is_err(),
@@ -2750,7 +2810,7 @@ fn stage3_council_round1_regressions() {
         let module = admit_x64_module(dec).unwrap();
         let layout = CtxLayout::compute(&module, Vec::new()).unwrap();
         let budget = CompileBudget::new(None);
-        let shared = build_shared_rodata(dec, &module, &layout.global_offs, None, &budget).unwrap();
+        let shared = build_shared_rodata(dec, &module, &layout, None, &budget).unwrap();
         let mut ir = lower_wasm_to_ir(dec, &module, 0).unwrap();
         let effects =
             opt::compute_module_effects(std::slice::from_ref(&ir), &module, None).unwrap();
@@ -2758,8 +2818,15 @@ fn stage3_council_round1_regressions() {
         verify_ir(&ir, &module).unwrap();
         let alloc = allocate(&ir).unwrap();
         verify_alloc(&ir, &alloc).unwrap();
-        let asm =
-            lower_ir_to_x64(&ir, &alloc, &layout, &shared.consts, TargetIsa::default()).unwrap();
+        let asm = lower_ir_to_x64(
+            &ir,
+            &alloc,
+            &module,
+            &layout,
+            &shared.consts,
+            TargetIsa::default(),
+        )
+        .unwrap();
         assert!(
             asm.code.windows(2).any(|w| w == [0xeb, 0xfe]),
             "emitted spin loop must preserve eb fe self-jump: {:02x?}",
@@ -3261,6 +3328,8 @@ fn stage3_council_round1_regressions() {
                     needs_stack_check: false,
                     elided_callee_stack_bytes: 0,
                     memory64: false,
+                    uses_gc: false,
+                    val_ref_kinds: Vec::new(),
                     early_pruned: 0,
                     wide_chains: Vec::new(),
                     outer_simd_loops: Vec::new(),
@@ -4908,6 +4977,8 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
     let mut ir = IrFunc {
         func_index: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         params: vec![Val(0), Val(1), Val(2)],
         result_tys: vec![],
         val_tys: vec![
@@ -5019,6 +5090,8 @@ fn peel_boundary_clamped_loops_remaps_load_scaled_and_axpy_keeps_unrelated_check
     let mut axpy = IrFunc {
         func_index: 0,
         memory64: false,
+        uses_gc: false,
+        val_ref_kinds: Vec::new(),
         params: vec![Val(0), Val(1), Val(2)],
         result_tys: vec![],
         val_tys: vec![
@@ -5188,11 +5261,13 @@ fn x64_spectre_branchless_slh_bitwise_bce_and_dual_pinned_globals() {
         allow_r13: layout.fixed_mem_bytes.is_some() && layout.pinned_global_2.is_none(),
         has_bmi2: false,
         allow_xmm16_31: false,
+        ..Default::default()
     };
     let alloc = super::regalloc::allocate_with_config(&ir, cfg, None).unwrap();
     let asm = super::lower::lower_ir_to_x64(
         &ir,
         &alloc,
+        &module,
         &layout,
         &super::RodataConsts::default(),
         TargetIsa::default(),
@@ -6519,6 +6594,7 @@ fn x64_xmm16_31_evex_zero_spill_disasm_and_native_parity() {
         allow_r13: true,
         has_bmi2: true,
         allow_xmm16_31: true,
+        ..Default::default()
     };
     let alloc_v4 = allocate_with_config(&ir, cfg_v4, None).unwrap();
     verify_alloc_with_config(&ir, &alloc_v4, cfg_v4).unwrap();
@@ -10200,4 +10276,161 @@ fn x64_final_stretch_audit_regressions() {
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     let _ = (so_v2, so_v3, so_v4);
+}
+
+#[test]
+fn x64_gc_finish_labels_safepoint_alignment_boundary() {
+    use super::asm::{Asm, RelocTarget};
+
+    let mut a = Asm::new();
+    let lbl_after = a.new_label();
+    let lbl_loop = a.new_label();
+
+    // Short forward jump: relaxes from rel32 (5B) to rel8 (2B) -> shifts everything after by -3.
+    a.jmp(lbl_after);
+    a.nop();
+    a.bind(lbl_after);
+
+    // Call 0 followed immediately by an aligned loop header at the exact return address.
+    // `finish_labels` inserts alignment NOPs right before `lbl_loop`; the return address of
+    // Call 0 MUST stay before those NOPs (`sp0.code_off == rel0.next_ip_off`).
+    a.call_reloc(RelocTarget::Helper(0));
+    a.record_safepoint(40, vec![0, 8], vec![16]);
+    a.mark_align16(lbl_loop);
+    a.bind(lbl_loop);
+
+    // Call 1 inside the aligned loop MUST be shifted by both relaxation AND alignment NOPs.
+    a.call_reloc(RelocTarget::Helper(1));
+    a.record_safepoint(40, vec![0], vec![]);
+    a.ret();
+
+    a.finish_labels().expect("finish_labels must succeed");
+
+    assert_eq!(a.relocs.len(), 2);
+    assert_eq!(a.safepoints.len(), 2);
+    assert_eq!(
+        a.safepoints[0].code_off, a.relocs[0].next_ip_off,
+        "safepoint immediately before an aligned label must stay at the call return address"
+    );
+    assert_eq!(
+        a.safepoints[1].code_off, a.relocs[1].next_ip_off,
+        "safepoint after an aligned label must include alignment padding shift"
+    );
+    // Call 0 ends at offset 2 (jmp rel8) + 1 (nop) + 5 (call rel32) = 8, so lbl_loop must be
+    // padded by 8 bytes to offset 16, strictly after safepoint 0.
+    assert_eq!(a.safepoints[0].code_off, 8);
+    assert_eq!(a.safepoints[1].code_off, 21);
+}
+
+#[test]
+fn x64_gc_canonical_rec_groups_and_deep_subtyping() {
+    // Construct a module with:
+    // - Type 0: singleton `(struct (field i32))`
+    // - Type 1: singleton `(struct (field i32))` (must canonicalize equal to Type 0)
+    // - Rec group A: Type 2 = `(struct (field (ref null 3)))`, Type 3 = `(array i16)`
+    // - Rec group B: Type 4 = `(struct (field (ref null 5)))`, Type 5 = `(array i16)`
+    //   (must canonicalize equal to Rec group A, and Type 2 != Type 0)
+    // - Deep open subtype chain Types 6..=18 (depths 0..=12, crossing GC_DISPLAY_LEN = 10)
+    //   where Type 18 is final.
+    let mut tsec = Vec::new();
+    // 4 rec-group/singleton entries + 13 chain entries = 17 type entries in Type section.
+    leb_u32(&mut tsec, 17);
+    // Type 0: (struct (field i32))
+    tsec.extend_from_slice(&[0x5f, 1, 0x7f, 0]);
+    // Type 1: (struct (field i32))
+    tsec.extend_from_slice(&[0x5f, 1, 0x7f, 0]);
+    // Rec group A: Types 2, 3
+    tsec.extend_from_slice(&[0x4e, 2, 0x5f, 1, 0x63, 3, 0, 0x5e, 0x77, 0]);
+    // Rec group B: Types 4, 5
+    tsec.extend_from_slice(&[0x4e, 2, 0x5f, 1, 0x63, 5, 0, 0x5e, 0x77, 0]);
+    // Type 6 (depth 0): (sub (struct (field i32)))
+    tsec.extend_from_slice(&[0x50, 0, 0x5f, 1, 0x7f, 0]);
+    // Types 7..=17 (depths 1..=11): open subtypes of previous type
+    for super_idx in 6u32..=16 {
+        tsec.push(0x50);
+        tsec.push(1);
+        leb_u32(&mut tsec, super_idx);
+        tsec.extend_from_slice(&[0x5f, 1, 0x7f, 0]);
+    }
+    // Type 18 (depth 12): final subtype of Type 17
+    tsec.push(0x4f);
+    tsec.push(1);
+    leb_u32(&mut tsec, 17);
+    tsec.extend_from_slice(&[0x5f, 1, 0x7f, 0]);
+
+    let wasm = wasm_module(&[section(1, &tsec)]);
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .expect("valid GC rec-group module");
+    let m = super::module::admit_x64_module(val.decoded()).expect("admit GC module");
+    assert!(m.uses_gc);
+    assert_eq!(m.type_canon[0], m.type_canon[1]);
+    assert_eq!(m.type_canon[2], m.type_canon[4]);
+    assert_eq!(m.type_canon[3], m.type_canon[5]);
+    assert_ne!(m.type_canon[0], m.type_canon[2]);
+
+    let c6 = m.type_canon[6];
+    let c16 = m.type_canon[16];
+    let c17 = m.type_canon[17];
+    let c18 = m.type_canon[18];
+    assert_eq!(m.gc_canon_types[c18 as usize].depth, 12);
+    assert!(m.is_canon_subtype(c18, c6));
+    assert!(m.is_canon_subtype(c18, c16));
+    assert!(m.is_canon_subtype(c18, c17));
+    assert!(m.is_canon_subtype(c18, c18));
+    assert!(!m.is_canon_subtype(c16, c17));
+    assert!(!m.is_canon_subtype(c6, c18));
+    assert!(!m.is_canon_subtype(m.type_canon[0], c6));
+}
+
+#[test]
+#[ignore = "requires dumped Scriptw smoke.wasm + smoke.wasm.runtime.wasm"]
+fn x64_store_probe_scriptw_real_r_and_p() {
+    let dir = std::path::Path::new(
+        "/home/mewhhaha/.gemini/antigravity-cli/brain/9263a17a-e037-4d2f-8e79-4415cd4c465c/scratch/scriptw_smoke",
+    );
+    let (_, isa) = super::resolve_x64_isa("native").expect("native isa");
+    for fname in ["tiny.wasm", "smoke.wasm", "smoke.wasm.runtime.wasm"] {
+        let path = dir.join(fname);
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {fname}: {e}"));
+        let t0 = std::time::Instant::now();
+        let opts = super::X64CompileOptions {
+            target: super::module::X64Target::StoreCdylib,
+            isa,
+            opt: true,
+            verify: true,
+            ..Default::default()
+        };
+        let so = super::compile_wasm_to_x64_so(&bytes, &opts)
+            .unwrap_or_else(|e| panic!("{fname} StoreCdylib compile failed: {e}"));
+        assert!(so.starts_with(b"\x7fELF"), "{fname}: expected ELF magic");
+        let meta_magic = &super::store_rt::STORE_META_MAGIC;
+        let meta_pos = so
+            .windows(meta_magic.len())
+            .position(|w| w == meta_magic)
+            .unwrap_or_else(|| panic!("{fname}: missing WTST0001 metadata magic"));
+        let meta = super::store_rt::decode_store_metadata(&so[meta_pos..])
+            .unwrap_or_else(|e| panic!("{fname}: decode_store_metadata failed: {e}"));
+        eprintln!(
+            "[{fname}] StoreCdylib ELF64 .so compiled + verified in {:?}: wasm={}B -> so={}B | defs={} imp_fn={} imp_g={} imp_m={} exp_fn={} exp_g={} host_tramps={} exp_tramps={} canon={} gc={} threads={} exn={}",
+            t0.elapsed(),
+            bytes.len(),
+            so.len(),
+            meta.n_defs,
+            meta.imported_funcs.len(),
+            meta.imported_globals.len(),
+            meta.imported_mems.len(),
+            meta.exported_funcs.len(),
+            meta.exported_globals.len(),
+            meta.host_tramp_sigs.len(),
+            meta.export_tramp_sigs.len(),
+            meta.n_local_canon,
+            meta.uses_gc,
+            meta.uses_threads,
+            meta.uses_exceptions,
+        );
+    }
 }

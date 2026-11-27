@@ -501,7 +501,14 @@ fn rewrite_op_uses_with<F: Fn(&mut Val)>(op: &mut Op, pool: &mut [Val], r: F) {
         | Op::TableSize(_)
         | Op::ExnGetActive
         | Op::ExnClearActive
+        | Op::TagId(_)
+        | Op::FuncRef(_)
         | Op::PgoFuncEnter(_)
+        | Op::GcNull
+        | Op::ExternNull
+        | Op::GcConstI31(_)
+        | Op::ExternConstI31(_)
+        | Op::StructNewDefault(_)
         | Op::Trap(_) => {}
         Op::Copy(a)
         | Op::PgoRecordCi { idx: a, .. }
@@ -557,7 +564,17 @@ fn rewrite_op_uses_with<F: Fn(&mut Val)>(op: &mut Op, pool: &mut [Val], r: F) {
         | Op::V128ToI32 { a, .. }
         | Op::ExnSetActive(a)
         | Op::ExnGetTag(a)
-        | Op::ExnGetPayload { handle: a, .. } => r(a),
+        | Op::ExnGetPayload { handle: a, .. }
+        | Op::RefI31(a)
+        | Op::I31GetS(a)
+        | Op::I31GetU(a)
+        | Op::AnyConvertExtern(a)
+        | Op::ExternConvertAny(a)
+        | Op::StructGet { obj: a, .. }
+        | Op::ArrayNewDefault { len: a, .. }
+        | Op::ArrayLen(a)
+        | Op::RefTest { val: a, .. }
+        | Op::RefCast { val: a, .. } => r(a),
         Op::I32Bin(_, a, b)
         | Op::I64Bin(_, a, b)
         | Op::AddScaled {
@@ -605,9 +622,85 @@ fn rewrite_op_uses_with<F: Fn(&mut Val)>(op: &mut Op, pool: &mut [Val], r: F) {
         }
         | Op::MemByteBlur3Div {
             base: a, count: b, ..
-        } => {
+        }
+        | Op::RefEq(a, b)
+        | Op::StructSet { obj: a, val: b, .. }
+        | Op::ArrayNew {
+            init: a, len: b, ..
+        }
+        | Op::ArrayNewData { src: a, len: b, .. }
+        | Op::ArrayNewElem { src: a, len: b, .. }
+        | Op::ArrayGet { arr: a, idx: b, .. } => {
             r(a);
             r(b);
+        }
+        Op::ArraySet { arr, idx, val, .. } => {
+            r(arr);
+            r(idx);
+            r(val);
+        }
+        Op::ArrayFill {
+            arr, dst, val, len, ..
+        } => {
+            r(arr);
+            r(dst);
+            r(val);
+            r(len);
+        }
+        Op::ArrayInitData {
+            arr, dst, src, len, ..
+        }
+        | Op::ArrayInitElem {
+            arr, dst, src, len, ..
+        } => {
+            r(arr);
+            r(dst);
+            r(src);
+            r(len);
+        }
+        Op::ArrayCopy {
+            dst,
+            dst_off,
+            src,
+            src_off,
+            len,
+            ..
+        } => {
+            r(dst);
+            r(dst_off);
+            r(src);
+            r(src_off);
+            r(len);
+        }
+        Op::AtomicFence => {}
+        Op::AtomicLoad { addr, .. } => r(addr),
+        Op::AtomicStore { addr, val, .. } | Op::AtomicRmw { addr, val, .. } => {
+            r(addr);
+            r(val);
+        }
+        Op::AtomicCmpxchg {
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            r(addr);
+            r(expected);
+            r(replacement);
+        }
+        Op::AtomicWait {
+            addr,
+            expected,
+            timeout,
+            ..
+        } => {
+            r(addr);
+            r(expected);
+            r(timeout);
+        }
+        Op::AtomicNotify { addr, count, .. } => {
+            r(addr);
+            r(count);
         }
         Op::F64x4BinMem { dst, lhs, rhs, .. } => {
             r(dst);
@@ -687,7 +780,9 @@ fn rewrite_op_uses_with<F: Fn(&mut Val)>(op: &mut Op, pool: &mut [Val], r: F) {
         Op::Call { args, .. }
         | Op::ExnAlloc { args, .. }
         | Op::SlpWideChain { args, .. }
-        | Op::SimdOuterLoop { args, .. } => {
+        | Op::SimdOuterLoop { args, .. }
+        | Op::StructNew { fields: args, .. }
+        | Op::ArrayNewFixed { elems: args, .. } => {
             for v in &mut pool[args.start as usize..args.start as usize + args.len as usize] {
                 r(v);
             }
@@ -1609,7 +1704,9 @@ pub fn prune_block_params_with_scratch(
                             *args = push_verbatim(&mut new_pool, *args);
                             *rets = push_verbatim(&mut new_pool, *rets);
                         }
-                        Op::ExnAlloc { args, .. } => {
+                        Op::ExnAlloc { args, .. }
+                        | Op::StructNew { fields: args, .. }
+                        | Op::ArrayNewFixed { elems: args, .. } => {
                             *args = push_verbatim(&mut new_pool, *args);
                         }
                         _ => {}
@@ -2233,9 +2330,14 @@ pub fn try_collect_pre_inline_summary(
                 | Op::ExnGetActive
                 | Op::ExnClearActive
                 | Op::ExnGetTag(_)
+                | Op::TagId(_)
+                | Op::FuncRef(_)
                 | Op::ExnGetPayload { .. }
                 | Op::PgoFuncEnter(_)
                 | Op::PgoRecordCi { .. } => {
+                    has_disallowed = true;
+                }
+                op if op.is_gc_op() => {
                     has_disallowed = true;
                 }
                 _ => {}
@@ -2290,6 +2392,36 @@ pub fn try_collect_pre_inline_summary(
     Some((inst_count, inlinable, out))
 }
 
+/// Returns `true` iff every instruction and terminator in `ir` is supported by `clone_callee_into_caller`.
+fn callee_has_inlinable_ops(ir: &IrFunc) -> bool {
+    !ir.blocks.iter().any(|bb| {
+        matches!(
+            bb.term,
+            Term::ReturnCall { .. }
+                | Term::ReturnCallIndirect { .. }
+                | Term::CallCatch { .. }
+                | Term::CallIndirectCatch { .. }
+                | Term::ThrowActive
+        ) || bb.insts.iter().any(|inst| {
+            matches!(
+                inst.op,
+                Op::ExnAlloc { .. }
+                    | Op::SlpWideChain { .. }
+                    | Op::SimdOuterLoop { .. }
+                    | Op::ExnSetActive(_)
+                    | Op::ExnGetActive
+                    | Op::ExnClearActive
+                    | Op::ExnGetTag(_)
+                    | Op::TagId(_)
+                    | Op::FuncRef(_)
+                    | Op::ExnGetPayload { .. }
+                    | Op::PgoFuncEnter(_)
+                    | Op::PgoRecordCi { .. }
+            ) || inst.op.is_gc_op()
+        })
+    })
+}
+
 /// Conservative check for whether `ir` could qualify as an inline callee under any threshold
 /// (general, inside-loop, single-call-site, or constant-divisor loop specialization).
 pub fn is_inlinable_ir(ir: &IrFunc) -> bool {
@@ -2308,28 +2440,7 @@ pub fn is_inlinable_ir(ir: &IrFunc) -> bool {
     if !fits_single && !fits_const_div {
         return false;
     }
-    !ir.blocks.iter().any(|bb| {
-        matches!(
-            bb.term,
-            Term::ReturnCall { .. }
-                | Term::ReturnCallIndirect { .. }
-                | Term::CallCatch { .. }
-                | Term::CallIndirectCatch { .. }
-                | Term::ThrowActive
-        ) || bb.insts.iter().any(|inst| {
-            matches!(
-                inst.op,
-                Op::ExnAlloc { .. }
-                    | Op::ExnSetActive(_)
-                    | Op::ExnGetActive
-                    | Op::ExnClearActive
-                    | Op::ExnGetTag(_)
-                    | Op::ExnGetPayload { .. }
-                    | Op::PgoFuncEnter(_)
-                    | Op::PgoRecordCi { .. }
-            )
-        })
-    })
+    callee_has_inlinable_ops(ir)
 }
 
 /// Fallible fast O(B + E) detection of blocks belonging to natural loops (backedges in RPO) in `ir`.
@@ -2515,6 +2626,9 @@ fn clone_callee_into_caller(
         > MAX_BLOCKS_PER_FN
     {
         return Err("x64: inline block limit".into());
+    }
+    if !callee_has_inlinable_ops(callee) {
+        return Err("x64: cannot inline EH/GC/PGO/Store-ref callee".into());
     }
     let mut needed_pool = 0usize;
     for td in &callee.br_tables {
@@ -3124,11 +3238,130 @@ fn clone_callee_into_caller(
                 | Op::ExnGetActive
                 | Op::ExnClearActive
                 | Op::ExnGetTag(_)
+                | Op::TagId(_)
+                | Op::FuncRef(_)
                 | Op::ExnGetPayload { .. }
                 | Op::PgoFuncEnter(_)
                 | Op::PgoRecordCi { .. } => {
                     unreachable!("EH/PGO-gen callee excluded by is_inlinable_ir")
                 }
+                Op::GcNull
+                | Op::ExternNull
+                | Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefEq(_, _)
+                | Op::RefI31(_)
+                | Op::I31GetS(_)
+                | Op::I31GetU(_)
+                | Op::AnyConvertExtern(_)
+                | Op::ExternConvertAny(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::StructGet { .. }
+                | Op::StructSet { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayGet { .. }
+                | Op::ArraySet { .. }
+                | Op::ArrayLen(_)
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::RefTest { .. }
+                | Op::RefCast { .. } => {
+                    unreachable!("GC callee excluded by is_inlinable_ir")
+                }
+                Op::AtomicFence => Op::AtomicFence,
+                Op::AtomicLoad {
+                    mem,
+                    width,
+                    res_ty,
+                    addr,
+                    offset,
+                } => Op::AtomicLoad {
+                    mem,
+                    width,
+                    res_ty,
+                    addr: map_v(addr),
+                    offset,
+                },
+                Op::AtomicStore {
+                    mem,
+                    width,
+                    addr,
+                    val,
+                    offset,
+                } => Op::AtomicStore {
+                    mem,
+                    width,
+                    addr: map_v(addr),
+                    val: map_v(val),
+                    offset,
+                },
+                Op::AtomicRmw {
+                    mem,
+                    op,
+                    width,
+                    res_ty,
+                    addr,
+                    val,
+                    offset,
+                } => Op::AtomicRmw {
+                    mem,
+                    op,
+                    width,
+                    res_ty,
+                    addr: map_v(addr),
+                    val: map_v(val),
+                    offset,
+                },
+                Op::AtomicCmpxchg {
+                    mem,
+                    width,
+                    res_ty,
+                    addr,
+                    expected,
+                    replacement,
+                    offset,
+                } => Op::AtomicCmpxchg {
+                    mem,
+                    width,
+                    res_ty,
+                    addr: map_v(addr),
+                    expected: map_v(expected),
+                    replacement: map_v(replacement),
+                    offset,
+                },
+                Op::AtomicWait {
+                    mem,
+                    is_64,
+                    addr,
+                    expected,
+                    timeout,
+                    offset,
+                } => Op::AtomicWait {
+                    mem,
+                    is_64,
+                    addr: map_v(addr),
+                    expected: map_v(expected),
+                    timeout: map_v(timeout),
+                    offset,
+                },
+                Op::AtomicNotify {
+                    mem,
+                    addr,
+                    count,
+                    offset,
+                } => Op::AtomicNotify {
+                    mem,
+                    addr: map_v(addr),
+                    count: map_v(count),
+                    offset,
+                },
                 Op::CiCheckTarget {
                     ci_id,
                     idx,
@@ -3380,13 +3613,14 @@ fn inline_single_caller(
             } else {
                 INLINE_MAX_CONST_DIV_CALLEE_VALS
             };
-            // Reject obviously oversized callees BEFORE computing `try_compute_in_loop_blocks`!
+            // Reject obviously oversized or non-inlinable callees BEFORE computing `try_compute_in_loop_blocks`!
             if !callee_ir.br_tables.is_empty()
                 || c_insts > hard_max_insts
                 || c_blocks > hard_max_blocks
                 || c_vals > hard_max_vals
                 || caller_ir.blocks.len() + c_blocks + 1 > INLINE_MAX_CONST_DIV_CALLER_BLOCKS
                 || caller_ir.val_tys.len() + c_vals > INLINE_MAX_CONST_DIV_CALLER_VALS
+                || !callee_has_inlinable_ops(callee_ir)
             {
                 ii += 1;
                 continue;
@@ -4284,6 +4518,7 @@ pub fn inline_small_helpers_with_pgo(
                     params: Vec::new(),
                     result_tys: Vec::new(),
                     val_tys: Vec::new(),
+                    val_ref_kinds: Vec::new(),
                     blocks: Vec::new(),
                     val_pool: Vec::new(),
                     v128_consts: Vec::new(),
@@ -4293,6 +4528,7 @@ pub fn inline_small_helpers_with_pgo(
                     needs_stack_check: true,
                     elided_callee_stack_bytes: 0,
                     memory64: false,
+                    uses_gc: false,
                     early_pruned: 0,
                 },
             ))
@@ -4650,6 +4886,41 @@ pub fn try_compute_fn_own_effects(
                 | Op::MemCopyConst { .. }
                 | Op::MemFillConst { .. }
                 | Op::MemByteBlur3Div { .. }
+                | Op::GcNull
+                | Op::ExternNull
+                | Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefEq(_, _)
+                | Op::RefI31(_)
+                | Op::I31GetS(_)
+                | Op::I31GetU(_)
+                | Op::AnyConvertExtern(_)
+                | Op::ExternConvertAny(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::StructGet { .. }
+                | Op::StructSet { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayGet { .. }
+                | Op::ArraySet { .. }
+                | Op::ArrayLen(_)
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::RefTest { .. }
+                | Op::RefCast { .. }
+                | Op::AtomicFence
+                | Op::AtomicLoad { .. }
+                | Op::AtomicStore { .. }
+                | Op::AtomicRmw { .. }
+                | Op::AtomicCmpxchg { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. }
                 | Op::F64x4BinMem { .. }
                 | Op::SlpWideChain { .. }
                 | Op::F64AxpyLoop { .. }
@@ -6805,6 +7076,41 @@ fn run_dom_gvn_and_bce_with_scratch(
                 | Op::StoreMem { .. }
                 | Op::V128StoreLaneMem { .. }
                 | Op::MemByteBlur3Div { .. }
+                | Op::GcNull
+                | Op::ExternNull
+                | Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefEq(_, _)
+                | Op::RefI31(_)
+                | Op::I31GetS(_)
+                | Op::I31GetU(_)
+                | Op::AnyConvertExtern(_)
+                | Op::ExternConvertAny(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::StructGet { .. }
+                | Op::StructSet { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayGet { .. }
+                | Op::ArraySet { .. }
+                | Op::ArrayLen(_)
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::RefTest { .. }
+                | Op::RefCast { .. }
+                | Op::AtomicFence
+                | Op::AtomicLoad { .. }
+                | Op::AtomicStore { .. }
+                | Op::AtomicRmw { .. }
+                | Op::AtomicCmpxchg { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. }
                 | Op::F64x4BinMem { .. }
                 | Op::SlpWideChain { .. }
                 | Op::F64AxpyLoop { .. }
@@ -7569,6 +7875,41 @@ fn run_dom_gvn_and_bce_with_scratch(
                         | Op::StoreMem { .. }
                         | Op::V128StoreLaneMem { .. }
                         | Op::MemByteBlur3Div { .. }
+                        | Op::GcNull
+                        | Op::ExternNull
+                        | Op::GcConstI31(_)
+                        | Op::ExternConstI31(_)
+                        | Op::RefEq(_, _)
+                        | Op::RefI31(_)
+                        | Op::I31GetS(_)
+                        | Op::I31GetU(_)
+                        | Op::AnyConvertExtern(_)
+                        | Op::ExternConvertAny(_)
+                        | Op::StructNew { .. }
+                        | Op::StructNewDefault(_)
+                        | Op::StructGet { .. }
+                        | Op::StructSet { .. }
+                        | Op::ArrayNew { .. }
+                        | Op::ArrayNewDefault { .. }
+                        | Op::ArrayNewFixed { .. }
+                        | Op::ArrayNewData { .. }
+                        | Op::ArrayNewElem { .. }
+                        | Op::ArrayGet { .. }
+                        | Op::ArraySet { .. }
+                        | Op::ArrayLen(_)
+                        | Op::ArrayFill { .. }
+                        | Op::ArrayCopy { .. }
+                        | Op::ArrayInitData { .. }
+                        | Op::ArrayInitElem { .. }
+                        | Op::RefTest { .. }
+                        | Op::RefCast { .. }
+                        | Op::AtomicFence
+                        | Op::AtomicLoad { .. }
+                        | Op::AtomicStore { .. }
+                        | Op::AtomicRmw { .. }
+                        | Op::AtomicCmpxchg { .. }
+                        | Op::AtomicWait { .. }
+                        | Op::AtomicNotify { .. }
                         | Op::F64x4BinMem { .. }
                         | Op::SlpWideChain { .. }
                         | Op::F64AxpyLoop { .. }
@@ -10094,7 +10435,7 @@ fn if_convert_two_ptr_merge_loops(ir: &mut IrFunc, dom: &CfgDom) -> bool {
                         | Op::ExnAlloc { .. }
                         | Op::SlpWideChain { .. }
                         | Op::SimdOuterLoop { .. }
-                )
+                ) || ins.op.is_gc_op()
             })
         {
             continue;
@@ -11060,7 +11401,14 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::TableSize(_)
         | Op::ExnGetActive
         | Op::ExnClearActive
+        | Op::TagId(_)
+        | Op::FuncRef(_)
         | Op::PgoFuncEnter(_)
+        | Op::GcNull
+        | Op::ExternNull
+        | Op::GcConstI31(_)
+        | Op::ExternConstI31(_)
+        | Op::StructNewDefault(_)
         | Op::Trap(_) => {}
         Op::Copy(a)
         | Op::PgoRecordCi { idx: a, .. }
@@ -11116,7 +11464,17 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::V128ToI32 { a, .. }
         | Op::ExnSetActive(a)
         | Op::ExnGetTag(a)
-        | Op::ExnGetPayload { handle: a, .. } => r(a),
+        | Op::ExnGetPayload { handle: a, .. }
+        | Op::RefI31(a)
+        | Op::I31GetS(a)
+        | Op::I31GetU(a)
+        | Op::AnyConvertExtern(a)
+        | Op::ExternConvertAny(a)
+        | Op::StructGet { obj: a, .. }
+        | Op::ArrayNewDefault { len: a, .. }
+        | Op::ArrayLen(a)
+        | Op::RefTest { val: a, .. }
+        | Op::RefCast { val: a, .. } => r(a),
         Op::I32Bin(_, a, b)
         | Op::I64Bin(_, a, b)
         | Op::AddScaled {
@@ -11164,9 +11522,85 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         }
         | Op::MemByteBlur3Div {
             base: a, count: b, ..
-        } => {
+        }
+        | Op::RefEq(a, b)
+        | Op::StructSet { obj: a, val: b, .. }
+        | Op::ArrayNew {
+            init: a, len: b, ..
+        }
+        | Op::ArrayNewData { src: a, len: b, .. }
+        | Op::ArrayNewElem { src: a, len: b, .. }
+        | Op::ArrayGet { arr: a, idx: b, .. } => {
             r(a);
             r(b);
+        }
+        Op::ArraySet { arr, idx, val, .. } => {
+            r(arr);
+            r(idx);
+            r(val);
+        }
+        Op::ArrayFill {
+            arr, dst, val, len, ..
+        } => {
+            r(arr);
+            r(dst);
+            r(val);
+            r(len);
+        }
+        Op::ArrayInitData {
+            arr, dst, src, len, ..
+        }
+        | Op::ArrayInitElem {
+            arr, dst, src, len, ..
+        } => {
+            r(arr);
+            r(dst);
+            r(src);
+            r(len);
+        }
+        Op::ArrayCopy {
+            dst,
+            dst_off,
+            src,
+            src_off,
+            len,
+            ..
+        } => {
+            r(dst);
+            r(dst_off);
+            r(src);
+            r(src_off);
+            r(len);
+        }
+        Op::AtomicFence => {}
+        Op::AtomicLoad { addr, .. } => r(addr),
+        Op::AtomicStore { addr, val, .. } | Op::AtomicRmw { addr, val, .. } => {
+            r(addr);
+            r(val);
+        }
+        Op::AtomicCmpxchg {
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            r(addr);
+            r(expected);
+            r(replacement);
+        }
+        Op::AtomicWait {
+            addr,
+            expected,
+            timeout,
+            ..
+        } => {
+            r(addr);
+            r(expected);
+            r(timeout);
+        }
+        Op::AtomicNotify { addr, count, .. } => {
+            r(addr);
+            r(count);
         }
         Op::F64x4BinMem { dst, lhs, rhs, .. } => {
             r(dst);
@@ -11243,7 +11677,10 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
             r(val);
             r(len);
         }
-        Op::SlpWideChain { .. } | Op::SimdOuterLoop { .. } => {
+        Op::SlpWideChain { .. }
+        | Op::SimdOuterLoop { .. }
+        | Op::StructNew { .. }
+        | Op::ArrayNewFixed { .. } => {
             // `args: ValRange` remapped by callers (e.g. `split_live_ranges_for_regalloc`).
         }
         Op::Call { .. } | Op::CallIndirect { .. } | Op::ExnAlloc { .. } => {
@@ -11500,7 +11937,7 @@ fn version_checked_counted_loops(
                         | Op::ExnGetPayload { .. }
                         | Op::PgoFuncEnter(_)
                         | Op::PgoRecordCi { .. }
-                )
+                ) || ins.op.is_gc_op()
             }) {
                 body_clean = false;
                 break;
@@ -13218,7 +13655,7 @@ fn version_dynamic_counted_loops(
                         | Op::ExnGetPayload { .. }
                         | Op::PgoFuncEnter(_)
                         | Op::PgoRecordCi { .. }
-                )
+                ) || ins.op.is_gc_op()
             }) {
                 body_clean = false;
                 break;
@@ -15839,6 +16276,9 @@ pub fn optimize_func_stage2_with_options(
     scratch.dom = dom;
     scratch.cfg_scratch = cfg_sc;
     scratch.prune_scratch = prune_sc;
+    if res.is_ok() && ir.uses_gc {
+        ir.recompute_val_ref_kinds(module);
+    }
     res
 }
 
@@ -15880,7 +16320,13 @@ fn split_live_ranges_for_regalloc(
                 | Op::TableCopy { .. }
                 | Op::TableGrow { .. }
                 | Op::TableFill { .. }
-        )
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. }
+        ) || op.is_gc_alloc()
     };
     let term_clobbers_caller = |term: &Term| -> bool {
         matches!(
@@ -16231,7 +16677,9 @@ fn split_live_ranges_for_regalloc(
                         | Op::CallIndirect { args, .. }
                         | Op::ExnAlloc { args, .. }
                         | Op::SlpWideChain { args, .. }
-                        | Op::SimdOuterLoop { args, .. } => {
+                        | Op::SimdOuterLoop { args, .. }
+                        | Op::StructNew { fields: args, .. }
+                        | Op::ArrayNewFixed { elems: args, .. } => {
                             *args = clone_remapped_range(&mut ir.val_pool, *args, &split_map);
                         }
                         _ => {}
@@ -16688,6 +17136,41 @@ fn forward_loop_carried_scaled_loads(ir: &mut IrFunc, dom: &CfgDom, module: &X64
                 | Op::MemGrow(_)
                 | Op::MemGrowIdx { .. }
                 | Op::MemByteBlur3Div { .. }
+                | Op::GcNull
+                | Op::ExternNull
+                | Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefEq(_, _)
+                | Op::RefI31(_)
+                | Op::I31GetS(_)
+                | Op::I31GetU(_)
+                | Op::AnyConvertExtern(_)
+                | Op::ExternConvertAny(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::StructGet { .. }
+                | Op::StructSet { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayGet { .. }
+                | Op::ArraySet { .. }
+                | Op::ArrayLen(_)
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::RefTest { .. }
+                | Op::RefCast { .. }
+                | Op::AtomicFence
+                | Op::AtomicLoad { .. }
+                | Op::AtomicStore { .. }
+                | Op::AtomicRmw { .. }
+                | Op::AtomicCmpxchg { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. }
                 | Op::F64x4BinMem { .. }
                 | Op::SlpWideChain { .. }
                 | Op::F64AxpyLoop { .. }
@@ -18697,7 +19180,7 @@ fn unroll_small_constant_loops(ir: &mut IrFunc, dom: &CfgDom, max_body_insts: us
                         | Op::ExnGetPayload { .. }
                         | Op::PgoFuncEnter(_)
                         | Op::PgoRecordCi { .. }
-                )
+                ) || ins.op.is_gc_op()
             }) {
                 ok_body = false;
                 break;
@@ -25405,6 +25888,8 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                 | Op::ExnGetActive
                 | Op::ExnClearActive
                 | Op::ExnGetTag(_)
+                | Op::TagId(_)
+                | Op::FuncRef(_)
                 | Op::ExnGetPayload { .. }
                 | Op::PgoFuncEnter(_)
                 | Op::PgoRecordCi { .. }
@@ -25415,6 +25900,41 @@ fn unroll_counted_loops_4x(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
                 | Op::VecElemLoop { .. }
                 | Op::VecReduceLoop { .. }
                 | Op::MemByteBlur3Div { .. }
+                | Op::GcNull
+                | Op::ExternNull
+                | Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefEq(_, _)
+                | Op::RefI31(_)
+                | Op::I31GetS(_)
+                | Op::I31GetU(_)
+                | Op::AnyConvertExtern(_)
+                | Op::ExternConvertAny(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::StructGet { .. }
+                | Op::StructSet { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayGet { .. }
+                | Op::ArraySet { .. }
+                | Op::ArrayLen(_)
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::RefTest { .. }
+                | Op::RefCast { .. }
+                | Op::AtomicFence
+                | Op::AtomicLoad { .. }
+                | Op::AtomicStore { .. }
+                | Op::AtomicRmw { .. }
+                | Op::AtomicCmpxchg { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. }
                 | Op::I32Bin(
                     IntBinOp::DivS
                     | IntBinOp::DivU
@@ -27437,6 +27957,32 @@ fn op_may_trap_locally(op: &Op) -> bool {
         | Op::MemFillConst { checked: false, .. }
         | Op::CallIndirect { .. }
         | Op::ExnAlloc { .. }
+        | Op::I31GetS(_)
+        | Op::I31GetU(_)
+        | Op::AnyConvertExtern(_)
+        | Op::StructNew { .. }
+        | Op::StructNewDefault(_)
+        | Op::StructGet { .. }
+        | Op::StructSet { .. }
+        | Op::ArrayNew { .. }
+        | Op::ArrayNewDefault { .. }
+        | Op::ArrayNewFixed { .. }
+        | Op::ArrayNewData { .. }
+        | Op::ArrayNewElem { .. }
+        | Op::ArrayGet { .. }
+        | Op::ArraySet { .. }
+        | Op::ArrayLen(_)
+        | Op::ArrayFill { .. }
+        | Op::ArrayCopy { .. }
+        | Op::ArrayInitData { .. }
+        | Op::ArrayInitElem { .. }
+        | Op::RefCast { .. }
+        | Op::AtomicLoad { .. }
+        | Op::AtomicStore { .. }
+        | Op::AtomicRmw { .. }
+        | Op::AtomicCmpxchg { .. }
+        | Op::AtomicWait { .. }
+        | Op::AtomicNotify { .. }
         | Op::Trap(_) => true,
         _ => false,
     }
@@ -27523,8 +28069,21 @@ pub fn try_compute_fn_elide_input(
                 | Op::TableInit { .. }
                 | Op::TableCopy { .. }
                 | Op::TableGrow { .. }
-                | Op::TableFill { .. } => {
+                | Op::TableFill { .. }
+                | Op::AtomicWait { .. }
+                | Op::AtomicNotify { .. } => {
                     max_helper_bytes = max_helper_bytes.max(PURE_HELPER_STACK_BYTES);
+                }
+                op if op.is_gc_alloc()
+                    || matches!(
+                        op,
+                        Op::ArrayFill { .. }
+                            | Op::ArrayCopy { .. }
+                            | Op::ArrayInitData { .. }
+                            | Op::ArrayInitElem { .. }
+                    ) =>
+                {
+                    calls_import_or_indirect = true;
                 }
                 _ => {}
             }
@@ -27638,6 +28197,9 @@ where
                 cannot_elide[f - n_imports] = true;
             }
         }
+    }
+    if module.target == super::module::X64Target::StoreCdylib {
+        cannot_elide.fill(true);
     }
     if module.uses_call_ref || module.uses_dyn_ci {
         let mut dyn_or_ref_sigs: Vec<u32> = Vec::new();

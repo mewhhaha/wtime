@@ -4,12 +4,13 @@
 
 use std::collections::HashMap;
 
-use wtime_types::ValType;
+use wtime_types::{HeapType, ValType};
 use wtime_validate::{DecodedModule, Immediate, Instruction};
 
 use super::module::{
-    CompileBudget, MAX_BLOCKS_PER_FN, MAX_FRAME_SCAN_WRITES, MAX_IF_SNAPSHOT_ENTRIES,
-    MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64ConstVal, X64Module,
+    CompileBudget, GcCompositeInfo, GcRefFamily, GcStorageKind, MAX_BLOCKS_PER_FN,
+    MAX_FRAME_SCAN_WRITES, MAX_IF_SNAPSHOT_ENTRIES, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN,
+    X64ConstVal, X64Module,
 };
 use super::{TRAP_INDIRECT_CALL, TRAP_OOB};
 
@@ -21,7 +22,123 @@ pub struct Val(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockId(pub u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+#[repr(u8)]
+pub enum ValRefKind {
+    #[default]
+    None = 0,
+    /// Value in the Wasm GC `any` hierarchy (`any`/`eq`/`i31`/`struct`/`array`/`none`/concrete struct or array).
+    GcRef = 1,
+    /// Value in the Wasm `extern` hierarchy (`extern`/`noextern`, may hold `ExternGc` pointing into GC heap).
+    ExternRef = 2,
+}
+
+impl ValRefKind {
+    #[inline]
+    pub const fn is_traced(self) -> bool {
+        !matches!(self, ValRefKind::None)
+    }
+
+    #[inline]
+    pub const fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (ValRefKind::None, x) | (x, ValRefKind::None) => x,
+            (ValRefKind::GcRef, ValRefKind::GcRef) => ValRefKind::GcRef,
+            (ValRefKind::ExternRef, ValRefKind::ExternRef) => ValRefKind::ExternRef,
+            (ValRefKind::GcRef, ValRefKind::ExternRef)
+            | (ValRefKind::ExternRef, ValRefKind::GcRef) => ValRefKind::GcRef,
+        }
+    }
+}
+
+/// Sign/width load mode for Wasm GC struct fields and array elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GcFieldLoadKind {
+    Val(Ty),
+    I8S,
+    I8U,
+    I16S,
+    I16U,
+}
+
+impl GcFieldLoadKind {
+    #[inline]
+    pub const fn ty(self) -> Ty {
+        match self {
+            GcFieldLoadKind::Val(t) => t,
+            GcFieldLoadKind::I8S
+            | GcFieldLoadKind::I8U
+            | GcFieldLoadKind::I16S
+            | GcFieldLoadKind::I16U => Ty::I32,
+        }
+    }
+}
+
+/// Target heap type for `ref.test`, `ref.cast`, and `br_on_cast`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GcHeapTarget {
+    Any,
+    Eq,
+    I31,
+    Struct,
+    Array,
+    None,
+    Func,
+    NoFunc,
+    Extern,
+    NoExtern,
+    Exn,
+    NoExn,
+    Concrete { canon_id: u32, is_func: bool },
+}
+
+impl GcHeapTarget {
+    pub fn from_heap(module: &X64Module, ht: HeapType) -> Self {
+        match ht {
+            HeapType::Any => GcHeapTarget::Any,
+            HeapType::Eq => GcHeapTarget::Eq,
+            HeapType::I31 => GcHeapTarget::I31,
+            HeapType::Struct => GcHeapTarget::Struct,
+            HeapType::Array => GcHeapTarget::Array,
+            HeapType::None => GcHeapTarget::None,
+            HeapType::Func => GcHeapTarget::Func,
+            HeapType::NoFunc => GcHeapTarget::NoFunc,
+            HeapType::Extern => GcHeapTarget::Extern,
+            HeapType::NoExtern => GcHeapTarget::NoExtern,
+            HeapType::Exn => GcHeapTarget::Exn,
+            HeapType::NoExn => GcHeapTarget::NoExn,
+            HeapType::Defined(ti) | HeapType::ExactDefined(ti) => {
+                let canon_id = module.type_canon[ti.0 as usize];
+                let is_func = module.type_kinds[ti.0 as usize] == 0;
+                GcHeapTarget::Concrete { canon_id, is_func }
+            }
+            HeapType::Cont | HeapType::NoCont => {
+                unreachable!("cont heap types rejected at admission")
+            }
+        }
+    }
+
+    #[inline]
+    pub const fn ref_kind(self) -> ValRefKind {
+        match self {
+            GcHeapTarget::Any
+            | GcHeapTarget::Eq
+            | GcHeapTarget::I31
+            | GcHeapTarget::Struct
+            | GcHeapTarget::Array
+            | GcHeapTarget::None
+            | GcHeapTarget::Concrete { is_func: false, .. } => ValRefKind::GcRef,
+            GcHeapTarget::Extern | GcHeapTarget::NoExtern => ValRefKind::ExternRef,
+            GcHeapTarget::Func
+            | GcHeapTarget::NoFunc
+            | GcHeapTarget::Exn
+            | GcHeapTarget::NoExn
+            | GcHeapTarget::Concrete { is_func: true, .. } => ValRefKind::None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Ty {
     I32,
     I64,
@@ -910,6 +1027,10 @@ pub enum Op {
     ExnClearActive,
     /// Loads the `u32` tag index (`I32`) of exception handle `h`.
     ExnGetTag(Val),
+    /// Loads the Store-global `u32` tag ID (`I32`) for local exception tag `tag` (`StoreCdylib` only).
+    TagId(u32),
+    /// Loads the Store-wide `*const StoreFuncRef` (`I64`) for local function index `func` (`StoreCdylib` only).
+    FuncRef(u32),
     /// Loads payload field `field` (`ty`) of exception handle `h` for `tag`.
     ExnGetPayload {
         handle: Val,
@@ -942,10 +1063,293 @@ pub enum Op {
         args: ValRange,
     },
 
+    // ---- Wasm GC (`0xd3`, `0xfb00..=0xfb1e`) ----
+    /// Null reference in the `any` hierarchy (`0u64`, `ValRefKind::GcRef`).
+    GcNull,
+    /// Null reference in the `extern` hierarchy (`0u64`, `ValRefKind::ExternRef`).
+    ExternNull,
+    /// Folded constant `ref.i31` (`((x as u32) << 1) | 1`, `ValRefKind::GcRef`).
+    GcConstI31(u32),
+    /// Folded constant `extern.convert_any(ref.i31)` (`ValRefKind::ExternRef`).
+    ExternConstI31(u32),
+    /// `ref.eq` (`0xd3`): 64-bit bitwise reference equality -> `I32`.
+    RefEq(Val, Val),
+    /// `ref.i31` (`0xfb1c`): `I32 -> GcRef` (`((x as u32) << 1) | 1`).
+    RefI31(Val),
+    /// `i31.get_s` (`0xfb1d`): `GcRef -> I32` (traps `TRAP_INDIRECT_CALL` on null).
+    I31GetS(Val),
+    /// `i31.get_u` (`0xfb1e`): `GcRef -> I32` (traps `TRAP_INDIRECT_CALL` on null).
+    I31GetU(Val),
+    /// `any.convert_extern` (`0xfb1a`): `ExternRef -> GcRef` (GC safepoint: may allocate `InternalExternBox`).
+    AnyConvertExtern(Val),
+    /// `extern.convert_any` (`0xfb1b`): `GcRef -> ExternRef`.
+    ExternConvertAny(Val),
+    /// `struct.new` (`0xfb00`, GC safepoint).
+    StructNew {
+        ty: u32,
+        fields: ValRange,
+    },
+    /// `struct.new_default` (`0xfb01`, GC safepoint).
+    StructNewDefault(u32),
+    /// `struct.get` / `struct.get_s` / `struct.get_u` (`0xfb02..=0xfb04`).
+    StructGet {
+        ty: u32,
+        field: u32,
+        kind: GcFieldLoadKind,
+        obj: Val,
+    },
+    /// `struct.set` (`0xfb05`).
+    StructSet {
+        ty: u32,
+        field: u32,
+        obj: Val,
+        val: Val,
+    },
+    /// `array.new` (`0xfb06`, GC safepoint).
+    ArrayNew {
+        ty: u32,
+        init: Val,
+        len: Val,
+    },
+    /// `array.new_default` (`0xfb07`, GC safepoint).
+    ArrayNewDefault {
+        ty: u32,
+        len: Val,
+    },
+    /// `array.new_fixed` (`0xfb08`, GC safepoint).
+    ArrayNewFixed {
+        ty: u32,
+        elems: ValRange,
+    },
+    /// `array.new_data` (`0xfb09`, GC safepoint).
+    ArrayNewData {
+        ty: u32,
+        data: u32,
+        src: Val,
+        len: Val,
+    },
+    /// `array.new_elem` (`0xfb0a`, GC safepoint).
+    ArrayNewElem {
+        ty: u32,
+        elem: u32,
+        src: Val,
+        len: Val,
+    },
+    /// `array.get` / `array.get_s` / `array.get_u` (`0xfb0b..=0xfb0d`).
+    ArrayGet {
+        ty: u32,
+        kind: GcFieldLoadKind,
+        arr: Val,
+        idx: Val,
+    },
+    /// `array.set` (`0xfb0e`).
+    ArraySet {
+        ty: u32,
+        arr: Val,
+        idx: Val,
+        val: Val,
+    },
+    /// `array.len` (`0xfb0f`).
+    ArrayLen(Val),
+    /// `array.fill` (`0xfb10`).
+    ArrayFill {
+        ty: u32,
+        arr: Val,
+        dst: Val,
+        val: Val,
+        len: Val,
+    },
+    /// `array.copy` (`0xfb11`).
+    ArrayCopy {
+        dst_ty: u32,
+        src_ty: u32,
+        dst: Val,
+        dst_off: Val,
+        src: Val,
+        src_off: Val,
+        len: Val,
+    },
+    /// `array.init_data` (`0xfb12`).
+    ArrayInitData {
+        ty: u32,
+        data: u32,
+        arr: Val,
+        dst: Val,
+        src: Val,
+        len: Val,
+    },
+    /// `array.init_elem` (`0xfb13`).
+    ArrayInitElem {
+        ty: u32,
+        elem: u32,
+        arr: Val,
+        dst: Val,
+        src: Val,
+        len: Val,
+    },
+    /// `ref.test` / `ref.test null` (`0xfb14` / `0xfb15`) -> `I32` (`0` or `1`).
+    RefTest {
+        val: Val,
+        nullable: bool,
+        heap: GcHeapTarget,
+    },
+    /// `ref.cast` / `ref.cast null` (`0xfb16` / `0xfb17`) -> `I64` (traps `TRAP_INDIRECT_CALL` on failure).
+    RefCast {
+        val: Val,
+        nullable: bool,
+        heap: GcHeapTarget,
+    },
+
+    // ---- Wasm Threads / Atomics (`0xfe00..=0xfe4e`) ----
+    /// `atomic.fence` (`0xfe03`).
+    AtomicFence,
+    /// `i32/i64.atomic.load*` (`0xfe10..=0xfe16`).
+    AtomicLoad {
+        mem: u32,
+        width: AtomicWidth,
+        res_ty: Ty,
+        addr: Val,
+        offset: u64,
+    },
+    /// `i32/i64.atomic.store*` (`0xfe17..=0xfe1d`).
+    AtomicStore {
+        mem: u32,
+        width: AtomicWidth,
+        addr: Val,
+        val: Val,
+        offset: u64,
+    },
+    /// `i32/i64.atomic.rmw*.{add,sub,and,or,xor,xchg}` (`0xfe1e..=0xfe47`).
+    AtomicRmw {
+        mem: u32,
+        op: AtomicRmwOp,
+        width: AtomicWidth,
+        res_ty: Ty,
+        addr: Val,
+        val: Val,
+        offset: u64,
+    },
+    /// `i32/i64.atomic.rmw*.cmpxchg` (`0xfe48..=0xfe4e`).
+    AtomicCmpxchg {
+        mem: u32,
+        width: AtomicWidth,
+        res_ty: Ty,
+        addr: Val,
+        expected: Val,
+        replacement: Val,
+        offset: u64,
+    },
+    /// `memory.atomic.wait32` / `memory.atomic.wait64` (`0xfe01` / `0xfe02`).
+    AtomicWait {
+        mem: u32,
+        is_64: bool,
+        addr: Val,
+        expected: Val,
+        timeout: Val,
+        offset: u64,
+    },
+    /// `memory.atomic.notify` (`0xfe00`).
+    AtomicNotify {
+        mem: u32,
+        addr: Val,
+        count: Val,
+        offset: u64,
+    },
+
     Trap(u8),
 }
 
+/// Access width in bytes for Wasm Threads atomic memory operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AtomicWidth {
+    B1,
+    B2,
+    B4,
+    B8,
+}
+
+impl AtomicWidth {
+    #[inline]
+    pub const fn bytes(self) -> u32 {
+        match self {
+            Self::B1 => 1,
+            Self::B2 => 2,
+            Self::B4 => 4,
+            Self::B8 => 8,
+        }
+    }
+}
+
+/// Read-modify-write operation for Wasm Threads `atomic.rmw.*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AtomicRmwOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Xchg,
+}
+
 impl Op {
+    /// Returns `true` iff this instruction allocates on the GC heap (can directly invoke Cheney GC).
+    #[inline]
+    pub const fn is_gc_alloc(&self) -> bool {
+        matches!(
+            *self,
+            Op::AnyConvertExtern(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+        )
+    }
+
+    /// Returns `true` iff Cheney GC can execute during this instruction (calls or GC allocations).
+    #[inline]
+    pub const fn is_gc_safepoint(&self) -> bool {
+        matches!(*self, Op::Call { .. } | Op::CallIndirect { .. }) || self.is_gc_alloc()
+    }
+
+    /// Returns `true` iff this instruction is any Wasm GC opcode (`0xd3`, `0xfb00..=0xfb1e`, or GC null/i31 const).
+    #[inline]
+    pub const fn is_gc_op(&self) -> bool {
+        matches!(
+            *self,
+            Op::GcNull
+                | Op::ExternNull
+                | Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefEq(_, _)
+                | Op::RefI31(_)
+                | Op::I31GetS(_)
+                | Op::I31GetU(_)
+                | Op::AnyConvertExtern(_)
+                | Op::ExternConvertAny(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::StructGet { .. }
+                | Op::StructSet { .. }
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::ArrayGet { .. }
+                | Op::ArraySet { .. }
+                | Op::ArrayLen(_)
+                | Op::ArrayFill { .. }
+                | Op::ArrayCopy { .. }
+                | Op::ArrayInitData { .. }
+                | Op::ArrayInitElem { .. }
+                | Op::RefTest { .. }
+                | Op::RefCast { .. }
+        )
+    }
+
     pub fn has_side_effect(&self) -> bool {
         match *self {
             Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => {
@@ -1006,6 +1410,33 @@ impl Op {
             | Op::ExnGetPayload { .. }
             | Op::PgoFuncEnter(_)
             | Op::PgoRecordCi { .. }
+            | Op::I31GetS(_)
+            | Op::I31GetU(_)
+            | Op::AnyConvertExtern(_)
+            | Op::StructNew { .. }
+            | Op::StructNewDefault(_)
+            | Op::StructGet { .. }
+            | Op::StructSet { .. }
+            | Op::ArrayNew { .. }
+            | Op::ArrayNewDefault { .. }
+            | Op::ArrayNewFixed { .. }
+            | Op::ArrayNewData { .. }
+            | Op::ArrayNewElem { .. }
+            | Op::ArrayGet { .. }
+            | Op::ArraySet { .. }
+            | Op::ArrayLen(_)
+            | Op::ArrayFill { .. }
+            | Op::ArrayCopy { .. }
+            | Op::ArrayInitData { .. }
+            | Op::ArrayInitElem { .. }
+            | Op::RefCast { .. }
+            | Op::AtomicFence
+            | Op::AtomicLoad { .. }
+            | Op::AtomicStore { .. }
+            | Op::AtomicRmw { .. }
+            | Op::AtomicCmpxchg { .. }
+            | Op::AtomicWait { .. }
+            | Op::AtomicNotify { .. }
             | Op::Trap(_) => true,
             _ => false,
         }
@@ -1018,6 +1449,11 @@ impl Op {
             | Op::ConstF32(_)
             | Op::ConstF64(_)
             | Op::ConstV128(_)
+            | Op::GcNull
+            | Op::ExternNull
+            | Op::GcConstI31(_)
+            | Op::ExternConstI31(_)
+            | Op::StructNewDefault(_)
             | Op::GlobalGet(_)
             | Op::MemSize
             | Op::MemSizeIdx(_)
@@ -1026,6 +1462,8 @@ impl Op {
             | Op::TableSize(_)
             | Op::ExnGetActive
             | Op::ExnClearActive
+            | Op::TagId(_)
+            | Op::FuncRef(_)
             | Op::PgoFuncEnter(_)
             | Op::Trap(_) => {}
             Op::Copy(a)
@@ -1082,7 +1520,17 @@ impl Op {
             | Op::V128ToI32 { a, .. }
             | Op::ExnSetActive(a)
             | Op::ExnGetTag(a)
-            | Op::ExnGetPayload { handle: a, .. } => f(a),
+            | Op::ExnGetPayload { handle: a, .. }
+            | Op::RefI31(a)
+            | Op::I31GetS(a)
+            | Op::I31GetU(a)
+            | Op::AnyConvertExtern(a)
+            | Op::ExternConvertAny(a)
+            | Op::StructGet { obj: a, .. }
+            | Op::ArrayNewDefault { len: a, .. }
+            | Op::ArrayLen(a)
+            | Op::RefTest { val: a, .. }
+            | Op::RefCast { val: a, .. } => f(a),
             Op::I32Bin(_, a, b)
             | Op::I64Bin(_, a, b)
             | Op::AddScaled {
@@ -1122,9 +1570,60 @@ impl Op {
             | Op::V128ReplaceLane { v: a, x: b, .. }
             | Op::V128Shuffle { a, b, .. }
             | Op::V128Bin { a, b, .. }
-            | Op::V128Shift { v: a, shift: b, .. } => {
+            | Op::V128Shift { v: a, shift: b, .. }
+            | Op::RefEq(a, b)
+            | Op::StructSet { obj: a, val: b, .. }
+            | Op::ArrayNew {
+                init: a, len: b, ..
+            }
+            | Op::ArrayNewData { src: a, len: b, .. }
+            | Op::ArrayNewElem { src: a, len: b, .. }
+            | Op::ArrayGet { arr: a, idx: b, .. } => {
                 f(a);
                 f(b);
+            }
+            Op::ArraySet { arr, idx, val, .. } => {
+                f(arr);
+                f(idx);
+                f(val);
+            }
+            Op::ArrayFill {
+                arr, dst, val, len, ..
+            } => {
+                f(arr);
+                f(dst);
+                f(val);
+                f(len);
+            }
+            Op::ArrayInitData {
+                arr, dst, src, len, ..
+            }
+            | Op::ArrayInitElem {
+                arr, dst, src, len, ..
+            } => {
+                f(arr);
+                f(dst);
+                f(src);
+                f(len);
+            }
+            Op::ArrayCopy {
+                dst,
+                dst_off,
+                src,
+                src_off,
+                len,
+                ..
+            } => {
+                f(dst);
+                f(dst_off);
+                f(src);
+                f(src_off);
+                f(len);
+            }
+            Op::StructNew { fields: args, .. } | Op::ArrayNewFixed { elems: args, .. } => {
+                for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
+                    f(v);
+                }
             }
             Op::V128Ternary { a, b, c, .. } => {
                 f(a);
@@ -1226,6 +1725,36 @@ impl Op {
                     f(v);
                 }
                 f(idx);
+            }
+            Op::AtomicFence => {}
+            Op::AtomicLoad { addr, .. } => f(addr),
+            Op::AtomicStore { addr, val, .. } | Op::AtomicRmw { addr, val, .. } => {
+                f(addr);
+                f(val);
+            }
+            Op::AtomicCmpxchg {
+                addr,
+                expected,
+                replacement,
+                ..
+            } => {
+                f(addr);
+                f(expected);
+                f(replacement);
+            }
+            Op::AtomicWait {
+                addr,
+                expected,
+                timeout,
+                ..
+            } => {
+                f(addr);
+                f(expected);
+                f(timeout);
+            }
+            Op::AtomicNotify { addr, count, .. } => {
+                f(addr);
+                f(count);
             }
         }
     }
@@ -1661,9 +2190,12 @@ pub struct OuterSimdLoopDesc {
 pub struct IrFunc {
     pub func_index: usize,
     pub memory64: bool,
+    pub uses_gc: bool,
     pub params: Vec<Val>,
     pub result_tys: Vec<Ty>,
     pub val_tys: Vec<Ty>,
+    /// Parallel to `val_tys` when `uses_gc == true` (empty when `!uses_gc` for zero non-GC overhead).
+    pub val_ref_kinds: Vec<ValRefKind>,
     pub blocks: Vec<Block>,
     pub val_pool: Vec<Val>,
     pub v128_consts: Vec<[u8; 16]>,
@@ -1693,6 +2225,7 @@ impl IrFunc {
         let params = try_copy(&self.params)?;
         let result_tys = try_copy(&self.result_tys)?;
         let val_tys = try_copy(&self.val_tys)?;
+        let val_ref_kinds = try_copy(&self.val_ref_kinds)?;
         let val_pool = try_copy(&self.val_pool)?;
         let v128_consts = try_copy(&self.v128_consts)?;
 
@@ -1757,9 +2290,11 @@ impl IrFunc {
         Some(Self {
             func_index: self.func_index,
             memory64: self.memory64,
+            uses_gc: self.uses_gc,
             params,
             result_tys,
             val_tys,
+            val_ref_kinds,
             blocks,
             val_pool,
             v128_consts,
@@ -1772,9 +2307,256 @@ impl IrFunc {
         })
     }
 
+    #[inline]
+    pub fn val_ref_kind(&self, v: Val) -> ValRefKind {
+        if !self.uses_gc {
+            return ValRefKind::None;
+        }
+        self.val_ref_kinds
+            .get(v.0 as usize)
+            .copied()
+            .unwrap_or(ValRefKind::None)
+    }
+
+    /// Deterministically computes exact `ValRefKind` for every SSA value in `self` from
+    /// function signatures, GC/table/global/exception metadata, and CFG edges.
+    pub fn recompute_val_ref_kinds(&mut self, module: &X64Module) {
+        if !self.uses_gc {
+            self.val_ref_kinds.clear();
+            return;
+        }
+        let n_vals = self.val_tys.len();
+        let mut rk = vec![ValRefKind::None; n_vals];
+        if let Some(fty) = module.func_type(self.func_index) {
+            for (&pv, &vt) in self.params.iter().zip(&fty.params) {
+                rk[pv.0 as usize] = module.val_ref_kind(vt);
+            }
+        }
+        let table_rk = |tbl: u32| -> ValRefKind {
+            if let Some(meta) = module.dyn_tables.get(&tbl) {
+                match meta.ref_family {
+                    GcRefFamily::Any => ValRefKind::GcRef,
+                    GcRefFamily::Extern => ValRefKind::ExternRef,
+                    GcRefFamily::Func | GcRefFamily::Exn => ValRefKind::None,
+                }
+            } else if module.mut_extern_tables.contains_key(&tbl) {
+                ValRefKind::ExternRef
+            } else {
+                ValRefKind::None
+            }
+        };
+        for bb in &self.blocks {
+            for inst in &bb.insts {
+                match inst.op {
+                    Op::GcNull
+                    | Op::GcConstI31(_)
+                    | Op::RefI31(_)
+                    | Op::AnyConvertExtern(_)
+                    | Op::StructNew { .. }
+                    | Op::StructNewDefault(_)
+                    | Op::ArrayNew { .. }
+                    | Op::ArrayNewDefault { .. }
+                    | Op::ArrayNewFixed { .. }
+                    | Op::ArrayNewData { .. }
+                    | Op::ArrayNewElem { .. } => {
+                        if let Some(r) = inst.res {
+                            rk[r.0 as usize] = ValRefKind::GcRef;
+                        }
+                    }
+                    Op::ExternNull | Op::ExternConstI31(_) | Op::ExternConvertAny(_) => {
+                        if let Some(r) = inst.res {
+                            rk[r.0 as usize] = ValRefKind::ExternRef;
+                        }
+                    }
+                    Op::RefCast { heap, .. } => {
+                        if let Some(r) = inst.res {
+                            rk[r.0 as usize] = heap.ref_kind();
+                        }
+                    }
+                    Op::StructGet { ty, field, .. } => {
+                        if let Some(r) = inst.res
+                            && let GcCompositeInfo::Struct { ref fields, .. } =
+                                module.gc_type(ty).composite
+                            && let Some(f) = fields.get(field as usize)
+                        {
+                            rk[r.0 as usize] = X64Module::storage_ref_kind(f.storage);
+                        }
+                    }
+                    Op::ArrayGet { ty, .. } => {
+                        if let Some(r) = inst.res
+                            && let GcCompositeInfo::Array { elem, .. } =
+                                module.gc_type(ty).composite
+                        {
+                            rk[r.0 as usize] = X64Module::storage_ref_kind(elem);
+                        }
+                    }
+                    Op::GlobalGet(g) => {
+                        if let Some(r) = inst.res
+                            && let Some(&(vt, _)) = module.globals.get(g as usize)
+                        {
+                            rk[r.0 as usize] = module.val_ref_kind(vt);
+                        }
+                    }
+                    Op::TableGet { table, .. } => {
+                        if let Some(r) = inst.res {
+                            rk[r.0 as usize] = table_rk(table);
+                        }
+                    }
+                    Op::ExnGetPayload { tag, field, .. } => {
+                        if let Some(r) = inst.res
+                            && let Some(&fti) = module.tags.get(tag as usize)
+                            && let Some(&vt) =
+                                module.module_types[fti as usize].params.get(field as usize)
+                        {
+                            rk[r.0 as usize] = module.val_ref_kind(vt);
+                        }
+                    }
+                    Op::Call { func, rets, .. } => {
+                        if let Some(fty) = module.func_type(func as usize) {
+                            for (&rv, &vt) in self.pool_slice(rets).iter().zip(&fty.results) {
+                                rk[rv.0 as usize] = module.val_ref_kind(vt);
+                            }
+                        }
+                    }
+                    Op::CallIndirect { ci_id, rets, .. } => {
+                        if let Some(ci) = module.ci_sigs.get(ci_id as usize)
+                            && let Some(fty) = module.module_types.get(ci.type_idx as usize)
+                        {
+                            for (&rv, &vt) in self.pool_slice(rets).iter().zip(&fty.results) {
+                                rk[rv.0 as usize] = module.val_ref_kind(vt);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match bb.term {
+                Term::CallCatch { func, ok_bb, .. } => {
+                    if let Some(fty) = module.func_type(func as usize) {
+                        for (&pv, &vt) in self.blocks[ok_bb.0 as usize]
+                            .params
+                            .iter()
+                            .zip(&fty.results)
+                        {
+                            rk[pv.0 as usize] = module.val_ref_kind(vt);
+                        }
+                    }
+                }
+                Term::CallIndirectCatch { ci_id, ok_bb, .. } => {
+                    if let Some(ci) = module.ci_sigs.get(ci_id as usize)
+                        && let Some(fty) = module.module_types.get(ci.type_idx as usize)
+                    {
+                        for (&pv, &vt) in self.blocks[ok_bb.0 as usize]
+                            .params
+                            .iter()
+                            .zip(&fty.results)
+                        {
+                            rk[pv.0 as usize] = module.val_ref_kind(vt);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Propagate through Copy, Select, CmpSelect, and CFG block-parameter edges to fixpoint.
+        let mut changed = true;
+        let mut iters = 0usize;
+        while changed && iters < 64 {
+            changed = false;
+            iters += 1;
+            let prop_edge = |rk: &mut [ValRefKind],
+                             target: BlockId,
+                             args: ValRange,
+                             pool: &[Val],
+                             blocks: &[Block]|
+             -> bool {
+                let mut ch = false;
+                let av = &pool[args.start as usize..args.start as usize + args.len as usize];
+                for (&a, &p) in av.iter().zip(&blocks[target.0 as usize].params) {
+                    let next = rk[p.0 as usize].merge(rk[a.0 as usize]);
+                    if next != rk[p.0 as usize] {
+                        rk[p.0 as usize] = next;
+                        ch = true;
+                    }
+                }
+                ch
+            };
+            for bb in &self.blocks {
+                for inst in &bb.insts {
+                    if let Some(r) = inst.res {
+                        let next = match inst.op {
+                            Op::Copy(a) => rk[r.0 as usize].merge(rk[a.0 as usize]),
+                            Op::Select { a, b, .. } | Op::CmpSelect { tv: a, fv: b, .. } => {
+                                rk[r.0 as usize].merge(rk[a.0 as usize].merge(rk[b.0 as usize]))
+                            }
+                            _ => rk[r.0 as usize],
+                        };
+                        if next != rk[r.0 as usize] {
+                            rk[r.0 as usize] = next;
+                            changed = true;
+                        }
+                    }
+                }
+                match bb.term {
+                    Term::Jump { target, args } => {
+                        changed |= prop_edge(&mut rk, target, args, &self.val_pool, &self.blocks);
+                    }
+                    Term::BranchIf {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    }
+                    | Term::CmpBranch {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    } => {
+                        changed |=
+                            prop_edge(&mut rk, then_bb, then_args, &self.val_pool, &self.blocks);
+                        changed |=
+                            prop_edge(&mut rk, else_bb, else_args, &self.val_pool, &self.blocks);
+                    }
+                    Term::BrTable { table_idx, .. } => {
+                        let bt = &self.br_tables[table_idx as usize];
+                        for &(target, args) in &bt.unique_edges {
+                            changed |=
+                                prop_edge(&mut rk, target, args, &self.val_pool, &self.blocks);
+                        }
+                    }
+                    Term::CallCatch {
+                        catch_bb,
+                        catch_args,
+                        ..
+                    }
+                    | Term::CallIndirectCatch {
+                        catch_bb,
+                        catch_args,
+                        ..
+                    } => {
+                        changed |=
+                            prop_edge(&mut rk, catch_bb, catch_args, &self.val_pool, &self.blocks);
+                    }
+                    Term::Return { .. }
+                    | Term::ReturnCall { .. }
+                    | Term::ReturnCallIndirect { .. }
+                    | Term::ThrowActive
+                    | Term::Unreachable => {}
+                }
+            }
+        }
+        self.val_ref_kinds = rk;
+    }
+
     pub fn push_val(&mut self, ty: Ty) -> Val {
         let id = self.val_tys.len() as u32;
         self.val_tys.push(ty);
+        if self.uses_gc {
+            self.val_ref_kinds.push(ValRefKind::None);
+        }
         Val(id)
     }
 
@@ -1995,6 +2777,7 @@ impl Builder {
     fn new(
         func_index: usize,
         memory64: bool,
+        uses_gc: bool,
         result_tys: Vec<Ty>,
         needs_stack_check: bool,
         const_fold: bool,
@@ -2004,9 +2787,15 @@ impl Builder {
         let mut ir = IrFunc {
             func_index,
             memory64,
+            uses_gc,
             params: Vec::new(),
             result_tys,
             val_tys: Vec::with_capacity(est_vals),
+            val_ref_kinds: if uses_gc {
+                Vec::with_capacity(est_vals)
+            } else {
+                Vec::new()
+            },
             blocks: vec![Block::new(false)],
             val_pool: Vec::with_capacity(est_vals / 2),
             v128_consts: Vec::new(),
@@ -2403,9 +3192,11 @@ fn block_type_tys(module: &X64Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)
         Immediate::Block(-3) => (vec![], vec![Ty::F32]),
         Immediate::Block(-4) => (vec![], vec![Ty::F64]),
         Immediate::Block(-5) => (vec![], vec![Ty::V128]),
-        Immediate::Block(-16) | Immediate::Block(-17) | Immediate::Block(-23) => {
-            (vec![], vec![Ty::I64])
-        }
+        Immediate::Block(-16)
+        | Immediate::Block(-17)
+        | Immediate::Block(-23)
+        | Immediate::Block(-22..=-18)
+        | Immediate::Block(-15..=-12) => (vec![], vec![Ty::I64]),
         Immediate::BlockType(t) => (vec![], vec![Ty::from_val(*t)]),
         Immediate::Block(i) if *i >= 0 => {
             let t = module
@@ -2493,6 +3284,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
     let mut b = Builder::new(
         func_index,
         module.memory64,
+        module.uses_gc,
         result_tys.clone(),
         true,
         opt,
@@ -2506,11 +3298,15 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
         b.ir.params.push(v);
         locals.push(v);
     }
-    let mut cached_zeros: [Option<Val>; 5] = [None; 5];
-    for &t in &local_tys[ty.params.len()..] {
+    let mut cached_zeros: [Option<Val>; 7] = [None; 7];
+    for (&t, &vt) in local_tys[ty.params.len()..].iter().zip(&body.locals) {
         let idx = match t {
             Ty::I32 => 0,
-            Ty::I64 => 1,
+            Ty::I64 => match module.val_ref_kind(vt) {
+                ValRefKind::None => 1,
+                ValRefKind::GcRef => 5,
+                ValRefKind::ExternRef => 6,
+            },
             Ty::F32 => 2,
             Ty::F64 => 3,
             Ty::V128 => 4,
@@ -2518,7 +3314,11 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
         let z = match cached_zeros[idx] {
             Some(v) => v,
             None => {
-                let v = b.const_zero(t);
+                let v = match idx {
+                    5 => b.emit(Ty::I64, Op::GcNull),
+                    6 => b.emit(Ty::I64, Op::ExternNull),
+                    _ => b.const_zero(t),
+                };
                 cached_zeros[idx] = Some(v);
                 v
             }
@@ -2988,7 +3788,11 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                                 let match_bb = b.new_block(false)?;
                                 let next_bb = if let Some(tag_idx) = tag_opt {
                                     let nbb = b.new_block(false)?;
-                                    let tc = b.const_i32(tag_idx as i32);
+                                    let tc = if module.target == super::module::X64Target::StoreCdylib {
+                                        b.emit(Ty::I32, Op::TagId(tag_idx))
+                                    } else {
+                                        b.const_i32(tag_idx as i32)
+                                    };
                                     let eq = b.emit_i32_cmp(CmpOp::Eq, exn_tag.unwrap(), tc);
                                     b.terminate(Term::BranchIf {
                                         cond: eq,
@@ -3481,8 +4285,23 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                             b.ir.v128_consts.push(bytes);
                             b.emit(Ty::V128, Op::ConstV128(idx))
                         }
-                        X64ConstVal::RefNull => b.const_i64(0),
-                        X64ConstVal::FuncRef(f) => b.const_i64(i64::from(f) + 1),
+                        X64ConstVal::RefNull => match module.val_ref_kind(vt) {
+                            ValRefKind::GcRef => b.emit(Ty::I64, Op::GcNull),
+                            ValRefKind::ExternRef => b.emit(Ty::I64, Op::ExternNull),
+                            ValRefKind::None => b.const_i64(0),
+                        },
+                        X64ConstVal::FuncRef(f) => {
+                            if module.target == super::module::X64Target::StoreCdylib {
+                                b.emit(Ty::I64, Op::FuncRef(f))
+                            } else {
+                                b.const_i64(i64::from(f) + 1)
+                            }
+                        }
+                        X64ConstVal::I31(enc) => b.emit(Ty::I64, Op::GcConstI31(enc)),
+                        X64ConstVal::ExternI31(enc) => b.emit(Ty::I64, Op::ExternConstI31(enc)),
+                        X64ConstVal::RuntimeGc => {
+                            unreachable!("RuntimeGc globals are never folded")
+                        }
                     }
                 } else {
                     b.emit(Ty::from_val(vt), Op::GlobalGet(x as u32))
@@ -3522,7 +4341,17 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 b.emit_void(Op::TableSet { table: t, idx, val });
             }
             0xd0 => {
-                let v = b.const_i64(0);
+                let v = if module.uses_gc
+                    && let Immediate::Heap(ht) = insn.immediate
+                {
+                    match module.heap_ref_family(ht) {
+                        GcRefFamily::Any => b.emit(Ty::I64, Op::GcNull),
+                        GcRefFamily::Extern => b.emit(Ty::I64, Op::ExternNull),
+                        GcRefFamily::Func | GcRefFamily::Exn => b.const_i64(0),
+                    }
+                } else {
+                    b.const_i64(0)
+                };
                 stack.push(v);
             }
             0xd1 => {
@@ -3532,8 +4361,360 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
             }
             0xd2 => {
                 let f = imm_idx()?;
-                let v = b.const_i64(i64::from(f) + 1);
+                let v = if module.target == super::module::X64Target::StoreCdylib {
+                    b.emit(Ty::I64, Op::FuncRef(f))
+                } else {
+                    b.const_i64(i64::from(f) + 1)
+                };
                 stack.push(v);
+            }
+            0xd3 => {
+                let bv = stack.pop().ok_or("ref.eq b")?;
+                let av = stack.pop().ok_or("ref.eq a")?;
+                let r = b.emit(Ty::I32, Op::RefEq(av, bv));
+                stack.push(r);
+            }
+            0xfb00 => {
+                // struct.new ty
+                let ty = imm_idx()?;
+                let n_fields = match &module.gc_type(ty).composite {
+                    GcCompositeInfo::Struct { fields, .. } => fields.len(),
+                    _ => return Err("struct.new on non-struct type".into()),
+                };
+                let base = stack
+                    .len()
+                    .checked_sub(n_fields)
+                    .ok_or("struct.new underflow")?;
+                let fields = b.ir.push_pool(&stack[base..])?;
+                stack.truncate(base);
+                let r = b.emit(Ty::I64, Op::StructNew { ty, fields });
+                stack.push(r);
+            }
+            0xfb01 => {
+                // struct.new_default ty
+                let ty = imm_idx()?;
+                let r = b.emit(Ty::I64, Op::StructNewDefault(ty));
+                stack.push(r);
+            }
+            0xfb02..=0xfb04 => {
+                // struct.get / struct.get_s / struct.get_u
+                let Immediate::Pair(ty, field) = insn.immediate else {
+                    return Err("struct.get immediate".into());
+                };
+                let obj = stack.pop().ok_or("struct.get obj")?;
+                let sk = match &module.gc_type(ty).composite {
+                    GcCompositeInfo::Struct { fields, .. } => {
+                        fields
+                            .get(field as usize)
+                            .ok_or("struct.get field out of range")?
+                            .storage
+                    }
+                    _ => return Err("struct.get on non-struct type".into()),
+                };
+                let kind = match (op, sk) {
+                    (0xfb03, GcStorageKind::I8) => GcFieldLoadKind::I8S,
+                    (0xfb04, GcStorageKind::I8) => GcFieldLoadKind::I8U,
+                    (0xfb03, GcStorageKind::I16) => GcFieldLoadKind::I16S,
+                    (0xfb04, GcStorageKind::I16) => GcFieldLoadKind::I16U,
+                    _ => GcFieldLoadKind::Val(X64Module::storage_to_ty(sk)),
+                };
+                let r = b.emit(
+                    kind.ty(),
+                    Op::StructGet {
+                        ty,
+                        field,
+                        kind,
+                        obj,
+                    },
+                );
+                stack.push(r);
+            }
+            0xfb05 => {
+                // struct.set ty field
+                let Immediate::Pair(ty, field) = insn.immediate else {
+                    return Err("struct.set immediate".into());
+                };
+                let val = stack.pop().ok_or("struct.set val")?;
+                let obj = stack.pop().ok_or("struct.set obj")?;
+                b.emit_void(Op::StructSet {
+                    ty,
+                    field,
+                    obj,
+                    val,
+                });
+            }
+            0xfb06 => {
+                // array.new ty
+                let ty = imm_idx()?;
+                let len = stack.pop().ok_or("array.new len")?;
+                let init = stack.pop().ok_or("array.new init")?;
+                let r = b.emit(Ty::I64, Op::ArrayNew { ty, init, len });
+                stack.push(r);
+            }
+            0xfb07 => {
+                // array.new_default ty
+                let ty = imm_idx()?;
+                let len = stack.pop().ok_or("array.new_default len")?;
+                let r = b.emit(Ty::I64, Op::ArrayNewDefault { ty, len });
+                stack.push(r);
+            }
+            0xfb08 => {
+                // array.new_fixed ty n
+                let Immediate::Pair(ty, n) = insn.immediate else {
+                    return Err("array.new_fixed immediate".into());
+                };
+                let count = n as usize;
+                let base = stack
+                    .len()
+                    .checked_sub(count)
+                    .ok_or("array.new_fixed underflow")?;
+                let elems = b.ir.push_pool(&stack[base..])?;
+                stack.truncate(base);
+                let r = b.emit(Ty::I64, Op::ArrayNewFixed { ty, elems });
+                stack.push(r);
+            }
+            0xfb09 => {
+                // array.new_data ty data
+                let Immediate::Pair(ty, data) = insn.immediate else {
+                    return Err("array.new_data immediate".into());
+                };
+                let len = stack.pop().ok_or("array.new_data len")?;
+                let src = stack.pop().ok_or("array.new_data src")?;
+                let r = b.emit(Ty::I64, Op::ArrayNewData { ty, data, src, len });
+                stack.push(r);
+            }
+            0xfb0a => {
+                // array.new_elem ty elem
+                let Immediate::Pair(ty, elem) = insn.immediate else {
+                    return Err("array.new_elem immediate".into());
+                };
+                let len = stack.pop().ok_or("array.new_elem len")?;
+                let src = stack.pop().ok_or("array.new_elem src")?;
+                let r = b.emit(Ty::I64, Op::ArrayNewElem { ty, elem, src, len });
+                stack.push(r);
+            }
+            0xfb0b..=0xfb0d => {
+                // array.get / array.get_s / array.get_u
+                let ty = imm_idx()?;
+                let idx = stack.pop().ok_or("array.get idx")?;
+                let arr = stack.pop().ok_or("array.get arr")?;
+                let sk = match module.gc_type(ty).composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("array.get on non-array type".into()),
+                };
+                let kind = match (op, sk) {
+                    (0xfb0c, GcStorageKind::I8) => GcFieldLoadKind::I8S,
+                    (0xfb0d, GcStorageKind::I8) => GcFieldLoadKind::I8U,
+                    (0xfb0c, GcStorageKind::I16) => GcFieldLoadKind::I16S,
+                    (0xfb0d, GcStorageKind::I16) => GcFieldLoadKind::I16U,
+                    _ => GcFieldLoadKind::Val(X64Module::storage_to_ty(sk)),
+                };
+                let r = b.emit(kind.ty(), Op::ArrayGet { ty, kind, arr, idx });
+                stack.push(r);
+            }
+            0xfb0e => {
+                // array.set ty
+                let ty = imm_idx()?;
+                let val = stack.pop().ok_or("array.set val")?;
+                let idx = stack.pop().ok_or("array.set idx")?;
+                let arr = stack.pop().ok_or("array.set arr")?;
+                b.emit_void(Op::ArraySet { ty, arr, idx, val });
+            }
+            0xfb0f => {
+                // array.len
+                let arr = stack.pop().ok_or("array.len arr")?;
+                let r = b.emit(Ty::I32, Op::ArrayLen(arr));
+                stack.push(r);
+            }
+            0xfb10 => {
+                // array.fill ty
+                let ty = imm_idx()?;
+                let len = stack.pop().ok_or("array.fill len")?;
+                let val = stack.pop().ok_or("array.fill val")?;
+                let dst = stack.pop().ok_or("array.fill dst")?;
+                let arr = stack.pop().ok_or("array.fill arr")?;
+                b.emit_void(Op::ArrayFill {
+                    ty,
+                    arr,
+                    dst,
+                    val,
+                    len,
+                });
+            }
+            0xfb11 => {
+                // array.copy dst_ty src_ty
+                let Immediate::Pair(dst_ty, src_ty) = insn.immediate else {
+                    return Err("array.copy immediate".into());
+                };
+                let len = stack.pop().ok_or("array.copy len")?;
+                let src_off = stack.pop().ok_or("array.copy src_off")?;
+                let src = stack.pop().ok_or("array.copy src")?;
+                let dst_off = stack.pop().ok_or("array.copy dst_off")?;
+                let dst = stack.pop().ok_or("array.copy dst")?;
+                b.emit_void(Op::ArrayCopy {
+                    dst_ty,
+                    src_ty,
+                    dst,
+                    dst_off,
+                    src,
+                    src_off,
+                    len,
+                });
+            }
+            0xfb12 => {
+                // array.init_data ty data
+                let Immediate::Pair(ty, data) = insn.immediate else {
+                    return Err("array.init_data immediate".into());
+                };
+                let len = stack.pop().ok_or("array.init_data len")?;
+                let src = stack.pop().ok_or("array.init_data src")?;
+                let dst = stack.pop().ok_or("array.init_data dst")?;
+                let arr = stack.pop().ok_or("array.init_data arr")?;
+                b.emit_void(Op::ArrayInitData {
+                    ty,
+                    data,
+                    arr,
+                    dst,
+                    src,
+                    len,
+                });
+            }
+            0xfb13 => {
+                // array.init_elem ty elem
+                let Immediate::Pair(ty, elem) = insn.immediate else {
+                    return Err("array.init_elem immediate".into());
+                };
+                let len = stack.pop().ok_or("array.init_elem len")?;
+                let src = stack.pop().ok_or("array.init_elem src")?;
+                let dst = stack.pop().ok_or("array.init_elem dst")?;
+                let arr = stack.pop().ok_or("array.init_elem arr")?;
+                b.emit_void(Op::ArrayInitElem {
+                    ty,
+                    elem,
+                    arr,
+                    dst,
+                    src,
+                    len,
+                });
+            }
+            0xfb14 | 0xfb15 => {
+                let Immediate::Heap(ht) = insn.immediate else {
+                    return Err("ref.test immediate".into());
+                };
+                let val = stack.pop().ok_or("ref.test val")?;
+                let heap = GcHeapTarget::from_heap(module, ht);
+                let r = b.emit(
+                    Ty::I32,
+                    Op::RefTest {
+                        val,
+                        nullable: op == 0xfb15,
+                        heap,
+                    },
+                );
+                stack.push(r);
+            }
+            0xfb16 | 0xfb17 => {
+                let Immediate::Heap(ht) = insn.immediate else {
+                    return Err("ref.cast immediate".into());
+                };
+                let val = stack.pop().ok_or("ref.cast val")?;
+                let heap = GcHeapTarget::from_heap(module, ht);
+                let r = b.emit(
+                    Ty::I64,
+                    Op::RefCast {
+                        val,
+                        nullable: op == 0xfb17,
+                        heap,
+                    },
+                );
+                stack.push(r);
+            }
+            0xfb18 | 0xfb19 => {
+                // br_on_cast / br_on_cast_fail
+                let Immediate::Cast {
+                    flags,
+                    label,
+                    from: _,
+                    to,
+                } = insn.immediate
+                else {
+                    return Err("br_on_cast immediate".into());
+                };
+                let depth = label as usize;
+                let fi = frames.len() - 1 - depth;
+                let r = *stack.last().ok_or("br_on_cast ref")?;
+                let to_nullable = (flags & 0x02) != 0;
+                let heap = GcHeapTarget::from_heap(module, to);
+                let cond = b.emit(
+                    Ty::I32,
+                    Op::RefTest {
+                        val: r,
+                        nullable: to_nullable,
+                        heap,
+                    },
+                );
+                let cmp_op = if op == 0xfb18 { CmpOp::Ne } else { CmpOp::Eq };
+                let fall_bb = b.new_block(false)?;
+                if frames[fi].kind == FrameKind::Function {
+                    let n_res = frames[fi].results.len();
+                    let rv = stack[stack.len() - n_res..].to_vec();
+                    let ret_bb = b.new_block(false)?;
+                    b.terminate(Term::CmpBranch {
+                        kind: CmpBranchKind::I32Imm(cmp_op, 0),
+                        a: cond,
+                        b: cond,
+                        then_bb: ret_bb,
+                        then_args: ValRange::EMPTY,
+                        else_bb: fall_bb,
+                        else_args: ValRange::EMPTY,
+                    });
+                    b.add_pred(ret_bb);
+                    b.add_pred(fall_bb);
+                    b.cur_bb = ret_bb;
+                    let vr = b.ir.push_pool(&rv)?;
+                    b.terminate(Term::Return { vals: vr });
+                    b.cur_bb = fall_bb;
+                } else {
+                    let args_r = build_branch_args(&mut b, &stack, &locals, &frames[fi])?;
+                    let target = frames[fi].target_bb;
+                    b.terminate(Term::CmpBranch {
+                        kind: CmpBranchKind::I32Imm(cmp_op, 0),
+                        a: cond,
+                        b: cond,
+                        then_bb: target,
+                        then_args: args_r,
+                        else_bb: fall_bb,
+                        else_args: ValRange::EMPTY,
+                    });
+                    b.add_pred(target);
+                    b.add_pred(fall_bb);
+                    b.cur_bb = fall_bb;
+                }
+            }
+            0xfb1a => {
+                let val = stack.pop().ok_or("any.convert_extern val")?;
+                let r = b.emit(Ty::I64, Op::AnyConvertExtern(val));
+                stack.push(r);
+            }
+            0xfb1b => {
+                let val = stack.pop().ok_or("extern.convert_any val")?;
+                let r = b.emit(Ty::I64, Op::ExternConvertAny(val));
+                stack.push(r);
+            }
+            0xfb1c => {
+                let val = stack.pop().ok_or("ref.i31 val")?;
+                let r = b.emit(Ty::I64, Op::RefI31(val));
+                stack.push(r);
+            }
+            0xfb1d => {
+                let val = stack.pop().ok_or("i31.get_s val")?;
+                let r = b.emit(Ty::I32, Op::I31GetS(val));
+                stack.push(r);
+            }
+            0xfb1e => {
+                let val = stack.pop().ok_or("i31.get_u val")?;
+                let r = b.emit(Ty::I32, Op::I31GetU(val));
+                stack.push(r);
             }
             0xd4 => {
                 // ref.as_non_null: traps with TRAP_INDIRECT_CALL (mapped to NullReference) if 0.
@@ -4768,6 +5949,136 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 let r = b.emit(Ty::I64, Op::I64Extend32S(a));
                 stack.push(r);
             }
+            // ---- Wasm Threads / Atomics (`0xfe00..=0xfe03`, `0xfe10..=0xfe4e`) ----
+            0xfe03 => {
+                b.emit_void(Op::AtomicFence);
+            }
+            0xfe00 => {
+                let Immediate::MemArg { offset, memory, .. } = insn.immediate else {
+                    return Err("memory.atomic.notify immediate".into());
+                };
+                let count = stack.pop().ok_or("atomic.notify count")?;
+                let addr = stack.pop().ok_or("atomic.notify addr")?;
+                let r = b.emit(
+                    Ty::I32,
+                    Op::AtomicNotify {
+                        mem: memory,
+                        addr,
+                        count,
+                        offset,
+                    },
+                );
+                stack.push(r);
+            }
+            0xfe01 | 0xfe02 => {
+                let Immediate::MemArg { offset, memory, .. } = insn.immediate else {
+                    return Err("memory.atomic.wait immediate".into());
+                };
+                let timeout = stack.pop().ok_or("atomic.wait timeout")?;
+                let expected = stack.pop().ok_or("atomic.wait expected")?;
+                let addr = stack.pop().ok_or("atomic.wait addr")?;
+                let r = b.emit(
+                    Ty::I32,
+                    Op::AtomicWait {
+                        mem: memory,
+                        is_64: op == 0xfe02,
+                        addr,
+                        expected,
+                        timeout,
+                        offset,
+                    },
+                );
+                stack.push(r);
+            }
+            0xfe10..=0xfe4e => {
+                let Immediate::MemArg { offset, memory, .. } = insn.immediate else {
+                    return Err("atomic memarg immediate".into());
+                };
+                let n = op - 0xfe10;
+                let group = n / 7;
+                let lane = n % 7;
+                let res_ty = if matches!(lane, 0 | 2 | 3) {
+                    Ty::I32
+                } else {
+                    Ty::I64
+                };
+                let width = match lane {
+                    2 | 4 => AtomicWidth::B1,
+                    3 | 5 => AtomicWidth::B2,
+                    0 | 6 => AtomicWidth::B4,
+                    _ => AtomicWidth::B8,
+                };
+                match group {
+                    0 => {
+                        let addr = stack.pop().ok_or("atomic.load addr")?;
+                        let r = b.emit(
+                            res_ty,
+                            Op::AtomicLoad {
+                                mem: memory,
+                                width,
+                                res_ty,
+                                addr,
+                                offset,
+                            },
+                        );
+                        stack.push(r);
+                    }
+                    1 => {
+                        let val = stack.pop().ok_or("atomic.store val")?;
+                        let addr = stack.pop().ok_or("atomic.store addr")?;
+                        b.emit_void(Op::AtomicStore {
+                            mem: memory,
+                            width,
+                            addr,
+                            val,
+                            offset,
+                        });
+                    }
+                    2..=7 => {
+                        let rmw_op = match group {
+                            2 => AtomicRmwOp::Add,
+                            3 => AtomicRmwOp::Sub,
+                            4 => AtomicRmwOp::And,
+                            5 => AtomicRmwOp::Or,
+                            6 => AtomicRmwOp::Xor,
+                            _ => AtomicRmwOp::Xchg,
+                        };
+                        let val = stack.pop().ok_or("atomic.rmw val")?;
+                        let addr = stack.pop().ok_or("atomic.rmw addr")?;
+                        let r = b.emit(
+                            res_ty,
+                            Op::AtomicRmw {
+                                mem: memory,
+                                op: rmw_op,
+                                width,
+                                res_ty,
+                                addr,
+                                val,
+                                offset,
+                            },
+                        );
+                        stack.push(r);
+                    }
+                    _ => {
+                        let replacement = stack.pop().ok_or("atomic.cmpxchg replacement")?;
+                        let expected = stack.pop().ok_or("atomic.cmpxchg expected")?;
+                        let addr = stack.pop().ok_or("atomic.cmpxchg addr")?;
+                        let r = b.emit(
+                            res_ty,
+                            Op::AtomicCmpxchg {
+                                mem: memory,
+                                width,
+                                res_ty,
+                                addr,
+                                expected,
+                                replacement,
+                                offset,
+                            },
+                        );
+                        stack.push(r);
+                    }
+                }
+            }
             _ => {
                 return Err(format!(
                     "fn {func_index} pc {pc}: unsupported opcode {op:#x}"
@@ -4779,6 +6090,9 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
     let mut ir = b.ir;
     if opt {
         optimize_ir_with_budget_and_scratch(&mut ir, budget, opt_scratch)?;
+    }
+    if ir.uses_gc {
+        ir.recompute_val_ref_kinds(module);
     }
     Ok(ir)
 }
@@ -4841,14 +6155,15 @@ pub fn optimize_ir_with_budget_and_scratch(
         // Pass 1a: Fuse `Cmp` + optional `I32Eqz` + `Select` -> `Op::CmpSelect`.
         for idx in 0..bb.insts.len() {
             let op = bb.insts[idx].op;
-            match op {
-                Op::Call { .. } | Op::CallIndirect { .. } => {
-                    cur_epoch = cur_epoch.wrapping_add(1);
-                    if cur_epoch == 0 {
-                        def_stamp.fill((0, 0));
-                        cur_epoch = 1;
-                    }
+            if op.is_gc_safepoint() {
+                cur_epoch = cur_epoch.wrapping_add(1);
+                if cur_epoch == 0 {
+                    def_stamp.fill((0, 0));
+                    cur_epoch = 1;
                 }
+            }
+            match op {
+                Op::Call { .. } | Op::CallIndirect { .. } => {}
                 Op::BoundsCheck { .. } | Op::Load { .. } | Op::Store { .. } => {
                     any_mem_op = true;
                 }
