@@ -1912,6 +1912,25 @@ pub fn allocate_with_config_and_scratch(
             }
         }
     };
+    // Priority peer insertion for SSA phi / loop-backedge copies: if `b` is already present
+    // (e.g., from a commutative binop operand), append a second vote into any free slot so the
+    // combined operand+phi peer beats a single-vote temporary; otherwise place `b` at slot 0.
+    let add_phi_peer = |peers: &mut Vec<[u32; 4]>, a: u32, b: u32| {
+        if a == b {
+            return;
+        }
+        let slot = &mut peers[a as usize];
+        if slot.contains(&b) {
+            if let Some(free) = slot.iter_mut().find(|e| **e == u32::MAX) {
+                *free = b;
+            }
+            return;
+        }
+        slot[3] = slot[2];
+        slot[2] = slot[1];
+        slot[1] = slot[0];
+        slot[0] = b;
+    };
 
     // Hint entry params with their incoming ABI registers (zero heap allocation).
     if !ir.params.is_empty() {
@@ -1932,6 +1951,7 @@ pub fn allocate_with_config_and_scratch(
     let is_trap_blk_ref = &scratch.is_trap_blk;
     reset_fill(&mut scratch.val_non_trap, n_vals, false);
     let val_non_trap = &mut scratch.val_non_trap;
+    let mut val_uses = vec![0u32; n_vals];
     for (oi, &bid) in block_order.iter().enumerate() {
         let bb = &ir.blocks[bid as usize];
         let is_cold_trap =
@@ -1963,6 +1983,7 @@ pub fn allocate_with_config_and_scratch(
             let cur_ld = loop_depth[oi];
             inst.op.for_each_use(&ir.val_pool, |v| {
                 let vu = v.0 as usize;
+                val_uses[vu] = val_uses[vu].saturating_add(1);
                 val_weight[vu] = val_weight[vu].saturating_add(w);
                 if cur_ld > max_use_loop_depth[vu] {
                     max_use_loop_depth[vu] = cur_ld;
@@ -2067,6 +2088,7 @@ pub fn allocate_with_config_and_scratch(
         let cur_ld = loop_depth[oi];
         bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
             let vu = v.0 as usize;
+            val_uses[vu] = val_uses[vu].saturating_add(1);
             val_weight[vu] = val_weight[vu].saturating_add(w);
             if cur_ld > max_use_loop_depth[vu] {
                 max_use_loop_depth[vu] = cur_ld;
@@ -2079,8 +2101,8 @@ pub fn allocate_with_config_and_scratch(
             let params = &ir.blocks[target_bb as usize].params;
             let avals = ir.pool_slice(args);
             for (&p, &a) in params.iter().zip(avals) {
-                add_peer(hint_peers, p.0, a.0);
-                add_peer(hint_peers, a.0, p.0);
+                add_phi_peer(hint_peers, p.0, a.0);
+                add_phi_peer(hint_peers, a.0, p.0);
                 if a != p {
                     let prev = first_edge_arg[p.0 as usize];
                     if prev == u32::MAX {
@@ -2337,7 +2359,11 @@ pub fn allocate_with_config_and_scratch(
             if !rc.is_zero() && !ty.is_fp() && !crosses_clobber && def_ld < max_use_loop_depth[vi] {
                 remat_hoisted = true;
             }
-            if rc.is_zero() || crosses_clobber || val_weight[vi] <= 8 {
+            let single_use_non_hoisted_i32 = matches!(rc, RematConst::I32(_))
+                && def_ld >= max_use_loop_depth[vi]
+                && val_uses[vi] <= 1;
+            if rc.is_zero() || crosses_clobber || val_weight[vi] <= 8 || single_use_non_hoisted_i32
+            {
                 locs[vi] = Loc::Remat(rc);
                 assigned[vi] = true;
                 continue;

@@ -541,8 +541,22 @@ pub struct TargetIsa {
 /// Intra-block live integer `RFLAGS` state preserved across flag-clean instructions (`mov`, `cmovcc`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiveFlags {
-    IntRR { is64: bool, a: Val, b: Val },
-    IntRI { is64: bool, a: Val, imm: i32 },
+    IntRR {
+        is64: bool,
+        a: Val,
+        b: Val,
+    },
+    IntRI {
+        is64: bool,
+        a: Val,
+        imm: i32,
+    },
+    /// `ZF` is exact for `(val == 0)` from an immediately preceding `add`/`sub`/`and`/`or`/`xor`.
+    /// Only valid for equality/inequality checks against zero (`BranchIf`, `Eq 0`, `Ne 0`).
+    IntZero {
+        is64: bool,
+        val: Val,
+    },
 }
 
 struct Lower<'a> {
@@ -579,6 +593,9 @@ struct Lower<'a> {
     /// Intra-block live integer `RFLAGS` state for redundant `cmp` elision across adjacent
     /// `Op::CmpSelect` / `Term::CmpBranch` instructions.
     live_flags: Option<LiveFlags>,
+    /// Intra-block zero-gap spill-slot forwarding: `(val, reg_holding_val, asm_len_after_store)`.
+    /// Valid iff `self.asm.code.len() == saved_len` (zero bytes emitted since `gp_commit`).
+    just_spilled: Option<(Val, Gp, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -725,6 +742,15 @@ impl<'a> Lower<'a> {
             Loc::Gp(g) => g,
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
+                if let Some((sv, reg, saved_len)) = self.just_spilled
+                    && sv == v
+                    && self.asm.code.len() == saved_len
+                {
+                    if reg != scratch {
+                        self.asm.mov_rr(is64, scratch, reg);
+                    }
+                    return scratch;
+                }
                 self.asm.mov_rm(is64, scratch, Mem::base_disp(Gp::Rsp, off));
                 scratch
             }
@@ -755,6 +781,15 @@ impl<'a> Lower<'a> {
             Loc::Gp(g) => g,
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
+                if let Some((sv, reg, saved_len)) = self.just_spilled
+                    && sv == v
+                    && self.asm.code.len() == saved_len
+                {
+                    if reg != scratch {
+                        self.asm.mov_rr(is64, scratch, reg);
+                    }
+                    return scratch;
+                }
                 self.asm.mov_rm(is64, scratch, Mem::base_disp(Gp::Rsp, off));
                 scratch
             }
@@ -868,6 +903,9 @@ impl<'a> Lower<'a> {
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
                 self.asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, off), reg);
+                if is64 || self.is_upper32_zero(v) {
+                    self.just_spilled = Some((v, reg, self.asm.code.len()));
+                }
             }
             Loc::Xmm(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
         }
@@ -1494,6 +1532,42 @@ impl<'a> Lower<'a> {
         (dst_gp & else_live_gp) == 0 && (dst_xmm & else_live_xmm) == 0
     }
 
+    /// Returns `true` when `then_args` moves (already verified safe by `can_hoist_flag_preserving_moves`)
+    /// do not overwrite any GP register read by `cmp_vals`, so we can emit the edge moves *before*
+    /// `cmp`/`test` and keep `cmp/test + jcc` immediately adjacent for x86 macro-fusion.
+    fn can_hoist_moves_before_cmp(
+        &self,
+        then_bb: u32,
+        then_args: ValRange,
+        cmp_vals: &[Val],
+    ) -> bool {
+        let params = &self.ir.blocks[then_bb as usize].params;
+        let arg_vals = self.ir.pool_slice(then_args);
+        let mut dst_gp = 0u16;
+        for (&p, &a) in params.iter().zip(arg_vals) {
+            let dl = self.loc(p);
+            if dl == self.loc(a) {
+                continue;
+            }
+            if let Loc::Gp(g) = dl {
+                dst_gp |= 1u16 << g.id();
+            }
+        }
+        if dst_gp == 0 {
+            return true;
+        }
+        for &v in cmp_vals {
+            match self.loc(v) {
+                Loc::Gp(g) if (dst_gp & (1u16 << g.id())) != 0 => return false,
+                Loc::RematAddr { base_reg, .. } if (dst_gp & (1u16 << base_reg.id())) != 0 => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     fn edge_target_label(&mut self, target_bb: u32, args: ValRange) -> Label {
         if !self.edge_has_moves(target_bb, args) {
             self.bb_labels[target_bb as usize]
@@ -2071,6 +2145,9 @@ impl<'a> Lower<'a> {
                         }
                         mem_alu(&mut self.asm, op, is64, d, Mem::base_disp(Gp::Rsp, boff));
                         self.gp_commit(dst_val, d);
+                        if op != IntBinOp::Mul {
+                            self.live_flags = Some(LiveFlags::IntZero { is64, val: dst_val });
+                        }
                         return;
                     }
                     (Loc::Spill(aoff), Loc::Gp(bg)) if is_comm => {
@@ -2079,6 +2156,9 @@ impl<'a> Lower<'a> {
                         }
                         mem_alu(&mut self.asm, op, is64, d, Mem::base_disp(Gp::Rsp, aoff));
                         self.gp_commit(dst_val, d);
+                        if op != IntBinOp::Mul {
+                            self.live_flags = Some(LiveFlags::IntZero { is64, val: dst_val });
+                        }
                         return;
                     }
                     _ => {}
@@ -2118,6 +2198,9 @@ impl<'a> Lower<'a> {
                     _ => unreachable!(),
                 }
                 self.gp_commit(dst_val, dest);
+                if op != IntBinOp::Mul {
+                    self.live_flags = Some(LiveFlags::IntZero { is64, val: dst_val });
+                }
             }
         }
     }
@@ -2473,12 +2556,14 @@ impl<'a> Lower<'a> {
         }
         let ar = self.gp_read(a, SCRATCH_GP1);
         let d = self.gp_write_reg(dst_val);
+        let mut sets_zf = false;
         match op {
             IntBinOp::Add => {
                 if d != ar {
                     self.asm.lea(is64, d, Mem::base_disp(ar, imm));
                 } else {
                     self.asm.add_ri(is64, d, imm);
+                    sets_zf = true;
                 }
             }
             IntBinOp::Sub => {
@@ -2488,9 +2573,11 @@ impl<'a> Lower<'a> {
                     } else {
                         self.asm.mov_rr(is64, d, ar);
                         self.asm.sub_ri(is64, d, imm);
+                        sets_zf = true;
                     }
                 } else {
                     self.asm.sub_ri(is64, d, imm);
+                    sets_zf = true;
                 }
             }
             IntBinOp::Mul => {
@@ -2501,18 +2588,21 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(is64, d, ar);
                 }
                 self.asm.and_ri(is64, d, imm);
+                sets_zf = true;
             }
             IntBinOp::Or => {
                 if d != ar {
                     self.asm.mov_rr(is64, d, ar);
                 }
                 self.asm.or_ri(is64, d, imm);
+                sets_zf = true;
             }
             IntBinOp::Xor => {
                 if d != ar {
                     self.asm.mov_rr(is64, d, ar);
                 }
                 self.asm.xor_ri(is64, d, imm);
+                sets_zf = true;
             }
             IntBinOp::Shl => {
                 if imm == 1 && d != ar && ar != Gp::Rsp {
@@ -2561,6 +2651,9 @@ impl<'a> Lower<'a> {
             _ => unreachable!("unexpected imm binop {op:?}"),
         }
         self.gp_commit(dst_val, d);
+        if sets_zf {
+            self.live_flags = Some(LiveFlags::IntZero { is64, val: dst_val });
+        }
     }
 
     fn emit_float_cmp(&mut self, is64: bool, op: CmpOp, dst_val: Val, a: Val, b: Val) {
@@ -8183,6 +8276,54 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// Returns `true` iff `emit_int_cmp_flags_reusing` will consume `prev_flags` instead of
+    /// emitting a fresh `cmp`/`test` instruction.
+    fn will_reuse_int_flags(
+        &self,
+        prev_flags: Option<LiveFlags>,
+        kind: CmpBranchKind,
+        a: Val,
+        b: Val,
+    ) -> bool {
+        let Some(pf) = prev_flags else {
+            return false;
+        };
+        match kind {
+            CmpBranchKind::I32(cop) | CmpBranchKind::I64(cop) => {
+                let is64 = matches!(kind, CmpBranchKind::I64(_));
+                if pf == (LiveFlags::IntRR { is64, a, b })
+                    || pf == (LiveFlags::IntRR { is64, a: b, b: a })
+                {
+                    return true;
+                }
+                if matches!(cop, CmpOp::Eq | CmpOp::Ne) {
+                    let is_zero = |loc: Loc| {
+                        matches!(
+                            (is64, loc),
+                            (false, Loc::Remat(RematConst::I32(0)))
+                                | (true, Loc::Remat(RematConst::I64(0)))
+                        )
+                    };
+                    if is_zero(self.loc(b)) && pf == (LiveFlags::IntZero { is64, val: a }) {
+                        return true;
+                    }
+                    if is_zero(self.loc(a)) && pf == (LiveFlags::IntZero { is64, val: b }) {
+                        return true;
+                    }
+                }
+                false
+            }
+            CmpBranchKind::I32Imm(cop, imm) | CmpBranchKind::I64Imm(cop, imm) => {
+                let is64 = matches!(kind, CmpBranchKind::I64Imm(..));
+                pf == (LiveFlags::IntRI { is64, a, imm })
+                    || (imm == 0
+                        && matches!(cop, CmpOp::Eq | CmpOp::Ne)
+                        && pf == (LiveFlags::IntZero { is64, val: a }))
+            }
+            _ => false,
+        }
+    }
+
     /// Emits integer comparison flags for `kind` (`I32`/`I32Imm`/`I64`/`I64Imm`), reusing
     /// `prev_flags` when the exact (or swapped) operands are already live in `RFLAGS`.
     fn emit_int_cmp_flags_reusing(
@@ -8209,6 +8350,12 @@ impl<'a> Lower<'a> {
                     }
                 };
                 if let Some(imm) = remat_imm32(self.loc(b)) {
+                    if imm == 0
+                        && matches!(cop, CmpOp::Eq | CmpOp::Ne)
+                        && prev_flags == Some(LiveFlags::IntZero { is64, val: a })
+                    {
+                        return cmp_to_cond(cop);
+                    }
                     let ar = self.gp_read(a, SCRATCH_GP1);
                     if imm == 0 {
                         self.asm.test_rr(is64, ar, ar);
@@ -8218,6 +8365,12 @@ impl<'a> Lower<'a> {
                     return cmp_to_cond(cop);
                 }
                 if let Some(imm) = remat_imm32(self.loc(a)) {
+                    if imm == 0
+                        && matches!(cop, CmpOp::Eq | CmpOp::Ne)
+                        && prev_flags == Some(LiveFlags::IntZero { is64, val: b })
+                    {
+                        return cmp_to_cond(cop.swap());
+                    }
                     let br = self.gp_read(b, SCRATCH_GP1);
                     if imm == 0 {
                         self.asm.test_rr(is64, br, br);
@@ -8238,6 +8391,12 @@ impl<'a> Lower<'a> {
             CmpBranchKind::I32Imm(cop, imm) | CmpBranchKind::I64Imm(cop, imm) => {
                 let is64 = matches!(kind, CmpBranchKind::I64Imm(..));
                 if prev_flags == Some(LiveFlags::IntRI { is64, a, imm }) {
+                    return cmp_to_cond(cop);
+                }
+                if imm == 0
+                    && matches!(cop, CmpOp::Eq | CmpOp::Ne)
+                    && prev_flags == Some(LiveFlags::IntZero { is64, val: a })
+                {
                     return cmp_to_cond(cop);
                 }
                 let ar = self.gp_read(a, SCRATCH_GP1);
@@ -8676,7 +8835,11 @@ impl<'a> Lower<'a> {
                 else_bb,
                 else_args,
             } => {
-                let cr = self.gp_read(cond, SCRATCH_GP1);
+                let reuse_zero = prev_flags
+                    == Some(LiveFlags::IntZero {
+                        is64: false,
+                        val: cond,
+                    });
                 let loop_backedge_inline = next_bb != Some(then_bb.0)
                     && self.ir.blocks[then_bb.0 as usize].is_loop_header
                     && self.edge_has_moves(then_bb.0, then_args);
@@ -8684,8 +8847,18 @@ impl<'a> Lower<'a> {
                     && self
                         .can_hoist_flag_preserving_moves(then_bb.0, then_args, else_bb.0, else_args)
                 {
-                    self.asm.test_rr(false, cr, cr);
-                    self.emit_edge_moves(then_bb.0, then_args);
+                    if !reuse_zero && self.can_hoist_moves_before_cmp(then_bb.0, then_args, &[cond])
+                    {
+                        self.emit_edge_moves(then_bb.0, then_args);
+                        let cr = self.gp_read(cond, SCRATCH_GP1);
+                        self.asm.test_rr(false, cr, cr);
+                    } else {
+                        if !reuse_zero {
+                            let cr = self.gp_read(cond, SCRATCH_GP1);
+                            self.asm.test_rr(false, cr, cr);
+                        }
+                        self.emit_edge_moves(then_bb.0, then_args);
+                    }
                     self.asm.jcc(Cond::Ne, self.bb_labels[then_bb.0 as usize]);
                     self.emit_edge_moves(else_bb.0, else_args);
                     if next_bb != Some(else_bb.0) {
@@ -8693,7 +8866,10 @@ impl<'a> Lower<'a> {
                     }
                 } else if next_bb == Some(then_bb.0) || loop_backedge_inline {
                     let else_lbl = self.edge_target_label(else_bb.0, else_args);
-                    self.asm.test_rr(false, cr, cr);
+                    if !reuse_zero {
+                        let cr = self.gp_read(cond, SCRATCH_GP1);
+                        self.asm.test_rr(false, cr, cr);
+                    }
                     self.asm.jcc(Cond::E, else_lbl);
                     self.emit_edge_moves(then_bb.0, then_args);
                     if next_bb != Some(then_bb.0) {
@@ -8701,7 +8877,10 @@ impl<'a> Lower<'a> {
                     }
                 } else {
                     let then_lbl = self.edge_target_label(then_bb.0, then_args);
-                    self.asm.test_rr(false, cr, cr);
+                    if !reuse_zero {
+                        let cr = self.gp_read(cond, SCRATCH_GP1);
+                        self.asm.test_rr(false, cr, cr);
+                    }
                     self.asm.jcc(Cond::Ne, then_lbl);
                     self.emit_edge_moves(else_bb.0, else_args);
                     if next_bb != Some(else_bb.0) {
@@ -8747,8 +8926,20 @@ impl<'a> Lower<'a> {
                     && self
                         .can_hoist_flag_preserving_moves(then_bb.0, then_args, else_bb.0, else_args)
                 {
-                    let cond = self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b);
-                    self.emit_edge_moves(then_bb.0, then_args);
+                    let cmp_vals: &[Val] = match kind {
+                        CmpBranchKind::I32Imm(..) | CmpBranchKind::I64Imm(..) => &[a],
+                        _ => &[a, b],
+                    };
+                    let cond = if !self.will_reuse_int_flags(prev_flags, kind, a, b)
+                        && self.can_hoist_moves_before_cmp(then_bb.0, then_args, cmp_vals)
+                    {
+                        self.emit_edge_moves(then_bb.0, then_args);
+                        self.emit_int_cmp_flags_reusing(None, kind, a, b)
+                    } else {
+                        let c = self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b);
+                        self.emit_edge_moves(then_bb.0, then_args);
+                        c
+                    };
                     self.asm.jcc(cond, self.bb_labels[then_bb.0 as usize]);
                     self.emit_edge_moves(else_bb.0, else_args);
                     if next_bb != Some(else_bb.0) {
@@ -9111,6 +9302,7 @@ pub fn lower_ir_to_x64_with_budget(
         fp_nz_consts: None,
         val_upper32_zero: None,
         live_flags: None,
+        just_spilled: None,
     };
 
     // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----
@@ -9257,6 +9449,7 @@ pub fn lower_ir_to_x64_with_budget(
         }
         l.asm.bind(l.bb_labels[bid as usize]);
         l.live_flags = None;
+        l.just_spilled = None;
         let next_bb = alloc.block_order.get(oi + 1).copied();
         let mut term_fused = false;
         let mut ii = 0usize;

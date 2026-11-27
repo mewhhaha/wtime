@@ -7124,6 +7124,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                     EdgeFact::NonZero(v) => st.mark_non_zero(v),
                 }
 
+                // For multi-predecessor joins / loop headers, prove inductive `u32` upper bounds
+                // on `Ty::I32` block parameters when EVERY non-self incoming edge proves an upper
+                // bound (via dominating bounds, constants, or up to 4 single-pred branch guards).
+                if dom.preds(bid).len() > 1 && !ir.blocks[bid as usize].params.is_empty() {
+                    refine_join_param_bounds(bid, ir, &pool, dom, &mut st);
+                }
+
                 // At multi-predecessor joins/loops, conservatively invalidate mutable state (read-only facts persist!).
                 // Preserve `mem_facts` across pure read-only 1-level diamonds (`if cond { load ... }`) where
                 // every predecessor is either `idom` itself or a single-pred read-only child of `idom`.
@@ -8982,8 +8989,274 @@ fn run_dom_gvn_and_bce_with_scratch(
     ))
 }
 
+/// Returns `x` if `v` is defined by an unsigned minimum `CmpSelect` clamping `x` (`min_u(x, _) <=u x`).
+fn unwrap_min_u_src(v: Val, def_op: &[Option<Op>], const32: &[Option<i32>]) -> Option<Val> {
+    let op = def_op.get(v.0 as usize).copied().flatten()?;
+    let Op::CmpSelect { kind, a, b, tv, fv } = op else {
+        return None;
+    };
+    let const_u32 = |val: Val| -> Option<u32> {
+        const32
+            .get(val.0 as usize)
+            .copied()
+            .flatten()
+            .or_else(|| match def_op.get(val.0 as usize).copied().flatten() {
+                Some(Op::ConstI32(c)) => Some(c),
+                _ => None,
+            })
+            .map(|c| c as u32)
+    };
+    match kind {
+        CmpBranchKind::I32Imm(CmpOp::LtU | CmpOp::LeU, imm)
+            if tv == a && const_u32(fv).is_some_and(|c| c <= (imm as u32)) =>
+        {
+            Some(a)
+        }
+        CmpBranchKind::I32Imm(CmpOp::GtU | CmpOp::GeU, imm)
+            if fv == a && const_u32(tv).is_some_and(|c| c <= (imm as u32)) =>
+        {
+            Some(a)
+        }
+        CmpBranchKind::I32(CmpOp::LtU | CmpOp::LeU) if tv == a && fv == b => Some(a),
+        CmpBranchKind::I32(CmpOp::GtU | CmpOp::GeU) if tv == b && fv == a => Some(a),
+        _ => None,
+    }
+}
+
+/// Extracts `(CmpBranchKind, a, b)` from a `Term::CmpBranch` or a `Term::BranchIf` fed by an
+/// `I32Cmp`/`I32CmpImm` instruction (looking up `def_op` or walking `cur_bb`'s dominator chain).
+fn extract_term_i32_cmp(
+    cur_bb: u32,
+    ir: &IrFunc,
+    dom: &CfgDom,
+    def_op: &[Option<Op>],
+) -> Option<(CmpBranchKind, Val, Val, BlockId, BlockId)> {
+    let pred_bb = &ir.blocks[cur_bb as usize];
+    match pred_bb.term {
+        Term::CmpBranch {
+            kind: kind @ (CmpBranchKind::I32(_) | CmpBranchKind::I32Imm(..)),
+            a,
+            b,
+            then_bb,
+            else_bb,
+            ..
+        } if then_bb != else_bb => Some((kind, a, b, then_bb, else_bb)),
+        Term::BranchIf {
+            cond,
+            then_bb,
+            else_bb,
+            ..
+        } if then_bb != else_bb => {
+            let op = def_op.get(cond.0 as usize).copied().flatten().or_else(|| {
+                let mut b = cur_bb;
+                for _ in 0..16 {
+                    if let Some(found) = ir.blocks[b as usize]
+                        .insts
+                        .iter()
+                        .rev()
+                        .find(|ins| ins.res == Some(cond))
+                        .map(|ins| ins.op)
+                    {
+                        return Some(found);
+                    }
+                    let parent = dom.idom[b as usize];
+                    if parent == b || parent == u32::MAX {
+                        break;
+                    }
+                    b = parent;
+                }
+                None
+            })?;
+            match op {
+                Op::I32Cmp(cop, a, b) => Some((CmpBranchKind::I32(cop), a, b, then_bb, else_bb)),
+                Op::I32CmpImm(cop, a, imm) => {
+                    Some((CmpBranchKind::I32Imm(cop, imm), a, a, then_bb, else_bb))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Proves non-circular `u32` upper bounds on `Ty::I32` block parameters of join / loop-header
+/// block `bid` by intersecting bounds proven across ALL non-self incoming edges.
+///
+/// Soundness: during dominator-tree DFS entry into `bid`, `st.non_wrap_bound` and `st.const32`
+/// ONLY contain facts for values strictly dominating `bid`. On backedges, bounds are extracted
+/// solely from explicit dominating-limit comparisons (`arg <u lim` where `lim` strictly dominates
+/// `bid` and has a known upper bound) or immediate bounds (`arg <u C` / `arg <=u C`).
+fn refine_join_param_bounds(
+    bid: u32,
+    ir: &IrFunc,
+    pool: &[Val],
+    dom: &CfgDom,
+    st: &mut GvnState<'_>,
+) {
+    let bb = &ir.blocks[bid as usize];
+    if bb.params.is_empty() || bb.params.len() > 16 {
+        return;
+    }
+    let preds = dom.preds(bid);
+    if preds.len() < 2 || preds.len() > 8 {
+        return;
+    }
+    // Collect every distinct incoming edge `(pred, args, target_matches_then_opt)`.
+    let mut incoming: Vec<(u32, ValRange)> = Vec::with_capacity(preds.len());
+    for &p in preds {
+        let pb = &ir.blocks[p as usize];
+        match pb.term {
+            Term::Jump { target, args } if target.0 == bid => {
+                incoming.push((p, args));
+            }
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                if then_bb.0 == bid {
+                    incoming.push((p, then_args));
+                }
+                if else_bb.0 == bid {
+                    incoming.push((p, else_args));
+                }
+            }
+            _ => return,
+        }
+    }
+    if incoming.is_empty() || incoming.len() > 8 {
+        return;
+    }
+
+    let edge_bound_for = |pred: u32, arg: Val, st: &GvnState<'_>| -> Option<u64> {
+        let mut best: Option<u64> = None;
+        let mut tighten = |b: u64| {
+            best = Some(best.map_or(b, |old| old.min(b)));
+        };
+        if let Some(b) = st.non_wrap_bound[arg.0 as usize] {
+            tighten(b);
+        }
+        if let Some(c) = st.const32[arg.0 as usize] {
+            tighten(u64::from(c as u32));
+        } else {
+            // Check if `arg` is defined by `ConstI32` inside `pred` itself.
+            for ins in &ir.blocks[pred as usize].insts {
+                if ins.res == Some(arg) {
+                    if let Op::ConstI32(c) = ins.op {
+                        tighten(u64::from(c as u32));
+                    }
+                    break;
+                }
+            }
+        }
+        // `arg <=u min_src` when `arg = min_u(min_src, C)` (always true for unsigned u32).
+        let min_src = unwrap_min_u_src(arg, &st.def_op, &st.const32);
+        if let Some(ms) = min_src
+            && let Some(b) = st.non_wrap_bound[ms.0 as usize]
+        {
+            tighten(b);
+        }
+        // Walk up to 4 single-predecessor branch edges ending at `(pred -> bid)`.
+        let mut child = bid;
+        let mut cur = pred;
+        for _hop in 0..4 {
+            if let Some((kind, a, b, then_bb, else_bb)) =
+                extract_term_i32_cmp(cur, ir, dom, &st.def_op)
+            {
+                let on_then = then_bb.0 == child;
+                let on_else = else_bb.0 == child;
+                if on_then ^ on_else {
+                    let matches_arg = |v: Val| v == arg || min_src == Some(v);
+                    match kind {
+                        CmpBranchKind::I32Imm(cop, imm) if matches_arg(a) => {
+                            let eff = if on_then { cop } else { cop.invert_int() };
+                            let ku = u64::from(imm as u32);
+                            match eff {
+                                CmpOp::LtU if ku > 0 => tighten(ku - 1),
+                                CmpOp::LeU => tighten(ku),
+                                _ => {}
+                            }
+                        }
+                        CmpBranchKind::I32(cop) => {
+                            let eff = if on_then { cop } else { cop.invert_int() };
+                            let check_lim =
+                                |lim: Val, strict: bool, tighten: &mut dyn FnMut(u64)| {
+                                    if bb.params.contains(&lim) {
+                                        return;
+                                    }
+                                    if let Some(bl) = st.non_wrap_bound[lim.0 as usize] {
+                                        if strict {
+                                            if bl > 0 {
+                                                tighten(bl - 1);
+                                            }
+                                        } else {
+                                            tighten(bl);
+                                        }
+                                    }
+                                };
+                            match eff {
+                                CmpOp::LtU if matches_arg(a) => check_lim(b, true, &mut tighten),
+                                CmpOp::GtU if matches_arg(b) => check_lim(a, true, &mut tighten),
+                                CmpOp::LeU if matches_arg(a) => check_lim(b, false, &mut tighten),
+                                CmpOp::GeU if matches_arg(b) => check_lim(a, false, &mut tighten),
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if cur == bid {
+                break;
+            }
+            let cpreds = dom.preds(cur);
+            if cpreds.len() != 1 || cpreds[0] == cur {
+                break;
+            }
+            child = cur;
+            cur = cpreds[0];
+        }
+        best
+    };
+
+    for (p_idx, &p) in bb.params.iter().enumerate() {
+        if ir.val_tys[p.0 as usize] != Ty::I32 {
+            continue;
+        }
+        let mut joined: Option<u64> = None;
+        let mut all_bounded = true;
+        for &(pred, args) in &incoming {
+            let arg = pool[args.start as usize + p_idx];
+            if arg == p {
+                continue;
+            }
+            let Some(eb) = edge_bound_for(pred, arg, st) else {
+                all_bounded = false;
+                break;
+            };
+            joined = Some(joined.map_or(eb, |old| old.max(eb)));
+        }
+        if all_bounded
+            && let Some(bound) = joined
+            && bound <= u64::from(u32::MAX)
+        {
+            st.tighten_bound(p, bound);
+        }
+    }
+}
+
 /// Converts trivial single-predecessor `if/else` diamonds with <= 2 strictly pure non-trapping
-/// GP instructions per arm into branchless `Op::CmpSelect` / `Op::Select` + `Term::Jump(merge)`.
+/// GP instructions per arm (plus optional identical-address GP `Op::Store` in both arms) into
+/// branchless `Op::CmpSelect` / `Op::Select` + `Term::Jump(merge)`.
 /// Returns `true` if any diamond was converted (so caller can compact merged blocks).
 fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
     let n = ir.blocks.len();
@@ -9137,9 +9410,54 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                     .all(|ins| is_trivial_pure(&ins.op))
         };
 
-        // Case 1: Classic 2-arm diamond (`bi -> ti -> merge`, `bi -> ei -> merge`).
+        // Also support 2-arm diamonds where BOTH arms execute an identical-address GP `Op::Store`
+        // (plus <= 2 strictly pure GP instructions) before jumping to the same `merge_bb`:
+        // `if cond { store(addr, vt); ... } else { store(addr, ve); ... }` ->
+        // `vs = select(cond, vt, ve); store(addr, vs); ...`.
+        let extract_arm_store = |idx: usize| -> Option<(usize, StoreKind, Val, u64, Val, bool)> {
+            if idx == 0 || dead_arm[idx] || edge_in[idx] != 1 || !ir.blocks[idx].params.is_empty() {
+                return None;
+            }
+            let insts = &ir.blocks[idx].insts;
+            if insts.len() > 3 {
+                return None;
+            }
+            let mut found: Option<(usize, StoreKind, Val, u64, Val, bool)> = None;
+            for (pos, ins) in insts.iter().enumerate() {
+                match ins.op {
+                    Op::Store {
+                        kind:
+                            kind @ (StoreKind::I8 | StoreKind::I16 | StoreKind::I32 | StoreKind::I64),
+                        addr,
+                        offset,
+                        val,
+                        checked,
+                    } if found.is_none() => {
+                        found = Some((pos, kind, addr, offset, val, checked));
+                    }
+                    ref op if is_trivial_pure(op) => {}
+                    _ => return None,
+                }
+            }
+            found
+        };
+
+        #[derive(Clone, Copy)]
+        struct PairedStore {
+            t_pos: usize,
+            e_pos: usize,
+            kind: StoreKind,
+            addr: Val,
+            offset: u64,
+            t_val: Val,
+            e_val: Val,
+            checked: bool,
+        }
+
+        // Case 1: Classic 2-arm diamond (`bi -> ti -> merge`, `bi -> ei -> merge`), pure or paired-store.
         // Case 2: Single-arm triangle (`bi -> ti -> merge`, `bi -> merge` directly via `else_bb`).
         // Case 3: Single-arm triangle (`bi -> merge` directly via `then_bb`, `bi -> ei -> merge`).
+        let mut paired_store: Option<PairedStore> = None;
         let (merge_bb, ta, ea, kill_t, kill_e) = if then_args.len == 0
             && else_args.len == 0
             && is_trivial_arm(ti)
@@ -9159,6 +9477,50 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
             && tm.0 as usize != ti
             && tm.0 as usize != ei
         {
+            (tm, ta, ea, true, true)
+        } else if then_args.len == 0
+            && else_args.len == 0
+            && let Some((t_pos, t_kind, t_addr, t_off, t_val, t_chk)) = extract_arm_store(ti)
+            && let Some((e_pos, e_kind, e_addr, e_off, e_val, e_chk)) = extract_arm_store(ei)
+            && t_kind == e_kind
+            && t_addr == e_addr
+            && t_off == e_off
+            && t_chk == e_chk
+            && ir.val_tys[t_val.0 as usize].is_gp()
+            && ir.val_tys[t_val.0 as usize] == ir.val_tys[e_val.0 as usize]
+            && !ir.blocks[ti]
+                .insts
+                .iter()
+                .any(|ins| ins.res == Some(t_addr))
+            && !ir.blocks[ei]
+                .insts
+                .iter()
+                .any(|ins| ins.res == Some(e_addr))
+            && let (
+                Term::Jump {
+                    target: tm,
+                    args: ta,
+                },
+                Term::Jump {
+                    target: em,
+                    args: ea,
+                },
+            ) = (ir.blocks[ti].term, ir.blocks[ei].term)
+            && tm == em
+            && ta.len == ea.len
+            && tm.0 as usize != ti
+            && tm.0 as usize != ei
+        {
+            paired_store = Some(PairedStore {
+                t_pos,
+                e_pos,
+                kind: t_kind,
+                addr: t_addr,
+                offset: t_off,
+                t_val,
+                e_val,
+                checked: t_chk,
+            });
             (tm, ta, ea, true, true)
         } else if then_args.len == 0
             && is_trivial_arm(ti)
@@ -9202,10 +9564,11 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                 }
             }
         }
+        let store_sel_extra = usize::from(paired_store.is_some_and(|p| p.t_val != p.e_val));
         if !all_gp || diffs > 2 {
             continue;
         }
-        if ir.val_tys.len() + diffs > MAX_IR_VALS_PER_FN
+        if ir.val_tys.len() + diffs + store_sel_extra > MAX_IR_VALS_PER_FN
             || ir.val_pool.len() + (ta.len as usize) > MAX_VAL_POOL_PER_FN
         {
             continue;
@@ -9215,7 +9578,44 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
         // Push merged edge args into `val_pool` BEFORE mutating any blocks so an error leaves CFG intact.
         let t_vals: Vec<Val> = t_slice.to_vec();
         let e_vals: Vec<Val> = e_slice.to_vec();
-        let mut sel_insts = Vec::with_capacity(diffs);
+        let mut sel_insts = Vec::with_capacity(diffs + 2);
+        let mut deferred_store: Option<Inst> = None;
+        if let Some(ps) = paired_store {
+            let store_val = if ps.t_val == ps.e_val {
+                ps.t_val
+            } else {
+                let sv = ir.push_val(ir.val_tys[ps.t_val.0 as usize]);
+                let sel_op = match cmp_info {
+                    Ok((kind, a, b)) => Op::CmpSelect {
+                        kind,
+                        a,
+                        b,
+                        tv: ps.t_val,
+                        fv: ps.e_val,
+                    },
+                    Err(cond) => Op::Select {
+                        cond,
+                        a: ps.t_val,
+                        b: ps.e_val,
+                    },
+                };
+                sel_insts.push(Inst {
+                    res: Some(sv),
+                    op: sel_op,
+                });
+                sv
+            };
+            deferred_store = Some(Inst {
+                res: None,
+                op: Op::Store {
+                    kind: ps.kind,
+                    addr: ps.addr,
+                    offset: ps.offset,
+                    val: store_val,
+                    checked: ps.checked,
+                },
+            });
+        }
         let mut merged_args = Vec::with_capacity(t_vals.len());
         for (tv, ev) in t_vals.into_iter().zip(e_vals) {
             if tv == ev {
@@ -9240,17 +9640,28 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                 merged_args.push(sel_v);
             }
         }
+        // Emit the single merged `Op::Store` AFTER all `CmpSelect` instructions so all
+        // `CmpSelect`s stay immediately adjacent and share a single `cmp` via `live_flags`.
+        if let Some(st_ins) = deferred_store {
+            sel_insts.push(st_ins);
+        }
         let Ok(range) = ir.push_pool(&merged_args) else {
             continue;
         };
         if kill_t {
-            let t_insts = std::mem::take(&mut ir.blocks[ti].insts);
+            let mut t_insts = std::mem::take(&mut ir.blocks[ti].insts);
+            if let Some(ps) = paired_store {
+                t_insts.remove(ps.t_pos);
+            }
             ir.blocks[ti].term = Term::Unreachable;
             dead_arm[ti] = true;
             ir.blocks[bi].insts.extend(t_insts);
         }
         if kill_e {
-            let e_insts = std::mem::take(&mut ir.blocks[ei].insts);
+            let mut e_insts = std::mem::take(&mut ir.blocks[ei].insts);
+            if let Some(ps) = paired_store {
+                e_insts.remove(ps.e_pos);
+            }
             ir.blocks[ei].term = Term::Unreachable;
             dead_arm[ei] = true;
             ir.blocks[bi].insts.extend(e_insts);
@@ -9263,6 +9674,1039 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
         converted_any = true;
     }
     converted_any
+}
+
+/// Static conservative `u32` upper bound for a `Val` (`ConstI32` or unsigned-min `CmpSelect`).
+fn static_u32_upper_bound(v: Val, def_op: &[Option<Op>]) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    let op = def_op.get(v.0 as usize).copied().flatten()?;
+    match op {
+        Op::ConstI32(c) => best = Some(c as u32),
+        Op::CmpSelect {
+            kind, a, tv, fv, ..
+        } => {
+            let tv_c = def_op
+                .get(tv.0 as usize)
+                .copied()
+                .flatten()
+                .and_then(|o| match o {
+                    Op::ConstI32(c) => Some(c as u32),
+                    _ => None,
+                });
+            let fv_c = def_op
+                .get(fv.0 as usize)
+                .copied()
+                .flatten()
+                .and_then(|o| match o {
+                    Op::ConstI32(c) => Some(c as u32),
+                    _ => None,
+                });
+            let tv_b = match kind {
+                CmpBranchKind::I32Imm(CmpOp::LtU, imm) if tv == a => {
+                    Some((imm as u32).saturating_sub(1))
+                }
+                CmpBranchKind::I32Imm(CmpOp::LeU, imm) if tv == a => Some(imm as u32),
+                _ => tv_c,
+            };
+            let fv_b = match kind {
+                CmpBranchKind::I32Imm(CmpOp::GeU, imm) if fv == a => {
+                    Some((imm as u32).saturating_sub(1))
+                }
+                CmpBranchKind::I32Imm(CmpOp::GtU, imm) if fv == a => Some(imm as u32),
+                _ => fv_c,
+            };
+            if let (Some(bt), Some(bf)) = (tv_b, fv_b) {
+                best = Some(bt.max(bf));
+            }
+        }
+        _ => {}
+    }
+    best
+}
+
+/// Versions & if-converts 2-pointer merge loops (e.g. `while i < mid && j < hi { if a <= b { dst[k] = a; i += 1 } else { dst[k] = b; j += 1 }; k += 1 }`)
+/// where each arm contains a redundant Rust/slice bounds check on `k` (proven unreachable by the
+/// inductive linear invariant `k + mid == i + j` whenever `i_init == k_init < mid == j_init < hi <= U`)
+/// plus an identical-address GP `Op::Store`.
+///
+/// Emits a self-contained preheader guard `i_init <u mid && j_init <u hi` routing normal runs into a
+/// 2-block branchless `CmpSelect` + single `Op::Store` fast loop while preserving the original loop
+/// untouched as the exact slow fallback for any wrapping/out-of-range inputs.
+fn if_convert_two_ptr_merge_loops(ir: &mut IrFunc, dom: &CfgDom) -> bool {
+    let orig_blocks = ir.blocks.len();
+    if orig_blocks < 5 || orig_blocks + 4 > MAX_BLOCKS_PER_FN {
+        return false;
+    }
+    let is_pure_merge_op = |op: &Op| -> bool {
+        matches!(
+            *op,
+            Op::ConstI32(_)
+                | Op::ConstI64(_)
+                | Op::I32Eqz(_)
+                | Op::I64Eqz(_)
+                | Op::I32WrapI64(_)
+                | Op::I64ExtendI32S(_)
+                | Op::I64ExtendI32U(_)
+                | Op::I32BinImm(
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
+                    _,
+                    _
+                )
+                | Op::I64BinImm(
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
+                    _,
+                    _
+                )
+                | Op::I32Bin(
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
+                    _,
+                    _
+                )
+                | Op::I64Bin(
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
+                    _,
+                    _
+                )
+        )
+    };
+
+    let n_vals = ir.val_tys.len();
+    let mut def_op: Vec<Option<Op>> = vec![None; n_vals];
+    let mut def_block: Vec<u32> = vec![u32::MAX; n_vals];
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        for &p in &bb.params {
+            def_block[p.0 as usize] = bi as u32;
+        }
+        for ins in &bb.insts {
+            if let Some(r) = ins.res {
+                def_op[r.0 as usize] = Some(ins.op);
+                def_block[r.0 as usize] = bi as u32;
+            }
+            if let Op::Call { rets, .. } | Op::CallIndirect { rets, .. } = ins.op {
+                for &rv in ir.pool_slice(rets) {
+                    def_block[rv.0 as usize] = bi as u32;
+                }
+            }
+        }
+    }
+
+    // Exact incoming edge counts per block.
+    let mut edge_in = vec![0u32; orig_blocks];
+    for bb in &ir.blocks {
+        match bb.term {
+            Term::Jump { target, .. } => edge_in[target.0 as usize] += 1,
+            Term::BranchIf {
+                then_bb, else_bb, ..
+            }
+            | Term::CmpBranch {
+                then_bb, else_bb, ..
+            } => {
+                edge_in[then_bb.0 as usize] += 1;
+                edge_in[else_bb.0 as usize] += 1;
+            }
+            Term::BrTable { table_idx, .. } => {
+                for &(t, _) in &ir.br_tables[table_idx as usize].unique_edges {
+                    edge_in[t.0 as usize] += 1;
+                }
+            }
+            Term::CallCatch {
+                ok_bb, catch_bb, ..
+            }
+            | Term::CallIndirectCatch {
+                ok_bb, catch_bb, ..
+            } => {
+                edge_in[ok_bb.0 as usize] += 1;
+                edge_in[catch_bb.0 as usize] += 1;
+            }
+            Term::Return { .. }
+            | Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::ThrowActive
+            | Term::Unreachable => {}
+        }
+    }
+
+    struct MergeArm {
+        guard_bb: Option<u32>,
+        guard_check: Option<(Val, u32)>, // (checked_val, max_allowed_inclusive)
+        store_bb: u32,
+        store_idx: usize,
+        store_kind: StoreKind,
+        store_addr: Val,
+        store_off: u64,
+        store_val: Val,
+        store_checked: bool,
+        tail_bb: u32,
+        tail_args: ValRange,
+    }
+
+    let match_arm = |arm_id: u32, ir: &IrFunc, edge_in: &[u32]| -> Option<MergeArm> {
+        let ai = arm_id as usize;
+        if ai == 0 || edge_in[ai] != 1 || !ir.blocks[ai].params.is_empty() {
+            return None;
+        }
+        let (guard_bb, guard_check, store_bb) = if ir.blocks[ai].insts.is_empty()
+            && let Term::CmpBranch {
+                kind: CmpBranchKind::I32Imm(cop, imm),
+                a: g_val,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } = ir.blocks[ai].term
+            && then_bb != else_bb
+        {
+            let ku = imm as u32;
+            match cop {
+                CmpOp::GtU if else_args.len == 0 => (Some(arm_id), Some((g_val, ku)), else_bb.0),
+                CmpOp::GeU if ku > 0 && else_args.len == 0 => {
+                    (Some(arm_id), Some((g_val, ku - 1)), else_bb.0)
+                }
+                CmpOp::LeU if then_args.len == 0 => (Some(arm_id), Some((g_val, ku)), then_bb.0),
+                CmpOp::LtU if ku > 0 && then_args.len == 0 => {
+                    (Some(arm_id), Some((g_val, ku - 1)), then_bb.0)
+                }
+                _ => return None,
+            }
+        } else {
+            (None, None, arm_id)
+        };
+        let si = store_bb as usize;
+        if si == 0 || edge_in[si] != 1 || !ir.blocks[si].params.is_empty() {
+            return None;
+        }
+        let sbb = &ir.blocks[si];
+        if sbb.insts.len() > 3 {
+            return None;
+        }
+        let Term::Jump {
+            target: tail_bb,
+            args: tail_args,
+        } = sbb.term
+        else {
+            return None;
+        };
+        let mut store_found: Option<(usize, StoreKind, Val, u64, Val, bool)> = None;
+        for (pos, ins) in sbb.insts.iter().enumerate() {
+            match ins.op {
+                Op::Store {
+                    kind: kind @ (StoreKind::I8 | StoreKind::I16 | StoreKind::I32 | StoreKind::I64),
+                    addr,
+                    offset,
+                    val,
+                    checked,
+                } if store_found.is_none() => {
+                    store_found = Some((pos, kind, addr, offset, val, checked));
+                }
+                ref op if is_pure_merge_op(op) => {}
+                _ => return None,
+            }
+        }
+        let (store_idx, store_kind, store_addr, store_off, store_val, store_checked) = store_found?;
+        Some(MergeArm {
+            guard_bb,
+            guard_check,
+            store_bb,
+            store_idx,
+            store_kind,
+            store_addr,
+            store_off,
+            store_val,
+            store_checked,
+            tail_bb: tail_bb.0,
+            tail_args,
+        })
+    };
+
+    let extract_strict_ltu =
+        |bb: &Block, want_target: u32| -> Option<(Val, Val, bool, BlockId, ValRange)> {
+            let Term::CmpBranch {
+                kind: CmpBranchKind::I32(cop),
+                a,
+                b,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } = bb.term
+            else {
+                return None;
+            };
+            if then_bb == else_bb {
+                return None;
+            }
+            if then_bb.0 == want_target {
+                match cop {
+                    CmpOp::LtU => Some((a, b, true, else_bb, else_args)),
+                    CmpOp::GtU => Some((b, a, true, else_bb, else_args)),
+                    _ => None,
+                }
+            } else if else_bb.0 == want_target {
+                match cop {
+                    CmpOp::GeU => Some((a, b, false, then_bb, then_args)),
+                    CmpOp::LeU => Some((b, a, false, then_bb, then_args)),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+
+    let mut changed = false;
+    let mut touched = vec![false; orig_blocks];
+    for hdr_usize in 1..orig_blocks {
+        if touched[hdr_usize] || !ir.blocks[hdr_usize].is_loop_header {
+            continue;
+        }
+        let hdr = hdr_usize as u32;
+        if ir.blocks[hdr_usize].params.len() < 3
+            || ir.blocks[hdr_usize].insts.len() > 16
+            || ir.blocks[hdr_usize].insts.iter().any(|ins| {
+                matches!(
+                    ins.op,
+                    Op::Call { .. }
+                        | Op::CallIndirect { .. }
+                        | Op::ExnAlloc { .. }
+                        | Op::SlpWideChain { .. }
+                )
+            })
+        {
+            continue;
+        }
+        if ir.blocks.len() + 4 > MAX_BLOCKS_PER_FN {
+            break;
+        }
+        let preds = dom.preds(hdr);
+        if preds.len() != 2 {
+            continue;
+        }
+        let (pre, raw_back) = if !dom.dominates(hdr, preds[0]) && dom.dominates(hdr, preds[1]) {
+            (preds[0], preds[1])
+        } else if !dom.dominates(hdr, preds[1]) && dom.dominates(hdr, preds[0]) {
+            (preds[1], preds[0])
+        } else {
+            continue;
+        };
+        // `raw_back` is either `tail2` directly, or an empty single-predecessor backedge latch
+        // (`tail2 -> raw_back [Jump(hdr, be_args)] -> hdr`).
+        let (tail2, opt_latch, tail2_target, latch_be_args) =
+            if ir.blocks[raw_back as usize].params.is_empty()
+                && ir.blocks[raw_back as usize].insts.is_empty()
+                && dom.preds(raw_back).len() == 1
+                && let Term::Jump { target, args } = ir.blocks[raw_back as usize].term
+                && target.0 == hdr
+            {
+                let t2 = dom.preds(raw_back)[0];
+                if t2 == hdr || t2 == raw_back {
+                    continue;
+                }
+                (t2, Some(raw_back), raw_back, Some(args))
+            } else {
+                (raw_back, None, hdr, None)
+            };
+        // Preheader must pass exactly one edge to `hdr`.
+        let init_args = match ir.blocks[pre as usize].term {
+            Term::Jump { target, args } if target.0 == hdr => args,
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } if then_bb != else_bb => {
+                if then_bb.0 == hdr {
+                    then_args
+                } else if else_bb.0 == hdr {
+                    else_args
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        let Term::CmpBranch {
+            kind:
+                cmp_kind @ (CmpBranchKind::I32(_)
+                | CmpBranchKind::I32Imm(..)
+                | CmpBranchKind::I64(_)
+                | CmpBranchKind::I64Imm(..)),
+            a: cmp_a,
+            b: cmp_b,
+            then_bb: arm_t_bb,
+            then_args: ta0,
+            else_bb: arm_e_bb,
+            else_args: ea0,
+        } = ir.blocks[hdr_usize].term
+        else {
+            continue;
+        };
+        if ta0.len != 0 || ea0.len != 0 || arm_t_bb == arm_e_bb {
+            continue;
+        }
+        let Some(arm_t) = match_arm(arm_t_bb.0, ir, &edge_in) else {
+            continue;
+        };
+        let Some(arm_e) = match_arm(arm_e_bb.0, ir, &edge_in) else {
+            continue;
+        };
+        if arm_t.guard_bb.is_none() && arm_e.guard_bb.is_none() {
+            continue;
+        }
+        if arm_t.tail_bb != arm_e.tail_bb
+            || arm_t.store_kind != arm_e.store_kind
+            || arm_t.store_addr != arm_e.store_addr
+            || arm_t.store_off != arm_e.store_off
+            || arm_t.store_checked != arm_e.store_checked
+            || !ir.val_tys[arm_t.store_val.0 as usize].is_gp()
+            || ir.val_tys[arm_t.store_val.0 as usize] != ir.val_tys[arm_e.store_val.0 as usize]
+            || def_block[arm_t.store_addr.0 as usize] == arm_t.store_bb
+            || def_block[arm_t.store_addr.0 as usize] == arm_e.store_bb
+        {
+            continue;
+        }
+        let tail1 = arm_t.tail_bb;
+        if (pre as usize) < orig_blocks && touched[pre as usize]
+            || (tail1 as usize) < orig_blocks && touched[tail1 as usize]
+            || (tail2 as usize) < orig_blocks && touched[tail2 as usize]
+        {
+            continue;
+        }
+        if tail1 == hdr
+            || tail1 == tail2
+            || dom.preds(tail1).len() != 2
+            || dom.preds(tail2) != [tail1]
+        {
+            continue;
+        }
+        if !ir.blocks[tail2 as usize].params.is_empty()
+            || ir.blocks[tail1 as usize].insts.len() > 6
+            || ir.blocks[tail2 as usize].insts.len() > 6
+            || !ir.blocks[tail1 as usize]
+                .insts
+                .iter()
+                .all(|ins| is_pure_merge_op(&ins.op))
+            || !ir.blocks[tail2 as usize]
+                .insts
+                .iter()
+                .all(|ins| is_pure_merge_op(&ins.op))
+        {
+            continue;
+        }
+        let Some((v1, lim1, t1_stay_on_then, raw_exit1, raw_exit1_args)) =
+            extract_strict_ltu(&ir.blocks[tail1 as usize], tail2)
+        else {
+            continue;
+        };
+        let Some((v2, lim2, t2_stay_on_then, raw_exit2, raw_exit2_args)) =
+            extract_strict_ltu(&ir.blocks[tail2 as usize], tail2_target)
+        else {
+            continue;
+        };
+        let t1_stay_args = match ir.blocks[tail1 as usize].term {
+            Term::CmpBranch {
+                then_args,
+                else_args,
+                ..
+            } => {
+                if t1_stay_on_then {
+                    then_args
+                } else {
+                    else_args
+                }
+            }
+            _ => unreachable!(),
+        };
+        if t1_stay_args.len != 0 {
+            continue;
+        }
+        let t2_stay_args = match ir.blocks[tail2 as usize].term {
+            Term::CmpBranch {
+                then_args,
+                else_args,
+                ..
+            } => {
+                if t2_stay_on_then {
+                    then_args
+                } else {
+                    else_args
+                }
+            }
+            _ => unreachable!(),
+        };
+        let be_args = if let Some(lba) = latch_be_args {
+            if t2_stay_args.len != 0 {
+                continue;
+            }
+            lba
+        } else {
+            t2_stay_args
+        };
+
+        // Collect all loop-internal blocks.
+        let mut loop_blocks: Vec<u32> = vec![hdr, arm_t.store_bb, arm_e.store_bb, tail1, tail2];
+        if let Some(gb) = arm_t.guard_bb {
+            loop_blocks.push(gb);
+        }
+        if let Some(gb) = arm_e.guard_bb {
+            loop_blocks.push(gb);
+        }
+        if let Some(lb) = opt_latch {
+            loop_blocks.push(lb);
+        }
+        // Limits `lim1` and `lim2` must strictly dominate `hdr` (loop-invariant).
+        if loop_blocks.contains(&def_block[lim1.0 as usize])
+            || loop_blocks.contains(&def_block[lim2.0 as usize])
+            || !dom.dominates(def_block[lim1.0 as usize], hdr)
+            || !dom.dominates(def_block[lim2.0 as usize], hdr)
+        {
+            continue;
+        }
+
+        // Match `(v1, lim1)` and `(v2, lim2)` to two distinct `hdr.params` (`p1_pos`, `p2_pos`).
+        let hdr_params = &ir.blocks[hdr_usize].params;
+        let be_slice = ir.pool_slice(be_args);
+        let init_slice = ir.pool_slice(init_args);
+        let Some(p1_pos) = be_slice.iter().position(|&v| v == v1) else {
+            continue;
+        };
+        let Some(p2_pos) = be_slice.iter().position(|&v| v == v2) else {
+            continue;
+        };
+        if p1_pos == p2_pos {
+            continue;
+        }
+        let p1 = hdr_params[p1_pos];
+        let p2 = hdr_params[p2_pos];
+        if ir.val_tys[p1.0 as usize] != Ty::I32 || ir.val_tys[p2.0 as usize] != Ty::I32 {
+            continue;
+        }
+        // `v1` and `v2` must be `tail1.params` updated exclusively as `(p1+1, p2)` on one arm
+        // and `(p1, p2+1)` on the other arm.
+        let tail1_params = &ir.blocks[tail1 as usize].params;
+        let Some(tp1) = tail1_params.iter().position(|&v| v == v1) else {
+            continue;
+        };
+        let Some(tp2) = tail1_params.iter().position(|&v| v == v2) else {
+            continue;
+        };
+        let ta_slice = ir.pool_slice(arm_t.tail_args);
+        let ea_slice = ir.pool_slice(arm_e.tail_args);
+        if ta_slice.len() != tail1_params.len() || ea_slice.len() != tail1_params.len() {
+            continue;
+        }
+        let is_inc1 = |v: Val, base: Val| -> bool {
+            matches!(
+                def_op[v.0 as usize],
+                Some(Op::I32BinImm(IntBinOp::Add, a, 1)) if a == base
+            )
+        };
+        let arm_update_ok = (is_inc1(ta_slice[tp1], p1)
+            && ta_slice[tp2] == p2
+            && ea_slice[tp1] == p1
+            && is_inc1(ea_slice[tp2], p2))
+            || (ta_slice[tp1] == p1
+                && is_inc1(ta_slice[tp2], p2)
+                && is_inc1(ea_slice[tp1], p1)
+                && ea_slice[tp2] == p2);
+        if !arm_update_ok {
+            continue;
+        }
+        // All differing `tail1` params must be GP with matching types.
+        if !ta_slice.iter().zip(ea_slice.iter()).all(|(&tv, &ev)| {
+            tv == ev
+                || (ir.val_tys[tv.0 as usize].is_gp()
+                    && ir.val_tys[tv.0 as usize] == ir.val_tys[ev.0 as usize])
+        }) {
+            continue;
+        }
+
+        // Find `pk` (`pk_pos`): `be[pk_pos] == pk + 1`, with either:
+        //   `(init[pk_pos] == init[p1_pos] && init[p2_pos] == lim1)` -> `(pi, pj, lim_i, lim_j) = (p1, p2, lim1, lim2)`
+        //   or symmetric `(p2, p1, lim2, lim1)`.
+        let mut merge_k_match: Option<(usize, Val, Val, Val, Val, Val)> = None;
+        for pk_pos in 0..hdr_params.len() {
+            if pk_pos == p1_pos || pk_pos == p2_pos {
+                continue;
+            }
+            let pk = hdr_params[pk_pos];
+            if ir.val_tys[pk.0 as usize] != Ty::I32 || !is_inc1(be_slice[pk_pos], pk) {
+                continue;
+            }
+            if init_slice[pk_pos] == init_slice[p1_pos] && init_slice[p2_pos] == lim1 {
+                merge_k_match = Some((
+                    pk_pos,
+                    pk,
+                    init_slice[p1_pos],
+                    lim1,
+                    init_slice[p2_pos],
+                    lim2,
+                ));
+                break;
+            }
+            if init_slice[pk_pos] == init_slice[p2_pos] && init_slice[p1_pos] == lim2 {
+                merge_k_match = Some((
+                    pk_pos,
+                    pk,
+                    init_slice[p2_pos],
+                    lim2,
+                    init_slice[p1_pos],
+                    lim1,
+                ));
+                break;
+            }
+        }
+        let Some((_pk_pos, pk, pi_init, lim_i, pj_init, lim_j)) = merge_k_match else {
+            continue;
+        };
+        let Some(u_bound) = static_u32_upper_bound(lim_j, &def_op) else {
+            continue;
+        };
+        if u_bound < 2 {
+            continue;
+        }
+        let max_k = u_bound - 2;
+        let guard_ok = |gc: Option<(Val, u32)>| -> bool {
+            match gc {
+                None => true,
+                Some((gv, max_allowed)) => gv == pk && max_k <= max_allowed,
+            }
+        };
+        if !guard_ok(arm_t.guard_check) || !guard_ok(arm_e.guard_check) {
+            continue;
+        }
+
+        // Resolve empty single-predecessor `Term::Jump` exit trampolines so `fast_hdr` / `fast_tail2`
+        // can jump directly to the real post-loop merge block without breaking SSA dominance.
+        let mut resolved_tramps: Vec<u32> = Vec::new();
+        let mut resolve_exit = |raw_bb: BlockId, raw_args: ValRange| -> (BlockId, Vec<Val>) {
+            let ri = raw_bb.0 as usize;
+            if raw_args.len == 0
+                && !loop_blocks.contains(&raw_bb.0)
+                && ri < edge_in.len()
+                && edge_in[ri] == 1
+                && ir.blocks[ri].params.is_empty()
+                && ir.blocks[ri].insts.is_empty()
+                && let Term::Jump { target, args } = ir.blocks[ri].term
+            {
+                resolved_tramps.push(raw_bb.0);
+                (target, ir.pool_slice(args).to_vec())
+            } else {
+                (raw_bb, ir.pool_slice(raw_args).to_vec())
+            }
+        };
+        let (real_exit1, exit1_args_orig) = resolve_exit(raw_exit1, raw_exit1_args);
+        let (real_exit2, exit2_args_orig) = resolve_exit(raw_exit2, raw_exit2_args);
+
+        // Verify NO block outside `loop_blocks ∪ resolved_tramps` (except cold trap blocks strictly
+        // dominated by a single-pred guard block inside the untouched slow loop, which remain
+        // exclusively dominated by `hdr -> guard_bb`) directly uses any `Val` defined inside
+        // `loop_blocks` (preserving strict SSA dominance across both fast and slow paths).
+        let mut has_direct_outside_use = false;
+        for (bi, bb) in ir.blocks.iter().enumerate() {
+            let b32 = bi as u32;
+            if loop_blocks.contains(&b32) || resolved_tramps.contains(&b32) {
+                continue;
+            }
+            if arm_t.guard_bb.is_some_and(|gb| dom.dominates(gb, b32))
+                || arm_e.guard_bb.is_some_and(|gb| dom.dominates(gb, b32))
+            {
+                continue;
+            }
+            for ins in &bb.insts {
+                ins.op.for_each_use(&ir.val_pool, |v| {
+                    let db = def_block.get(v.0 as usize).copied().unwrap_or(u32::MAX);
+                    if loop_blocks.contains(&db) {
+                        has_direct_outside_use = true;
+                    }
+                });
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                let db = def_block.get(v.0 as usize).copied().unwrap_or(u32::MAX);
+                if loop_blocks.contains(&db) {
+                    has_direct_outside_use = true;
+                }
+            });
+            if has_direct_outside_use {
+                break;
+            }
+        }
+        if has_direct_outside_use {
+            continue;
+        }
+
+        // Budget check before mutating IR.
+        let est_vals = hdr_params.len()
+            + ir.blocks[hdr_usize].insts.len()
+            + ir.blocks[arm_t.store_bb as usize].insts.len()
+            + ir.blocks[arm_e.store_bb as usize].insts.len()
+            + tail1_params.len()
+            + 2
+            + ir.blocks[tail1 as usize].insts.len()
+            + ir.blocks[tail2 as usize].insts.len();
+        if ir.val_tys.len() + est_vals > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len()
+                + init_slice.len() * 3
+                + be_slice.len()
+                + exit1_args_orig.len()
+                + exit2_args_orig.len()
+                > MAX_VAL_POOL_PER_FN
+        {
+            continue;
+        }
+
+        // ---- Build 2-block branchless fast merge loop + 2-block preheader guard ----
+        let init_vec = init_slice.to_vec();
+        let be_vec = be_slice.to_vec();
+        let ta_vec = ta_slice.to_vec();
+        let ea_vec = ea_slice.to_vec();
+        let hdr_params_orig = hdr_params.clone();
+        let tail1_params_orig = tail1_params.clone();
+        let hdr_insts_orig = ir.blocks[hdr_usize].insts.clone();
+        let arm_t_insts_orig = ir.blocks[arm_t.store_bb as usize].insts.clone();
+        let arm_e_insts_orig = ir.blocks[arm_e.store_bb as usize].insts.clone();
+        let tail1_insts_orig = ir.blocks[tail1 as usize].insts.clone();
+        let tail2_insts_orig = ir.blocks[tail2 as usize].insts.clone();
+        let tail1_term_orig = ir.blocks[tail1 as usize].term;
+
+        let mut vmap: HashMap<Val, Val> = fx_map_cap(est_vals);
+        let mut fast_hdr_params = Vec::with_capacity(hdr_params_orig.len());
+        for &hp in &hdr_params_orig {
+            let np = ir.push_val(ir.val_tys[hp.0 as usize]);
+            vmap.insert(hp, np);
+            fast_hdr_params.push(np);
+        }
+
+        let mut fast_hdr_insts: Vec<Inst> = Vec::with_capacity(est_vals);
+        // 1. Cloned `hdr` body (e.g. `src[i]` and `src[j]` loads).
+        for mut ins in hdr_insts_orig {
+            remap_op_uses_map(&mut ins.op, &vmap);
+            if let Some(old_r) = ins.res {
+                let nr = ir.push_val(ir.val_tys[old_r.0 as usize]);
+                vmap.insert(old_r, nr);
+                ins.res = Some(nr);
+            }
+            fast_hdr_insts.push(ins);
+        }
+        // 2. Cloned pure non-store instructions from both arms (e.g. `i+1` and `j+1`).
+        for (idx, mut ins) in arm_t_insts_orig.into_iter().enumerate() {
+            if idx == arm_t.store_idx {
+                continue;
+            }
+            remap_op_uses_map(&mut ins.op, &vmap);
+            if let Some(old_r) = ins.res {
+                let nr = ir.push_val(ir.val_tys[old_r.0 as usize]);
+                vmap.insert(old_r, nr);
+                ins.res = Some(nr);
+            }
+            fast_hdr_insts.push(ins);
+        }
+        for (idx, mut ins) in arm_e_insts_orig.into_iter().enumerate() {
+            if idx == arm_e.store_idx {
+                continue;
+            }
+            remap_op_uses_map(&mut ins.op, &vmap);
+            if let Some(old_r) = ins.res {
+                let nr = ir.push_val(ir.val_tys[old_r.0 as usize]);
+                vmap.insert(old_r, nr);
+                ins.res = Some(nr);
+            }
+            fast_hdr_insts.push(ins);
+        }
+
+        // 3. Emit ALL `CmpSelect` instructions back-to-back (store value + `tail1` params)
+        //    so x64 `live_flags` reuses ONE `cmp` across all `cmov`s!
+        let cmp_a_f = vmap.get(&cmp_a).copied().unwrap_or(cmp_a);
+        let cmp_b_f = vmap.get(&cmp_b).copied().unwrap_or(cmp_b);
+        let st_val_t = vmap
+            .get(&arm_t.store_val)
+            .copied()
+            .unwrap_or(arm_t.store_val);
+        let st_val_e = vmap
+            .get(&arm_e.store_val)
+            .copied()
+            .unwrap_or(arm_e.store_val);
+        let store_val_sel = if st_val_t == st_val_e {
+            st_val_t
+        } else {
+            let sv = ir.push_val(ir.val_tys[st_val_t.0 as usize]);
+            fast_hdr_insts.push(Inst {
+                res: Some(sv),
+                op: Op::CmpSelect {
+                    kind: cmp_kind,
+                    a: cmp_a_f,
+                    b: cmp_b_f,
+                    tv: st_val_t,
+                    fv: st_val_e,
+                },
+            });
+            sv
+        };
+        for (pi_t, &tp) in tail1_params_orig.iter().enumerate() {
+            let tv = vmap.get(&ta_vec[pi_t]).copied().unwrap_or(ta_vec[pi_t]);
+            let ev = vmap.get(&ea_vec[pi_t]).copied().unwrap_or(ea_vec[pi_t]);
+            let sel = if tv == ev {
+                tv
+            } else {
+                let sv = ir.push_val(ir.val_tys[tv.0 as usize]);
+                fast_hdr_insts.push(Inst {
+                    res: Some(sv),
+                    op: Op::CmpSelect {
+                        kind: cmp_kind,
+                        a: cmp_a_f,
+                        b: cmp_b_f,
+                        tv,
+                        fv: ev,
+                    },
+                });
+                sv
+            };
+            vmap.insert(tp, sel);
+        }
+        // 4. Single merged `Op::Store`.
+        let store_addr_f = vmap
+            .get(&arm_t.store_addr)
+            .copied()
+            .unwrap_or(arm_t.store_addr);
+        fast_hdr_insts.push(Inst {
+            res: None,
+            op: Op::Store {
+                kind: arm_t.store_kind,
+                addr: store_addr_f,
+                offset: arm_t.store_off,
+                val: store_val_sel,
+                checked: arm_t.store_checked,
+            },
+        });
+        // 5. Cloned `tail1` pure ops (e.g. `k1 = k + 1`).
+        for mut ins in tail1_insts_orig {
+            remap_op_uses_map(&mut ins.op, &vmap);
+            if let Some(old_r) = ins.res {
+                let nr = ir.push_val(ir.val_tys[old_r.0 as usize]);
+                vmap.insert(old_r, nr);
+                ins.res = Some(nr);
+            }
+            fast_hdr_insts.push(ins);
+        }
+        // 6. Cloned `tail2` pure ops (e.g. `dst_ptr1 = dst_ptr + 4`).
+        let mut fast_tail2_insts: Vec<Inst> = Vec::with_capacity(tail2_insts_orig.len());
+        for mut ins in tail2_insts_orig {
+            remap_op_uses_map(&mut ins.op, &vmap);
+            if let Some(old_r) = ins.res {
+                let nr = ir.push_val(ir.val_tys[old_r.0 as usize]);
+                vmap.insert(old_r, nr);
+                ins.res = Some(nr);
+            }
+            fast_tail2_insts.push(ins);
+        }
+
+        // Push all new `val_pool` ranges cleanly.
+        let empty_r = ValRange { start: 0, len: 0 };
+        let Ok(fast_init_r) = ir.push_pool(&init_vec) else {
+            continue;
+        };
+        let Ok(slow_init_r1) = ir.push_pool(&init_vec) else {
+            continue;
+        };
+        let Ok(slow_init_r2) = ir.push_pool(&init_vec) else {
+            continue;
+        };
+        let fast_be_vec: Vec<Val> = be_vec
+            .iter()
+            .map(|v| vmap.get(v).copied().unwrap_or(*v))
+            .collect();
+        let Ok(fast_be_r) = ir.push_pool(&fast_be_vec) else {
+            continue;
+        };
+        let fast_exit1_vec: Vec<Val> = exit1_args_orig
+            .iter()
+            .map(|v| vmap.get(v).copied().unwrap_or(*v))
+            .collect();
+        let Ok(fast_exit1_r) = ir.push_pool(&fast_exit1_vec) else {
+            continue;
+        };
+        let fast_exit2_vec: Vec<Val> = exit2_args_orig
+            .iter()
+            .map(|v| vmap.get(v).copied().unwrap_or(*v))
+            .collect();
+        let Ok(fast_exit2_r) = ir.push_pool(&fast_exit2_vec) else {
+            continue;
+        };
+
+        let guard1_id = BlockId(ir.blocks.len() as u32);
+        let guard2_id = BlockId(ir.blocks.len() as u32 + 1);
+        let fast_hdr_id = BlockId(ir.blocks.len() as u32 + 2);
+        let fast_tail2_id = BlockId(ir.blocks.len() as u32 + 3);
+
+        let Term::CmpBranch {
+            kind: t1_kind,
+            a: t1_a,
+            b: t1_b,
+            ..
+        } = tail1_term_orig
+        else {
+            unreachable!();
+        };
+        let t1_af = vmap.get(&t1_a).copied().unwrap_or(t1_a);
+        let t1_bf = vmap.get(&t1_b).copied().unwrap_or(t1_b);
+        let fast_hdr_term = if t1_stay_on_then {
+            Term::CmpBranch {
+                kind: t1_kind,
+                a: t1_af,
+                b: t1_bf,
+                then_bb: fast_tail2_id,
+                then_args: empty_r,
+                else_bb: real_exit1,
+                else_args: fast_exit1_r,
+            }
+        } else {
+            Term::CmpBranch {
+                kind: t1_kind,
+                a: t1_af,
+                b: t1_bf,
+                then_bb: real_exit1,
+                then_args: fast_exit1_r,
+                else_bb: fast_tail2_id,
+                else_args: empty_r,
+            }
+        };
+
+        // Normalize `fast_tail2` to put the hot loop backedge (`v2 <u lim2`) on `then_bb` so
+        // x64 lowering emits a single macro-fused `cmp + jb fast_hdr` with no trailing `jmp`.
+        let v2_f = vmap.get(&v2).copied().unwrap_or(v2);
+        let lim2_f = vmap.get(&lim2).copied().unwrap_or(lim2);
+        let fast_tail2_term = Term::CmpBranch {
+            kind: CmpBranchKind::I32(CmpOp::LtU),
+            a: v2_f,
+            b: lim2_f,
+            then_bb: fast_hdr_id,
+            then_args: fast_be_r,
+            else_bb: real_exit2,
+            else_args: fast_exit2_r,
+        };
+
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: Vec::new(),
+            term: Term::CmpBranch {
+                kind: CmpBranchKind::I32(CmpOp::LtU),
+                a: pi_init,
+                b: lim_i,
+                then_bb: guard2_id,
+                then_args: empty_r,
+                else_bb: BlockId(hdr),
+                else_args: slow_init_r1,
+            },
+            preds: 1,
+            is_loop_header: false,
+        });
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: Vec::new(),
+            term: Term::CmpBranch {
+                kind: CmpBranchKind::I32(CmpOp::LtU),
+                a: pj_init,
+                b: lim_j,
+                then_bb: fast_hdr_id,
+                then_args: fast_init_r,
+                else_bb: BlockId(hdr),
+                else_args: slow_init_r2,
+            },
+            preds: 1,
+            is_loop_header: false,
+        });
+        ir.blocks.push(Block {
+            params: fast_hdr_params,
+            insts: fast_hdr_insts,
+            term: fast_hdr_term,
+            preds: 2,
+            is_loop_header: true,
+        });
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: fast_tail2_insts,
+            term: fast_tail2_term,
+            preds: 1,
+            is_loop_header: false,
+        });
+
+        // Redirect `pre`'s edge targeting `hdr` to `guard1_id`.
+        match &mut ir.blocks[pre as usize].term {
+            Term::Jump { target, args } if target.0 == hdr => {
+                *target = guard1_id;
+                *args = empty_r;
+            }
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                if then_bb.0 == hdr {
+                    *then_bb = guard1_id;
+                    *then_args = empty_r;
+                } else if else_bb.0 == hdr {
+                    *else_bb = guard1_id;
+                    *else_args = empty_r;
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        if (pre as usize) < orig_blocks {
+            touched[pre as usize] = true;
+        }
+        for &lb in &loop_blocks {
+            if (lb as usize) < orig_blocks {
+                touched[lb as usize] = true;
+            }
+        }
+        changed = true;
+    }
+    changed
 }
 
 /// Splits `BranchIf(Or(c1, c2), then, else)` and `BranchIf(And(c1, c2), then, else)` where `c1`
@@ -13993,6 +15437,16 @@ pub fn optimize_func_stage2_with_options(
         {
             let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
         }
+        // Re-run trivial & paired-store diamond if-conversion when GVN folded branches
+        // (e.g. eliminated inner bounds checks exposing branchless `CmpSelect` + `Store` diamonds).
+        if folded_branch && if_convert_trivial_diamonds(ir) {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+            if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+            }
+            has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+        }
         // When post-inlining constant reduction turned a trapping `Div`/`Rem` into a pure `BinImm`,
         // convert exposed Euclidean wrap diamonds (`if r < 0 { r + 2^k } else { r }` -> `v & (2^k - 1)`)
         // and re-run LICM so invariant wrapped indices hoist out of inner loops (zero cost when no div reduced).
@@ -14051,6 +15505,13 @@ pub fn optimize_func_stage2_with_options(
                 }
             }
             if rotate_counted_loops(ir, &dom, budget)? {
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                    let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+            }
+            if if_convert_two_ptr_merge_loops(ir, &dom) {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
                 if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {

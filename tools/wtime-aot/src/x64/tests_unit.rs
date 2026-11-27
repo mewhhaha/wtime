@@ -7929,3 +7929,815 @@ fn x64_hill2_relational_bce_inclusive_dyn_bce_and_unroll_4x() {
         }
     }
 }
+
+#[test]
+fn x64_scalar_gap_bce_merge_ifconv_and_flags_parity() {
+    // End-to-end IR + native oracle parity test covering all four scalar-gap codegen upgrades:
+    //   0. `join_bound_fold`: loop-header inductive `u32` bound propagation eliminates dominated
+    //      `lo >=u 64` trap check when entry `lo = 0` and backedge checks `lo_next <u 64`.
+    //   1. `join_bound_unbounded`: negative soundness case — dynamic entry `lo = arg` MUST keep
+    //      its `lo >=u 64` trap check and trap on `arg >= 64`.
+    //   2. `paired_store_diamond`: 2-arm diamond with identical-address GP `Op::Store` collapses
+    //      to a single block + single `Op::Store` + `CmpSelect`, preserving OOB trap parity.
+    //   3. `merge_two_ptr`: 2-pointer merge loop with per-arm `k >u 63` slice bounds check
+    //      versions into a branchless `CmpSelect` + single `Op::Store` fast loop while preserving
+    //      exact slow-path trapping on adversarial/wrapping inputs (`arg >= 64`).
+    //   4. `int_zero_flags`: `add`/`sub`/`and`/`or`/`xor` ZF reuse (`LiveFlags::IntZero`), plus
+    //      non-reuse checks for `imul` and signed-overflowing ordered comparisons (`<s 0`, `>s 0`).
+    //   5. `macro_fuse_remat`: `k += 2; k != 100` loop with float recurrences and exit-only
+    //      `ConstI32(100)` exercising `will_reuse_int_flags`, `add_phi_peer`, and remat.
+    //   6. `spill_forward`: 16 live GP values forcing stack spills with immediate back-to-back
+    //      consumers exercising `just_spilled` zero-gap forwarding.
+
+    let push_i32 = |v: &mut Vec<u8>, mut val: i32| {
+        v.push(0x41);
+        loop {
+            let byte = (val & 0x7f) as u8;
+            val >>= 7;
+            let done = (val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0);
+            if done {
+                v.push(byte);
+                break;
+            }
+            v.push(byte | 0x80);
+        }
+    };
+
+    // 0: join_bound_fold(seed: i32) -> i32
+    // Locals: 0=seed, 1=lo, 2=acc, 3=lo_next, 4=cond
+    let mut f_join_bound_fold = Vec::new();
+    push_i32(&mut f_join_bound_fold, 0);
+    f_join_bound_fold.extend_from_slice(&[0x21, 1, 0x20, 0, 0x21, 2, 0x03, 0x40, 0x20, 1]);
+    push_i32(&mut f_join_bound_fold, 64);
+    f_join_bound_fold.extend_from_slice(&[
+        0x4f, 0x04, 0x40, 0x00, 0x0b, // if lo >=u 64 { unreachable }
+        0x20, 1, 0x41, 8, 0x6a, 0x21, 3, // lo_next = lo + 8
+        0x20, 3,
+    ]);
+    push_i32(&mut f_join_bound_fold, 64);
+    f_join_bound_fold.extend_from_slice(&[
+        0x49, 0x21, 4, // cond = (lo_next <u 64) defined at loop top!
+        0x20, 2, 0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x6a, 0x21, 2, // acc += load(lo*4)
+        0x20, 3, 0x21, 1, 0x20, 4, 0x0d, 0, 0x0b, 0x20, 2,
+    ]);
+
+    // 1: join_bound_unbounded(start: i32) -> i32
+    // Same as 0, except `lo = start` (unbounded!) so `lo >=u 64` MUST NOT be eliminated!
+    let mut f_join_bound_unbounded = vec![0x20, 0, 0x21, 1, 0x41, 7, 0x21, 2, 0x03, 0x40, 0x20, 1];
+    push_i32(&mut f_join_bound_unbounded, 64);
+    f_join_bound_unbounded.extend_from_slice(&[
+        0x4f, 0x04, 0x40, 0x00, 0x0b, 0x20, 1, 0x41, 8, 0x6a, 0x21, 3, 0x20, 3,
+    ]);
+    push_i32(&mut f_join_bound_unbounded, 64);
+    f_join_bound_unbounded.extend_from_slice(&[
+        0x49, 0x21, 4, 0x20, 2, 0x20, 1, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x6a, 0x21, 2, 0x20, 3,
+        0x21, 1, 0x20, 4, 0x0d, 0, 0x0b, 0x20, 2,
+    ]);
+
+    // 2: paired_store_diamond(x: i32) -> i32
+    // Locals: 0=x, 1=addr, 2=r
+    let mut f_paired_store_diamond = vec![
+        0x20, 0, 0x41, 2, 0x74, 0x21, 1, // addr = x << 2
+        0x20, 0, 0x41, 10, 0x4d, // x <=u 10
+        0x04, 0x40, 0x20, 1, 0x20, 0, 0x41, 7, 0x6a, 0x36, 0x02, 0x00, // store(addr, x+7)
+        0x20, 0, 0x41, 1, 0x6a, 0x21, 2, // r = x + 1
+        0x05, 0x20, 1, 0x20, 0,
+    ];
+    push_i32(&mut f_paired_store_diamond, 99);
+    f_paired_store_diamond.extend_from_slice(&[
+        0x73, 0x36, 0x02, 0x00, // store(addr, x ^ 99)
+        0x20, 0, 0x41, 2, 0x6a, 0x21, 2, // r = x + 2
+        0x0b, 0x20, 1, 0x28, 0x02, 0x00, 0x20, 2, 0x73,
+    ]);
+
+    // 3: merge_two_ptr(arg: i32) -> i32
+    // Locals: 0=arg, 1=lo, 2=mid, 3=hi, 4=i, 5=j, 6=k, 7=dst_ptr, 8=a, 9=b, 10=hash
+    let mut f_merge_two_ptr = vec![
+        0x41, 0, 0x21, 4, 0x03, 0x40, 0x20, 4, 0x41, 2, 0x74, 0x20, 4, 0x41, 31, 0x71, 0x41, 3,
+        0x6c, 0x20, 4, 0x41, 5, 0x76, 0x6a, 0x36, 0x02, 0x00, 0x20, 4, 0x41, 1, 0x6a, 0x22, 4,
+    ];
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[0x49, 0x0d, 0, 0x0b, 0x20, 0]);
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[
+        0x49, 0x04, 0x40, // if arg <u 64
+        0x41, 0, 0x21, 1, // lo = 0
+        0x20, 0, 0x41, 31, 0x71, 0x41, 1, 0x6a, 0x21, 2, // mid = (arg&31)+1
+        0x20, 2, 0x41, 1, 0x74, 0x21, 3,    // raw_hi = mid * 2
+        0x05, // else: adversarial lo = arg (>= 64), mid = 32, raw_hi = 64
+        0x20, 0, 0x21, 1, 0x41, 32, 0x21, 2,
+    ]);
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[0x21, 3, 0x0b]);
+    // hi = min_u(raw_hi, 64)
+    f_merge_two_ptr.extend_from_slice(&[0x20, 3]);
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[0x20, 3]);
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[0x49, 0x1b, 0x21, 3]);
+    // mid = min_u(mid, 64)
+    f_merge_two_ptr.extend_from_slice(&[0x20, 2]);
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[0x20, 2]);
+    push_i32(&mut f_merge_two_ptr, 64);
+    f_merge_two_ptr.extend_from_slice(&[0x49, 0x1b, 0x21, 2]);
+    // i = lo, j = mid, k = lo, dst_ptr = 1024 + (lo << 2)
+    f_merge_two_ptr.extend_from_slice(&[
+        0x20, 1, 0x21, 4, 0x20, 2, 0x21, 5, 0x20, 1, 0x21, 6, 0x20, 1, 0x41, 2, 0x74,
+    ]);
+    push_i32(&mut f_merge_two_ptr, 1024);
+    f_merge_two_ptr.extend_from_slice(&[
+        0x6a, 0x21, 7, 0x02, 0x40, // block $exit
+        // Pre-loop bypass (`arg == 999`) so `$exit` merges `(i, j, k)` as block parameters,
+        // matching Rust/LLVM rotated `while i < mid && j < hi` loops while still letting
+        // adversarial `arg = 64, 100` enter the slow fallback path!
+        0x20, 0,
+    ]);
+    push_i32(&mut f_merge_two_ptr, 999);
+    f_merge_two_ptr.extend_from_slice(&[
+        0x46, 0x0d, 0, // if arg == 999 { br $exit }
+        0x03, 0x40, // loop $hdr
+        0x20, 4, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x21, 8, // a = src[i]
+        0x20, 5, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x21, 9, // b = src[j]
+        0x20, 8, 0x20, 9, 0x4d, // a <=u b
+        0x04, 0x40, // arm_t
+        0x20, 6, 0x41, 63, 0x4b, 0x04, 0x40, 0x00, 0x0b, // if k >u 63 { unreachable }
+        0x20, 7, 0x20, 8, 0x36, 0x02, 0x00, 0x20, 4, 0x41, 1, 0x6a, 0x21, 4, 0x05, // arm_e
+        0x20, 6, 0x41, 63, 0x4b, 0x04, 0x40, 0x00, 0x0b, // if k >u 63 { unreachable }
+        0x20, 7, 0x20, 9, 0x36, 0x02, 0x00, 0x20, 5, 0x41, 1, 0x6a, 0x21, 5,
+        0x0b, // tail1: k += 1; if i >=u mid { br $exit }
+        0x20, 6, 0x41, 1, 0x6a, 0x21, 6, 0x20, 4, 0x20, 2, 0x4f, 0x0d, 1,
+        // tail2: dst_ptr += 4; if j >=u hi { br $exit }; br $hdr
+        0x20, 7, 0x41, 4, 0x6a, 0x21, 7, 0x20, 5, 0x20, 3, 0x4f, 0x0d, 1, 0x0c, 0, 0x0b,
+        0x0b, // end loop, end block $exit
+        // Hash dst[0..k] + (i<<16) ^ (j<<8) ^ k
+        0x20, 4, 0x41, 16, 0x74, 0x20, 5, 0x41, 8, 0x74, 0x73, 0x20, 6, 0x73, 0x21, 10, 0x41, 0,
+        0x21, 4, 0x02, 0x40, 0x20, 6, 0x45, 0x0d, 0, 0x03, 0x40, 0x20, 10, 0x41, 31, 0x6c, 0x20, 4,
+        0x41, 2, 0x74,
+    ]);
+    push_i32(&mut f_merge_two_ptr, 1024);
+    f_merge_two_ptr.extend_from_slice(&[
+        0x6a, 0x28, 0x02, 0x00, 0x73, 0x21, 10, 0x20, 4, 0x41, 1, 0x6a, 0x22, 4, 0x20, 6, 0x49,
+        0x0d, 0, 0x0b, 0x0b, 0x20, 10,
+    ]);
+
+    // 4: int_zero_flags(x: i32) -> i32
+    // Locals: 0=x, 1=cnt, 2=acc, 3=t
+    let mut f_int_zero_flags = vec![
+        0x20, 0, 0x41, 15, 0x71, 0x41, 1, 0x6a, 0x21, 1, // cnt = (x & 15) + 1
+        0x20, 0, 0x21, 2, // acc = x
+        0x03, 0x40, // loop: acc = (acc ^ cnt) + 17; cnt = cnt + (-1); br_if cnt
+        0x20, 2, 0x20, 1, 0x73, 0x41, 17, 0x6a, 0x21, 2, 0x20, 1,
+    ];
+    push_i32(&mut f_int_zero_flags, -1);
+    f_int_zero_flags.extend_from_slice(&[
+        0x6a, 0x22, 1, 0x0d, 0, 0x0b,
+        // t = x - 5; if t <s 0 { acc ^= 0x111 } else { acc ^= 0x222 }
+        0x20, 0, 0x41, 5, 0x6b, 0x22, 3, 0x41, 0, 0x48, 0x04, 0x40, 0x20, 2,
+    ]);
+    push_i32(&mut f_int_zero_flags, 0x111);
+    f_int_zero_flags.extend_from_slice(&[0x73, 0x21, 2, 0x05, 0x20, 2]);
+    push_i32(&mut f_int_zero_flags, 0x222);
+    f_int_zero_flags.extend_from_slice(&[
+        0x73, 0x21, 2, 0x0b, // t = x * 3; if t == 0 { acc ^= 0x333 }
+        0x20, 0, 0x41, 3, 0x6c, 0x22, 3, 0x45, 0x04, 0x40, 0x20, 2,
+    ]);
+    push_i32(&mut f_int_zero_flags, 0x333);
+    f_int_zero_flags.extend_from_slice(&[
+        0x73, 0x21, 2, 0x0b,
+        // t = x & 0x55; if t == 0 { acc ^= 0x444 }; if t <s 0 { acc ^= 0x555 }
+        0x20, 0,
+    ]);
+    push_i32(&mut f_int_zero_flags, 0x55);
+    f_int_zero_flags.extend_from_slice(&[0x71, 0x22, 3, 0x45, 0x04, 0x40, 0x20, 2]);
+    push_i32(&mut f_int_zero_flags, 0x444);
+    f_int_zero_flags.extend_from_slice(&[
+        0x73, 0x21, 2, 0x0b, 0x20, 3, 0x41, 0, 0x48, 0x04, 0x40, 0x20, 2,
+    ]);
+    push_i32(&mut f_int_zero_flags, 0x555);
+    f_int_zero_flags.extend_from_slice(&[0x73, 0x21, 2, 0x0b, 0x20, 2]);
+
+    // 5: macro_fuse_remat(n: i32) -> i32
+    // Locals: 0=n(i32), 1=k(i32), 2=zr(f32), 3=zi(f32), 4=tmp(f32), 5=c(f32)
+    let mut f_macro_fuse_remat = vec![
+        0x20, 0, 0x41, 15, 0x71, 0xb3, // f32.convert_i32_u(n & 15)
+        0x43, 0xcd, 0xcc, 0x4c, 0x3d, // 0.05f32
+        0x94, 0x22, 5, 0x21, 2, // c = ..., zr = c
+        0x43, 0x00, 0x00, 0x80, 0x3e, 0x21, 3, // zi = 0.25f32
+        0x41, 0, 0x21, 1, // k = 0
+        0x02, 0x40, // block $done
+        0x03, 0x40, // loop
+        0x20, 2, 0x20, 2, 0x94, 0x20, 3, 0x20, 3, 0x94, 0x92, 0x43, 0x00, 0x00, 0x80, 0x40,
+        0x5e, // zr*zr + zi*zi > 4.0
+        0x0d, 1, 0x20, 2, 0x20, 2, 0x94, 0x20, 3, 0x20, 3, 0x94, 0x93, 0x20, 5, 0x92, 0x21, 4,
+        0x20, 2, 0x20, 2, 0x92, 0x20, 3, 0x94, 0x20, 5, 0x92, 0x21, 3, 0x20, 4, 0x21, 2, 0x20, 1,
+        0x41, 2, 0x6a, 0x22, 1, // k += 2
+    ];
+    push_i32(&mut f_macro_fuse_remat, 100);
+    f_macro_fuse_remat.extend_from_slice(&[
+        0x47, 0x0d, 0, 0x0b, 0x0b, // if k != 100 { br 0 }
+        0x20, 1, 0x20, 2, 0xbc, 0x6a, // return k + reinterpret(zr)
+    ]);
+
+    // 6: spill_forward(x: i32) -> i32
+    // Locals: 0=x, 1..=16=v0..v15
+    let mut f_spill_forward = Vec::new();
+    for i in 0..16u8 {
+        f_spill_forward.extend_from_slice(&[0x20, 0]);
+        push_i32(&mut f_spill_forward, ((i as i32) + 1) * 131);
+        f_spill_forward.extend_from_slice(&[0x6a, 0x21, i + 1]);
+    }
+    f_spill_forward.extend_from_slice(&[0x20, 16]);
+    for i in (1..=15u8).rev() {
+        f_spill_forward.extend_from_slice(&[0x20, i, 0x73, 0x41, 3, 0x6c]);
+    }
+    f_spill_forward.extend_from_slice(&[0x20, 2, 0x20, 15, 0x20, 1, 0x20, 16, 0x49, 0x1b, 0x6a]);
+
+    let mut seed_bytes = Vec::with_capacity(1024);
+    for k in 0u32..256 {
+        seed_bytes.extend_from_slice(&(k.wrapping_mul(1664525) ^ 0x5a5a_1234).to_le_bytes());
+    }
+    let mut data_sec = vec![1, 0, 0x41, 0, 0x0b];
+    leb_u32(&mut data_sec, seed_bytes.len() as u32);
+    data_sec.extend_from_slice(&seed_bytes);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0, 0, 0, 0]),
+        section(5, &[1, 0x00, 1]), // 1 page = 64 KiB
+        export_sec(&[
+            ("join_bound_fold", 0, 0),
+            ("join_bound_unbounded", 0, 1),
+            ("paired_store_diamond", 0, 2),
+            ("merge_two_ptr", 0, 3),
+            ("int_zero_flags", 0, 4),
+            ("macro_fuse_remat", 0, 5),
+            ("spill_forward", 0, 6),
+        ]),
+        code_sec(&[
+            enc_body(&[(4, 0x7f)], &f_join_bound_fold),
+            enc_body(&[(4, 0x7f)], &f_join_bound_unbounded),
+            enc_body(&[(2, 0x7f)], &f_paired_store_diamond),
+            enc_body(&[(10, 0x7f)], &f_merge_two_ptr),
+            enc_body(&[(3, 0x7f)], &f_int_zero_flags),
+            enc_body(&[(1, 0x7f), (4, 0x7d)], &f_macro_fuse_remat),
+            enc_body(&[(16, 0x7f)], &f_spill_forward),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    // 1. Verify Stage 2 IR invariants for each upgrade!
+    let validated =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits())
+            .expect("valid");
+    let xmod = admit_x64_module(validated.decoded()).unwrap();
+    let mut irs: Vec<IrFunc> = (0..7)
+        .map(|bi| lower_wasm_to_ir(validated.decoded(), &xmod, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &xmod, None).unwrap();
+    let mut scratch = super::opt::Stage2Scratch::default();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2_with_options(ir, &xmod, &eff, false, None, &mut scratch)
+            .unwrap();
+        verify_ir(ir, &xmod).unwrap();
+    }
+    assert!(
+        !irs[0]
+            .blocks
+            .iter()
+            .any(|bb| matches!(bb.term, Term::Unreachable)),
+        "join_bound_fold must eliminate lo >=u 64 trap via refine_join_param_bounds"
+    );
+    assert!(
+        irs[1]
+            .blocks
+            .iter()
+            .any(|bb| matches!(bb.term, Term::Unreachable)),
+        "join_bound_unbounded must NOT eliminate lo >=u 64 when entry lo is unbounded"
+    );
+    assert_eq!(
+        irs[2].blocks.len(),
+        1,
+        "paired_store_diamond must if-convert to a single basic block"
+    );
+    let diamond_stores = irs[2].blocks[0]
+        .insts
+        .iter()
+        .filter(|ins| matches!(ins.op, Op::Store { .. }))
+        .count();
+    let diamond_sels = irs[2].blocks[0]
+        .insts
+        .iter()
+        .filter(|ins| matches!(ins.op, Op::CmpSelect { .. }))
+        .count();
+    assert_eq!(diamond_stores, 1, "paired_store_diamond must emit 1 Store");
+    assert!(
+        diamond_sels >= 2,
+        "paired_store_diamond must emit CmpSelect for store val + merged r"
+    );
+    let has_branchless_merge_hdr = irs[3].blocks.iter().any(|bb| {
+        bb.is_loop_header
+            && bb
+                .insts
+                .iter()
+                .filter(|ins| matches!(ins.op, Op::CmpSelect { .. }))
+                .count()
+                >= 2
+            && bb
+                .insts
+                .iter()
+                .any(|ins| matches!(ins.op, Op::Store { .. }))
+    });
+    assert!(
+        has_branchless_merge_hdr,
+        "merge_two_ptr must version into a branchless CmpSelect + single Store fast loop"
+    );
+
+    // 2. Compile for x64-v2, x64-v3, x64-v4, --guard-pages, --spectre-mitigations, and AArch64!
+    let so_v2 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v3 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+                has_avx2: true,
+                has_avx512: false,
+            },
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_v4 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+                has_avx2: true,
+                has_avx512: true,
+            },
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_gp = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            guard_pages: true,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_spectre = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            spectre_mitigations: true,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let _a64 = crate::aarch64::compile_wasm_to_aarch64(&wasm, &Default::default()).unwrap();
+
+    // 3. Verify bit-exact parity (including trap codes!) against safe-Rust `wtime-runtime`!
+    let calls: Vec<(&str, u32)> = vec![
+        ("join_bound_fold", 0),
+        ("join_bound_fold", 0x1234_5678),
+        ("join_bound_unbounded", 0),
+        ("join_bound_unbounded", 56),
+        ("join_bound_unbounded", 64),          // MUST trap Unreachable!
+        ("join_bound_unbounded", 0xffff_ffff), // MUST trap Unreachable!
+        ("paired_store_diamond", 0),
+        ("paired_store_diamond", 10),
+        ("paired_store_diamond", 11),
+        ("paired_store_diamond", 16383), // exact last valid word
+        ("paired_store_diamond", 16384), // MUST trap OOB!
+        ("paired_store_diamond", 0xffff_ffff), // MUST trap OOB!
+        ("merge_two_ptr", 0),            // width=1 (fast path)
+        ("merge_two_ptr", 3),            // width=4 (fast path)
+        ("merge_two_ptr", 15),           // width=16 (fast path)
+        ("merge_two_ptr", 31),           // width=32 (fast path, hi=64 exact!)
+        ("merge_two_ptr", 64),           // adversarial slow path -> MUST trap Unreachable!
+        ("merge_two_ptr", 100),          // adversarial slow path -> MUST trap Unreachable!
+        ("int_zero_flags", 0),
+        ("int_zero_flags", 1),
+        ("int_zero_flags", 5),
+        ("int_zero_flags", 0x55),
+        ("int_zero_flags", 0xaa),
+        ("int_zero_flags", i32::MIN as u32), // i32::MIN - 5 overflows signed -> MUST NOT mis-reuse ZF!
+        ("int_zero_flags", i32::MAX as u32),
+        ("int_zero_flags", 0xffff_ffff),
+        ("macro_fuse_remat", 0),
+        ("macro_fuse_remat", 3),
+        ("macro_fuse_remat", 12),
+        ("macro_fuse_remat", 15),
+        ("spill_forward", 0),
+        ("spill_forward", 1),
+        ("spill_forward", 0x7fff_ffff),
+        ("spill_forward", 0x8000_0000),
+        ("spill_forward", 0xdead_beef),
+    ];
+
+    let cfg = wtime_runtime::Config {
+        features: x64_validate_features(),
+        limits: x64_validate_limits(),
+    };
+    let engine = wtime_runtime::Engine::new(cfg).unwrap();
+    let rt_mod = engine.compile(&wasm).unwrap();
+    let mut store = wtime_runtime::Store::new(&engine);
+    let inst = wtime_runtime::Linker::new(&engine)
+        .instantiate(&mut store, &rt_mod)
+        .unwrap();
+    let mut expected: Vec<Result<u32, u8>> = Vec::with_capacity(calls.len());
+    for &(name, arg) in &calls {
+        let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+            panic!()
+        };
+        match store.invoke(f, &[wtime_runtime::Value::I32(arg as i32)]) {
+            Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                wtime_runtime::Value::I32(v) => expected.push(Ok(v as u32)),
+                other => panic!("{other:?}"),
+            },
+            Err(e) => {
+                let code = match e.trap_code {
+                    Some(wtime_types::TrapCode::Unreachable) => 1u8,
+                    Some(wtime_types::TrapCode::MemoryOutOfBounds) => 2u8,
+                    other => panic!("{name}({arg:#x}) unexpected trap {other:?}"),
+                };
+                expected.push(Err(code));
+            }
+            other => panic!("{name}({arg:#x}) unexpected outcome {other:?}"),
+        }
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_v3, so_v4, so_gp, so_spectre, expected);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-scalar-gap");
+        let mut script = String::new();
+        for &(name, arg) in &calls {
+            script.push_str(&format!("call {name} {arg:x}\n"));
+        }
+        for (name, bytes, req_avx2, req_avx512) in [
+            ("v2.so", &so_v2, false, false),
+            ("v3.so", &so_v3, true, false),
+            ("v4.so", &so_v4, true, true),
+            ("gp.so", &so_gp, false, false),
+            ("spectre.so", &so_spectre, false, false),
+        ] {
+            if req_avx512
+                && !(std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512dq"))
+            {
+                continue;
+            }
+            if req_avx2
+                && !(std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma"))
+            {
+                continue;
+            }
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{name} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"), "{name}: {stdout}");
+            for (idx, (&(cname, arg), &exp)) in calls.iter().zip(&expected).enumerate() {
+                let line = lines.next().expect("missing CALL line");
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                assert_eq!(parts[0], "CALL", "{name} #{idx}: {line}");
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(v) => assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(v)),
+                        "{name} {cname}({arg:#x}) mismatch"
+                    ),
+                    Err(et) => {
+                        assert_ne!(rc, 0, "{name} {cname}({arg:#x}) must trap");
+                        assert_eq!(trap, et, "{name} {cname}({arg:#x}) wrong trap");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn x64_scalar_gap_audit_regressions() {
+    // Targeted regressions for the three soundness/stability audit findings:
+    //  1. `bad_select_bound`: `if x <u 10 { x } else { 100_000 }` with `x <=u 15` MUST NOT be
+    //     treated as `min_u(x, 10) <=u x` by `unwrap_min_u_src` (must trap OOB for x >= 10!).
+    //  2. `merge_hdr_call_indirect`: 2-pointer merge loop whose `hdr` contains `Op::CallIndirect`
+    //     MUST be skipped cleanly by `if_convert_two_ptr_merge_loops` (no debug panic / SSA corruption).
+    //  3. `chained_two_merge_loops`: two consecutive 2-pointer merge loops where loop 1 exits into
+    //     loop 2's preheader MUST not panic on `edge_in[ri]` and must preserve bit-exact parity.
+    let push_i32 = |v: &mut Vec<u8>, mut val: i32| {
+        v.push(0x41);
+        loop {
+            let byte = (val & 0x7f) as u8;
+            val >>= 7;
+            let done = (val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0);
+            if done {
+                v.push(byte);
+                break;
+            }
+            v.push(byte | 0x80);
+        }
+    };
+
+    // Func 0: cmp_le_u(a: i32, b: i32) -> i32 (table[0] for CallIndirect)
+    let f_cmp_le_u = vec![0x20, 0, 0x20, 1, 0x4d];
+
+    // Func 1: bad_select_bound(arg: i32) -> i32
+    // x = arg & 15 (so x <=u 15);
+    // p = if (arg & 16) != 0 { 0 } else { if x <u 10 { x } else { 100_000 } };
+    // return load32(p)  <-- at join block, `p` MUST NOT inherit `x <=u 15`!
+    // Locals: 0=arg, 1=x, 2=p
+    let mut f_bad_select = vec![
+        0x20, 0, 0x41, 15, 0x71, 0x21, 1, // x = arg & 15
+        0x20, 0, 0x41, 16, 0x71, // (arg & 16) != 0
+        0x04, 0x40, 0x41, 0, 0x21, 2,    // p = 0
+        0x05, // else: p = select(x, 100_000, x <u 10)
+        0x20, 1,
+    ];
+    push_i32(&mut f_bad_select, 100_000);
+    f_bad_select.extend_from_slice(&[
+        0x20, 1, 0x41, 10, 0x49, 0x1b, 0x21, 2,    // p = (x <u 10) ? x : 100_000
+        0x0b, // join block: load32(p) (1 page = 65536 B, so p=100_000 MUST trap OOB!)
+        0x20, 2, 0x28, 0x02, 0x00,
+    ]);
+
+    // Helper to build a single 2-pointer merge loop body (`hdr` using either direct `a <=u b` or `call_indirect 0`).
+    let append_merge_loop = |code: &mut Vec<u8>, use_call_indirect: bool, dst_base: i32| {
+        // Assumes locals: 0=arg, 1=lo, 2=mid, 3=hi, 4=i, 5=j, 6=k, 7=dst_ptr, 8=a, 9=b
+        code.extend_from_slice(&[
+            0x20, 1, 0x21, 4, 0x20, 2, 0x21, 5, 0x20, 1, 0x21, 6, 0x20, 1, 0x41, 2, 0x74,
+        ]);
+        push_i32(code, dst_base);
+        code.extend_from_slice(&[0x6a, 0x21, 7, 0x02, 0x40, 0x20, 0]);
+        push_i32(code, 999);
+        code.extend_from_slice(&[
+            0x46, 0x0d, 0, // if arg == 999 { br $exit }
+            0x03, 0x40, // loop $hdr
+            0x20, 4, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x21, 8, // a = src[i]
+            0x20, 5, 0x41, 2, 0x74, 0x28, 0x02, 0x00, 0x21, 9, // b = src[j]
+            0x20, 8, 0x20, 9,
+        ]);
+        if use_call_indirect {
+            // call_indirect type 0 (i32, i32) -> i32, table 0, idx = 0
+            code.extend_from_slice(&[0x41, 0, 0x11, 0, 0]);
+        } else {
+            code.push(0x4d); // a <=u b
+        }
+        code.extend_from_slice(&[
+            0x04, 0x40, // arm_t
+            0x20, 6, 0x41, 63, 0x4b, 0x04, 0x40, 0x00, 0x0b, // if k >u 63 { unreachable }
+            0x20, 7, 0x20, 8, 0x36, 0x02, 0x00, 0x20, 4, 0x41, 1, 0x6a, 0x21, 4,
+            0x05, // arm_e
+            0x20, 6, 0x41, 63, 0x4b, 0x04, 0x40, 0x00, 0x0b, // if k >u 63 { unreachable }
+            0x20, 7, 0x20, 9, 0x36, 0x02, 0x00, 0x20, 5, 0x41, 1, 0x6a, 0x21, 5,
+            0x0b, // tail1: k += 1; if i >=u mid { br $exit }
+            0x20, 6, 0x41, 1, 0x6a, 0x21, 6, 0x20, 4, 0x20, 2, 0x4f, 0x0d, 1,
+            // tail2: dst_ptr += 4; if j >=u hi { br $exit }; br $hdr
+            0x20, 7, 0x41, 4, 0x6a, 0x21, 7, 0x20, 5, 0x20, 3, 0x4f, 0x0d, 1, 0x0c, 0, 0x0b, 0x0b,
+        ]);
+    };
+
+    let build_merge_setup = |code: &mut Vec<u8>| {
+        code.extend_from_slice(&[
+            0x41, 0, 0x21, 4, 0x03, 0x40, 0x20, 4, 0x41, 2, 0x74, 0x20, 4, 0x41, 15, 0x71, 0x41, 5,
+            0x6c, 0x36, 0x02, 0x00, 0x20, 4, 0x41, 1, 0x6a, 0x22, 4,
+        ]);
+        push_i32(code, 64);
+        code.extend_from_slice(&[
+            0x49, 0x0d, 0, 0x0b, 0x41, 0, 0x21, 1, 0x20, 0, 0x41, 15, 0x71, 0x41, 1, 0x6a, 0x21, 2,
+            0x20, 2, 0x41, 1, 0x74, 0x21, 3,
+        ]);
+        // Clamp hi = min_u(hi, 64), mid = min_u(mid, 64)
+        code.extend_from_slice(&[0x20, 3]);
+        push_i32(code, 64);
+        code.extend_from_slice(&[0x20, 3]);
+        push_i32(code, 64);
+        code.extend_from_slice(&[0x49, 0x1b, 0x21, 3, 0x20, 2]);
+        push_i32(code, 64);
+        code.extend_from_slice(&[0x20, 2]);
+        push_i32(code, 64);
+        code.extend_from_slice(&[0x49, 0x1b, 0x21, 2]);
+    };
+
+    // Func 2: merge_hdr_call_indirect(arg: i32) -> i32
+    let mut f_merge_hdr_call = Vec::new();
+    build_merge_setup(&mut f_merge_hdr_call);
+    append_merge_loop(&mut f_merge_hdr_call, true, 1024);
+    f_merge_hdr_call.extend_from_slice(&[0x20, 6, 0x20, 4, 0x41, 8, 0x74, 0x73]);
+
+    // Func 3: chained_two_merge_loops(arg: i32) -> i32
+    // Two back-to-back merge loops in the SAME function (loop 1 exits directly into loop 2 setup!).
+    let mut f_chained_merges = Vec::new();
+    build_merge_setup(&mut f_chained_merges);
+    append_merge_loop(&mut f_chained_merges, false, 1024);
+    f_chained_merges.extend_from_slice(&[0x20, 6, 0x21, 10]); // save k1
+    append_merge_loop(&mut f_chained_merges, false, 2048);
+    f_chained_merges.extend_from_slice(&[0x20, 10, 0x20, 6, 0x6a, 0x20, 4, 0x73]);
+
+    let mut data_sec = vec![1, 0, 0x41, 0, 0x0b];
+    let mut seed_bytes = Vec::with_capacity(256);
+    for k in 0u32..64 {
+        seed_bytes.extend_from_slice(&(k.wrapping_mul(97) ^ 0x1234_5678).to_le_bytes());
+    }
+    leb_u32(&mut data_sec, seed_bytes.len() as u32);
+    data_sec.extend_from_slice(&seed_bytes);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f, 0x7f], &[0x7f]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 1, 1, 1]),
+        section(4, &[1, 0x70, 0x00, 1]), // table 0: funcref min=1
+        section(5, &[1, 0x00, 1]),       // memory: 1 page
+        export_sec(&[
+            ("bad_select_bound", 0, 1),
+            ("merge_hdr_call_indirect", 0, 2),
+            ("chained_two_merge_loops", 0, 3),
+        ]),
+        section(9, &[1, 0, 0x41, 0, 0x0b, 1, 0]), // elem: table[0] = func 0
+        code_sec(&[
+            enc_body(&[], &f_cmp_le_u),
+            enc_body(&[(2, 0x7f)], &f_bad_select),
+            enc_body(&[(9, 0x7f)], &f_merge_hdr_call),
+            enc_body(&[(10, 0x7f)], &f_chained_merges),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    // Verify Stage 2 IR passes `verify_ir` cleanly for all functions (no panic, valid SSA).
+    let validated =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits())
+            .expect("valid");
+    let xmod = admit_x64_module(validated.decoded()).unwrap();
+    let mut irs: Vec<IrFunc> = (0..4)
+        .map(|bi| lower_wasm_to_ir(validated.decoded(), &xmod, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &xmod, None).unwrap();
+    let mut scratch = super::opt::Stage2Scratch::default();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2_with_options(ir, &xmod, &eff, false, None, &mut scratch)
+            .unwrap();
+        verify_ir(ir, &xmod).unwrap();
+    }
+
+    let so_v2 = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let so_gp = compile_wasm_to_x64_so(
+        &wasm,
+        &X64CompileOptions {
+            isa: TargetIsa::default(),
+            guard_pages: true,
+            verify: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let calls: Vec<(&str, u32)> = vec![
+        ("bad_select_bound", 0),
+        ("bad_select_bound", 8),
+        ("bad_select_bound", 10), // p = 100_000 -> MUST trap OOB!
+        ("bad_select_bound", 15), // p = 100_000 -> MUST trap OOB!
+        ("bad_select_bound", 16), // takes `p = 0` arm -> succeeds!
+        ("merge_hdr_call_indirect", 0),
+        ("merge_hdr_call_indirect", 7),
+        ("merge_hdr_call_indirect", 15),
+        ("chained_two_merge_loops", 0),
+        ("chained_two_merge_loops", 7),
+        ("chained_two_merge_loops", 15),
+    ];
+
+    let cfg = wtime_runtime::Config {
+        features: x64_validate_features(),
+        limits: x64_validate_limits(),
+    };
+    let engine = wtime_runtime::Engine::new(cfg).unwrap();
+    let rt_mod = engine.compile(&wasm).unwrap();
+    let mut store = wtime_runtime::Store::new(&engine);
+    let inst = wtime_runtime::Linker::new(&engine)
+        .instantiate(&mut store, &rt_mod)
+        .unwrap();
+    let mut expected: Vec<Result<u32, u8>> = Vec::with_capacity(calls.len());
+    for &(name, arg) in &calls {
+        let wtime_runtime::External::Func(f) = inst.export(&store, name).unwrap() else {
+            panic!()
+        };
+        match store.invoke(f, &[wtime_runtime::Value::I32(arg as i32)]) {
+            Ok(wtime_runtime::RunOutcome::Returned(vals)) => match vals[0] {
+                wtime_runtime::Value::I32(v) => expected.push(Ok(v as u32)),
+                other => panic!("{other:?}"),
+            },
+            Err(e) => {
+                let code = match e.trap_code {
+                    Some(wtime_types::TrapCode::Unreachable) => 1u8,
+                    Some(wtime_types::TrapCode::MemoryOutOfBounds) => 2u8,
+                    other => panic!("{name}({arg:#x}) unexpected trap {other:?}"),
+                };
+                expected.push(Err(code));
+            }
+            other => panic!("{name}({arg:#x}) unexpected outcome {other:?}"),
+        }
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = (so_v2, so_gp, expected);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-scalar-gap-audit");
+        let mut script = String::new();
+        for &(name, arg) in &calls {
+            script.push_str(&format!("call {name} {arg:x}\n"));
+        }
+        for (name, bytes) in [("v2.so", &so_v2), ("gp.so", &so_gp)] {
+            let p = root.0.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&p)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{name} failed: {out:?}");
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            let mut lines = stdout.lines();
+            assert_eq!(lines.next(), Some("NEW_OK"), "{name}: {stdout}");
+            for (idx, (&(cname, arg), &exp)) in calls.iter().zip(&expected).enumerate() {
+                let line = lines.next().expect("missing CALL line");
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                assert_eq!(parts[0], "CALL", "{name} #{idx}: {line}");
+                let rc: i32 = parts[1].parse().unwrap();
+                let res = u64::from_str_radix(parts[2], 16).unwrap();
+                let trap: u8 = parts[3].parse().unwrap();
+                match exp {
+                    Ok(v) => assert_eq!(
+                        (rc, trap, res),
+                        (0, 0, u64::from(v)),
+                        "{name} {cname}({arg:#x}) mismatch"
+                    ),
+                    Err(et) => {
+                        assert_ne!(rc, 0, "{name} {cname}({arg:#x}) must trap");
+                        assert_eq!(trap, et, "{name} {cname}({arg:#x}) wrong trap");
+                    }
+                }
+            }
+        }
+    }
+}
