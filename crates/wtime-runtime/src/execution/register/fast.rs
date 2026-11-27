@@ -950,6 +950,16 @@ enum RegOp {
         b: u16,
         mask_idx: u16,
     },
+    /// Unboxed `i8x16.splat` directly on `[u64; 2]` slots.
+    V128Splat8 {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `i16x8.splat` directly on `[u64; 2]` slots.
+    V128Splat16 {
+        dst: u16,
+        src: u16,
+    },
     /// Unboxed `i32x4.splat` / `f32x4.splat` directly on `[u64; 2]` slots.
     V128Splat32 {
         dst: u16,
@@ -996,6 +1006,57 @@ enum RegOp {
         b: u16,
         c: u16,
     },
+    /// Unboxed `v128.any_true`.
+    V128AnyTrue {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `i8x16.bitmask`.
+    I8x16Bitmask {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `i32x4.bitmask`.
+    I32x4Bitmask {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `i32x4.extract_lane` / `f32x4.extract_lane` (zero-extended to `u64`).
+    SimdExtract32 {
+        dst: u16,
+        src: u16,
+        lane: u8,
+    },
+    /// Unboxed `i8x16.add`.
+    I8x16Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i8x16.sub`.
+    I8x16Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i16x8.add`.
+    I16x8Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i16x8.sub`.
+    I16x8Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i16x8.mul`.
+    I16x8Mul {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
     /// Unboxed `i32x4.add`.
     I32x4Add {
         dst: u16,
@@ -1014,6 +1075,20 @@ enum RegOp {
         a: u16,
         b: u16,
     },
+    /// Unboxed `i32x4.{eq,ne,lt_s,lt_u,gt_s,gt_u,le_s,le_u,ge_s,ge_u}` (`cmp` in `0..=9`).
+    I32x4Cmp {
+        cmp: u8,
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `i32x4.{shl,shr_s,shr_u}` (`kind` in `0..=2`, shift count masked `& 31`).
+    I32x4Shift {
+        kind: u8,
+        dst: u16,
+        a: u16,
+        sh: u16,
+    },
     /// Unboxed `i64x2.add`.
     I64x2Add {
         dst: u16,
@@ -1026,6 +1101,12 @@ enum RegOp {
         a: u16,
         b: u16,
     },
+    /// Unboxed `i64x2.mul`.
+    I64x2Mul {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
     /// Unboxed `f32x4.abs`.
     F32x4Abs {
         dst: u16,
@@ -1033,6 +1114,11 @@ enum RegOp {
     },
     /// Unboxed `f32x4.neg`.
     F32x4Neg {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f32x4.sqrt`.
+    F32x4Sqrt {
         dst: u16,
         src: u16,
     },
@@ -1098,6 +1184,45 @@ enum RegOp {
         a: u16,
         b: u16,
     },
+    /// Unboxed `f32x4.relaxed_madd`: `a * b + c` (fused single-rounding `mul_add`).
+    F32x4RelaxedMadd {
+        dst: u16,
+        a: u16,
+        b: u16,
+        c: u16,
+    },
+    /// Unboxed `f32x4.relaxed_nmadd`: `(-a) * b + c` (fused single-rounding `mul_add`).
+    F32x4RelaxedNmadd {
+        dst: u16,
+        a: u16,
+        b: u16,
+        c: u16,
+    },
+    /// Unboxed `f32x4.convert_i32x4_s`.
+    F32x4ConvertI32x4S {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f32x4.convert_i32x4_u`.
+    F32x4ConvertI32x4U {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f64x2.abs`.
+    F64x2Abs {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f64x2.neg`.
+    F64x2Neg {
+        dst: u16,
+        src: u16,
+    },
+    /// Unboxed `f64x2.sqrt`.
+    F64x2Sqrt {
+        dst: u16,
+        src: u16,
+    },
     /// Unboxed `f64x2.add`.
     F64x2Add {
         dst: u16,
@@ -1121,6 +1246,58 @@ enum RegOp {
         dst: u16,
         a: u16,
         b: u16,
+    },
+    /// Unboxed `f64x2.min` (and `f64x2.relaxed_min`) with canonical Wasm NaN & `-0.0` semantics.
+    F64x2Min {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.max` (and `f64x2.relaxed_max`) with canonical Wasm NaN & `+0.0` semantics.
+    F64x2Max {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.pmin`.
+    F64x2PMin {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.pmax`.
+    F64x2PMax {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.{eq,ne,lt,gt,le,ge}` (`cmp` in `0..=5`).
+    F64x2Cmp {
+        cmp: u8,
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Fused unboxed `dst = acc + (a * b)` on 2×`f64` with exact two-rounding IEEE-754 semantics.
+    F64x2MulAdd {
+        dst: u16,
+        acc: u16,
+        a: u16,
+        b: u16,
+    },
+    /// Unboxed `f64x2.relaxed_madd`: `a * b + c` (fused single-rounding `mul_add`).
+    F64x2RelaxedMadd {
+        dst: u16,
+        a: u16,
+        b: u16,
+        c: u16,
+    },
+    /// Unboxed `f64x2.relaxed_nmadd`: `(-a) * b + c` (fused single-rounding `mul_add`).
+    F64x2RelaxedNmadd {
+        dst: u16,
+        a: u16,
+        b: u16,
+        c: u16,
     },
     SimdUnary {
         op: u16,
@@ -5784,11 +5961,23 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     let (dst, consumed, is_tee) =
                         try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, out_ty);
                     let rop = match insn.opcode {
+                        0xfd0f => RegOp::V128Splat8 { dst, src: ra },
+                        0xfd10 => RegOp::V128Splat16 { dst, src: ra },
                         0xfd11 | 0xfd13 => RegOp::V128Splat32 { dst, src: ra },
                         0xfd12 | 0xfd14 => RegOp::V128Splat64 { dst, src: ra },
+                        0xfd1b | 0xfd1f if lane < 4 => RegOp::SimdExtract32 { dst, src: ra, lane },
                         0xfd4d => RegOp::V128Not { dst, src: ra },
+                        0xfd53 => RegOp::V128AnyTrue { dst, src: ra },
+                        0xfd64 => RegOp::I8x16Bitmask { dst, src: ra },
+                        0xfda4 => RegOp::I32x4Bitmask { dst, src: ra },
                         0xfde0 => RegOp::F32x4Abs { dst, src: ra },
                         0xfde1 => RegOp::F32x4Neg { dst, src: ra },
+                        0xfde3 => RegOp::F32x4Sqrt { dst, src: ra },
+                        0xfdec => RegOp::F64x2Abs { dst, src: ra },
+                        0xfded => RegOp::F64x2Neg { dst, src: ra },
+                        0xfdef => RegOp::F64x2Sqrt { dst, src: ra },
+                        0xfdfa => RegOp::F32x4ConvertI32x4S { dst, src: ra },
+                        0xfdfb => RegOp::F32x4ConvertI32x4U { dst, src: ra },
                         _ => RegOp::SimdUnary {
                             op: insn.opcode,
                             dst,
@@ -5854,10 +6043,40 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             a: ma,
                             b: mb,
                         });
+                    } else if insn.opcode == 0xfdf0
+                        && ops.len() > cur_block_start_ip
+                        && let Some(RegOp::F64x2Mul {
+                            dst: mtmp,
+                            a: ma,
+                            b: mb,
+                        }) = ops.last().copied()
+                        && mtmp >= local_reg_slots
+                        && rb == mtmp
+                        && ra != mtmp
+                    {
+                        ops.pop();
+                        ops.push(RegOp::F64x2MulAdd {
+                            dst,
+                            acc: ra,
+                            a: ma,
+                            b: mb,
+                        });
                     } else {
                         let rop = match insn.opcode {
+                            0xfd37..=0xfd40 => RegOp::I32x4Cmp {
+                                cmp: (insn.opcode - 0xfd37) as u8,
+                                dst,
+                                a: ra,
+                                b: rb,
+                            },
                             0xfd41..=0xfd46 => RegOp::F32x4Cmp {
                                 cmp: (insn.opcode - 0xfd41) as u8,
+                                dst,
+                                a: ra,
+                                b: rb,
+                            },
+                            0xfd47..=0xfd4c => RegOp::F64x2Cmp {
+                                cmp: (insn.opcode - 0xfd47) as u8,
                                 dst,
                                 a: ra,
                                 b: rb,
@@ -5866,11 +6085,23 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             0xfd4f => RegOp::V128AndNot { dst, a: ra, b: rb },
                             0xfd50 => RegOp::V128Or { dst, a: ra, b: rb },
                             0xfd51 => RegOp::V128Xor { dst, a: ra, b: rb },
+                            0xfd6e => RegOp::I8x16Add { dst, a: ra, b: rb },
+                            0xfd71 => RegOp::I8x16Sub { dst, a: ra, b: rb },
+                            0xfd8e => RegOp::I16x8Add { dst, a: ra, b: rb },
+                            0xfd91 => RegOp::I16x8Sub { dst, a: ra, b: rb },
+                            0xfd95 => RegOp::I16x8Mul { dst, a: ra, b: rb },
+                            0xfdab..=0xfdad => RegOp::I32x4Shift {
+                                kind: (insn.opcode - 0xfdab) as u8,
+                                dst,
+                                a: ra,
+                                sh: rb,
+                            },
                             0xfdae => RegOp::I32x4Add { dst, a: ra, b: rb },
                             0xfdb1 => RegOp::I32x4Sub { dst, a: ra, b: rb },
                             0xfdb5 => RegOp::I32x4Mul { dst, a: ra, b: rb },
                             0xfdce => RegOp::I64x2Add { dst, a: ra, b: rb },
                             0xfdd1 => RegOp::I64x2Sub { dst, a: ra, b: rb },
+                            0xfdd5 => RegOp::I64x2Mul { dst, a: ra, b: rb },
                             0xfde4 => RegOp::F32x4Add { dst, a: ra, b: rb },
                             0xfde5 => RegOp::F32x4Sub { dst, a: ra, b: rb },
                             0xfde6 => RegOp::F32x4Mul { dst, a: ra, b: rb },
@@ -5883,6 +6114,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             0xfdf1 => RegOp::F64x2Sub { dst, a: ra, b: rb },
                             0xfdf2 => RegOp::F64x2Mul { dst, a: ra, b: rb },
                             0xfdf3 => RegOp::F64x2Div { dst, a: ra, b: rb },
+                            0xfdf4 | 0xfa0f => RegOp::F64x2Min { dst, a: ra, b: rb },
+                            0xfdf5 | 0xfa10 => RegOp::F64x2Max { dst, a: ra, b: rb },
+                            0xfdf6 => RegOp::F64x2PMin { dst, a: ra, b: rb },
+                            0xfdf7 => RegOp::F64x2PMax { dst, a: ra, b: rb },
                             _ => RegOp::SimdBinary {
                                 op: insn.opcode,
                                 dst,
@@ -5922,6 +6157,30 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     );
                     let rop = match insn.opcode {
                         0xfd52 | 0xfa09..=0xfa0c => RegOp::V128Bitselect {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            c: rc,
+                        },
+                        0xfa05 => RegOp::F32x4RelaxedMadd {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            c: rc,
+                        },
+                        0xfa06 => RegOp::F32x4RelaxedNmadd {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            c: rc,
+                        },
+                        0xfa07 => RegOp::F64x2RelaxedMadd {
+                            dst,
+                            a: ra,
+                            b: rb,
+                            c: rc,
+                        },
+                        0xfa08 => RegOp::F64x2RelaxedNmadd {
                             dst,
                             a: ra,
                             b: rb,
@@ -6139,6 +6398,72 @@ fn write_v128_words(regs: &mut [u64], slot: u16, words: [u64; 2]) {
     let pair = &mut regs[s..s + 2];
     pair[0] = words[0];
     pair[1] = words[1];
+}
+
+#[inline(always)]
+fn read_u16x8(regs: &[u64], slot: u16) -> [u16; 8] {
+    let [lo, hi] = read_v128_words(regs, slot);
+    [
+        lo as u16,
+        (lo >> 16) as u16,
+        (lo >> 32) as u16,
+        (lo >> 48) as u16,
+        hi as u16,
+        (hi >> 16) as u16,
+        (hi >> 32) as u16,
+        (hi >> 48) as u16,
+    ]
+}
+
+#[inline(always)]
+fn write_u16x8(regs: &mut [u64], slot: u16, v: [u16; 8]) {
+    write_v128_words(
+        regs,
+        slot,
+        [
+            u64::from(v[0])
+                | (u64::from(v[1]) << 16)
+                | (u64::from(v[2]) << 32)
+                | (u64::from(v[3]) << 48),
+            u64::from(v[4])
+                | (u64::from(v[5]) << 16)
+                | (u64::from(v[6]) << 32)
+                | (u64::from(v[7]) << 48),
+        ],
+    );
+}
+
+#[inline(always)]
+fn swar_add_u8x8(x: u64, y: u64) -> u64 {
+    const LO7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    const HI1: u64 = 0x8080_8080_8080_8080;
+    (x & LO7).wrapping_add(y & LO7) ^ ((x ^ y) & HI1)
+}
+
+#[inline(always)]
+fn swar_sub_u8x8(x: u64, y: u64) -> u64 {
+    const LO7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    const HI1: u64 = 0x8080_8080_8080_8080;
+    (x | HI1).wrapping_sub(y & LO7) ^ (!(x ^ y) & HI1)
+}
+
+#[inline(always)]
+fn swar_add_u16x4(x: u64, y: u64) -> u64 {
+    const LO15: u64 = 0x7fff_7fff_7fff_7fff;
+    const HI1: u64 = 0x8000_8000_8000_8000;
+    (x & LO15).wrapping_add(y & LO15) ^ ((x ^ y) & HI1)
+}
+
+#[inline(always)]
+fn swar_sub_u16x4(x: u64, y: u64) -> u64 {
+    const LO15: u64 = 0x7fff_7fff_7fff_7fff;
+    const HI1: u64 = 0x8000_8000_8000_8000;
+    (x | HI1).wrapping_sub(y & LO15) ^ (!(x ^ y) & HI1)
+}
+
+#[inline(always)]
+fn swar_bitmask_u8x8(w: u64) -> u64 {
+    (((w & 0x8080_8080_8080_8080) >> 7).wrapping_mul(0x0102_0408_1020_4080)) >> 56
 }
 
 #[inline(always)]
@@ -8020,19 +8345,6 @@ fn exec_cold_simd(
             src,
             lane,
         } => match sop {
-            0xfd0f => {
-                let w = u64::from_ne_bytes([regs[src as usize] as u8; 8]);
-                write_v128_words(regs, dst, [w, w]);
-            }
-            0xfd10 => {
-                let v = regs[src as usize] as u16 as u64;
-                let w = v | (v << 16) | (v << 32) | (v << 48);
-                write_v128_words(regs, dst, [w, w]);
-            }
-            0xfd1b | 0xfd1f => {
-                let word = regs[src as usize + (lane as usize >> 1)];
-                regs[dst as usize] = ((word >> ((lane & 1) * 32)) as u32) as u64;
-            }
             0xfd1d | 0xfd21 => {
                 regs[dst as usize] = regs[src as usize + lane as usize];
             }
@@ -10171,6 +10483,15 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     }
                     write_v128(regs, dst, out);
                 }
+                RegOp::V128Splat8 { dst, src } => {
+                    let w = u64::from_le_bytes([regs[src as usize] as u8; 8]);
+                    write_v128_words(regs, dst, [w, w]);
+                }
+                RegOp::V128Splat16 { dst, src } => {
+                    let v = u64::from(regs[src as usize] as u16);
+                    let w = v | (v << 16) | (v << 32) | (v << 48);
+                    write_v128_words(regs, dst, [w, w]);
+                }
                 RegOp::V128Splat32 { dst, src } => {
                     let x = regs[src as usize] as u32 as u64;
                     let w = x | (x << 32);
@@ -10212,6 +10533,77 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         regs,
                         dst,
                         [(alo & clo) | (blo & !clo), (ahi & chi) | (bhi & !chi)],
+                    );
+                }
+                RegOp::V128AnyTrue { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    regs[dst as usize] = u64::from((lo | hi) != 0);
+                }
+                RegOp::I8x16Bitmask { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    regs[dst as usize] = swar_bitmask_u8x8(lo) | (swar_bitmask_u8x8(hi) << 8);
+                }
+                RegOp::I32x4Bitmask { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    regs[dst as usize] =
+                        ((lo >> 31) & 1) | ((lo >> 62) & 2) | ((hi >> 29) & 4) | ((hi >> 60) & 8);
+                }
+                RegOp::SimdExtract32 { dst, src, lane } => {
+                    let word = regs[src as usize + (lane as usize >> 1)];
+                    regs[dst as usize] = u64::from((word >> ((lane & 1) * 32)) as u32);
+                }
+                RegOp::I8x16Add { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [swar_add_u8x8(alo, blo), swar_add_u8x8(ahi, bhi)],
+                    );
+                }
+                RegOp::I8x16Sub { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [swar_sub_u8x8(alo, blo), swar_sub_u8x8(ahi, bhi)],
+                    );
+                }
+                RegOp::I16x8Add { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [swar_add_u16x4(alo, blo), swar_add_u16x4(ahi, bhi)],
+                    );
+                }
+                RegOp::I16x8Sub { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [swar_sub_u16x4(alo, blo), swar_sub_u16x4(ahi, bhi)],
+                    );
+                }
+                RegOp::I16x8Mul { dst, a, b } => {
+                    let va = read_u16x8(regs, a);
+                    let vb = read_u16x8(regs, b);
+                    write_u16x8(
+                        regs,
+                        dst,
+                        [
+                            va[0].wrapping_mul(vb[0]),
+                            va[1].wrapping_mul(vb[1]),
+                            va[2].wrapping_mul(vb[2]),
+                            va[3].wrapping_mul(vb[3]),
+                            va[4].wrapping_mul(vb[4]),
+                            va[5].wrapping_mul(vb[5]),
+                            va[6].wrapping_mul(vb[6]),
+                            va[7].wrapping_mul(vb[7]),
+                        ],
                     );
                 }
                 RegOp::I32x4Add { dst, a, b } => {
@@ -10256,6 +10648,48 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         ],
                     );
                 }
+                RegOp::I32x4Cmp { cmp, dst, a, b } => {
+                    let va = read_u32x4(regs, a);
+                    let vb = read_u32x4(regs, b);
+                    let lane = |x: u32, y: u32| -> u32 {
+                        if eval_i32_cmp(cmp, x, y) { u32::MAX } else { 0 }
+                    };
+                    write_u32x4(
+                        regs,
+                        dst,
+                        [
+                            lane(va[0], vb[0]),
+                            lane(va[1], vb[1]),
+                            lane(va[2], vb[2]),
+                            lane(va[3], vb[3]),
+                        ],
+                    );
+                }
+                RegOp::I32x4Shift { kind, dst, a, sh } => {
+                    let va = read_u32x4(regs, a);
+                    let s = (regs[sh as usize] as u32) & 31;
+                    let out = match kind {
+                        0 => [
+                            va[0].wrapping_shl(s),
+                            va[1].wrapping_shl(s),
+                            va[2].wrapping_shl(s),
+                            va[3].wrapping_shl(s),
+                        ],
+                        1 => [
+                            (va[0] as i32).wrapping_shr(s) as u32,
+                            (va[1] as i32).wrapping_shr(s) as u32,
+                            (va[2] as i32).wrapping_shr(s) as u32,
+                            (va[3] as i32).wrapping_shr(s) as u32,
+                        ],
+                        _ => [
+                            va[0].wrapping_shr(s),
+                            va[1].wrapping_shr(s),
+                            va[2].wrapping_shr(s),
+                            va[3].wrapping_shr(s),
+                        ],
+                    };
+                    write_u32x4(regs, dst, out);
+                }
                 RegOp::I64x2Add { dst, a, b } => {
                     let [alo, ahi] = read_v128_words(regs, a);
                     let [blo, bhi] = read_v128_words(regs, b);
@@ -10265,6 +10699,11 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     let [alo, ahi] = read_v128_words(regs, a);
                     let [blo, bhi] = read_v128_words(regs, b);
                     write_v128_words(regs, dst, [alo.wrapping_sub(blo), ahi.wrapping_sub(bhi)]);
+                }
+                RegOp::I64x2Mul { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(regs, dst, [alo.wrapping_mul(blo), ahi.wrapping_mul(bhi)]);
                 }
                 RegOp::F32x4Abs { dst, src } => {
                     let [lo, hi] = read_v128_words(regs, src);
@@ -10280,6 +10719,14 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         regs,
                         dst,
                         [lo ^ 0x8000_0000_8000_0000, hi ^ 0x8000_0000_8000_0000],
+                    );
+                }
+                RegOp::F32x4Sqrt { dst, src } => {
+                    let va = read_f32x4(regs, src);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [va[0].sqrt(), va[1].sqrt(), va[2].sqrt(), va[3].sqrt()],
                     );
                 }
                 RegOp::F32x4Add { dst, a, b } => {
@@ -10438,6 +10885,84 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         ],
                     );
                 }
+                RegOp::F32x4RelaxedMadd { dst, a, b, c } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    let vc = read_f32x4(regs, c);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [
+                            va[0].mul_add(vb[0], vc[0]),
+                            va[1].mul_add(vb[1], vc[1]),
+                            va[2].mul_add(vb[2], vc[2]),
+                            va[3].mul_add(vb[3], vc[3]),
+                        ],
+                    );
+                }
+                RegOp::F32x4RelaxedNmadd { dst, a, b, c } => {
+                    let va = read_f32x4(regs, a);
+                    let vb = read_f32x4(regs, b);
+                    let vc = read_f32x4(regs, c);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [
+                            (-va[0]).mul_add(vb[0], vc[0]),
+                            (-va[1]).mul_add(vb[1], vc[1]),
+                            (-va[2]).mul_add(vb[2], vc[2]),
+                            (-va[3]).mul_add(vb[3], vc[3]),
+                        ],
+                    );
+                }
+                RegOp::F32x4ConvertI32x4S { dst, src } => {
+                    let va = read_u32x4(regs, src);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [
+                            (va[0] as i32) as f32,
+                            (va[1] as i32) as f32,
+                            (va[2] as i32) as f32,
+                            (va[3] as i32) as f32,
+                        ],
+                    );
+                }
+                RegOp::F32x4ConvertI32x4U { dst, src } => {
+                    let va = read_u32x4(regs, src);
+                    write_f32x4(
+                        regs,
+                        dst,
+                        [va[0] as f32, va[1] as f32, va[2] as f32, va[3] as f32],
+                    );
+                }
+                RegOp::F64x2Abs { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [lo & 0x7fff_ffff_ffff_ffff, hi & 0x7fff_ffff_ffff_ffff],
+                    );
+                }
+                RegOp::F64x2Neg { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [lo ^ 0x8000_0000_0000_0000, hi ^ 0x8000_0000_0000_0000],
+                    );
+                }
+                RegOp::F64x2Sqrt { dst, src } => {
+                    let [lo, hi] = read_v128_words(regs, src);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            f64::from_bits(lo).sqrt().to_bits(),
+                            f64::from_bits(hi).sqrt().to_bits(),
+                        ],
+                    );
+                }
                 RegOp::F64x2Add { dst, a, b } => {
                     let [alo, ahi] = read_v128_words(regs, a);
                     let [blo, bhi] = read_v128_words(regs, b);
@@ -10483,6 +11008,139 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         [
                             (f64::from_bits(alo) / f64::from_bits(blo)).to_bits(),
                             (f64::from_bits(ahi) / f64::from_bits(bhi)).to_bits(),
+                        ],
+                    );
+                }
+                RegOp::F64x2Min { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            wasm_f64_min(f64::from_bits(alo), f64::from_bits(blo)),
+                            wasm_f64_min(f64::from_bits(ahi), f64::from_bits(bhi)),
+                        ],
+                    );
+                }
+                RegOp::F64x2Max { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            wasm_f64_max(f64::from_bits(alo), f64::from_bits(blo)),
+                            wasm_f64_max(f64::from_bits(ahi), f64::from_bits(bhi)),
+                        ],
+                    );
+                }
+                RegOp::F64x2PMin { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            if f64::from_bits(blo) < f64::from_bits(alo) {
+                                blo
+                            } else {
+                                alo
+                            },
+                            if f64::from_bits(bhi) < f64::from_bits(ahi) {
+                                bhi
+                            } else {
+                                ahi
+                            },
+                        ],
+                    );
+                }
+                RegOp::F64x2PMax { dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            if f64::from_bits(alo) < f64::from_bits(blo) {
+                                blo
+                            } else {
+                                alo
+                            },
+                            if f64::from_bits(ahi) < f64::from_bits(bhi) {
+                                bhi
+                            } else {
+                                ahi
+                            },
+                        ],
+                    );
+                }
+                RegOp::F64x2Cmp { cmp, dst, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            if eval_f64_cmp(cmp, f64::from_bits(alo), f64::from_bits(blo)) {
+                                u64::MAX
+                            } else {
+                                0
+                            },
+                            if eval_f64_cmp(cmp, f64::from_bits(ahi), f64::from_bits(bhi)) {
+                                u64::MAX
+                            } else {
+                                0
+                            },
+                        ],
+                    );
+                }
+                RegOp::F64x2MulAdd { dst, acc, a, b } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    let [clo, chi] = read_v128_words(regs, acc);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            (f64::from_bits(clo) + (f64::from_bits(alo) * f64::from_bits(blo)))
+                                .to_bits(),
+                            (f64::from_bits(chi) + (f64::from_bits(ahi) * f64::from_bits(bhi)))
+                                .to_bits(),
+                        ],
+                    );
+                }
+                RegOp::F64x2RelaxedMadd { dst, a, b, c } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    let [clo, chi] = read_v128_words(regs, c);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            f64::from_bits(alo)
+                                .mul_add(f64::from_bits(blo), f64::from_bits(clo))
+                                .to_bits(),
+                            f64::from_bits(ahi)
+                                .mul_add(f64::from_bits(bhi), f64::from_bits(chi))
+                                .to_bits(),
+                        ],
+                    );
+                }
+                RegOp::F64x2RelaxedNmadd { dst, a, b, c } => {
+                    let [alo, ahi] = read_v128_words(regs, a);
+                    let [blo, bhi] = read_v128_words(regs, b);
+                    let [clo, chi] = read_v128_words(regs, c);
+                    write_v128_words(
+                        regs,
+                        dst,
+                        [
+                            (-f64::from_bits(alo))
+                                .mul_add(f64::from_bits(blo), f64::from_bits(clo))
+                                .to_bits(),
+                            (-f64::from_bits(ahi))
+                                .mul_add(f64::from_bits(bhi), f64::from_bits(chi))
+                                .to_bits(),
                         ],
                     );
                 }
@@ -15708,6 +16366,695 @@ mod tests {
                     "{name} policy={policy:?} got {err:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fast_register_unboxed_w3_relaxed_fma_and_hot_simd_parity() {
+        fn push_sleb(out: &mut Vec<u8>, mut v: i32) {
+            loop {
+                let mut byte = (v & 0x7f) as u8;
+                v >>= 7;
+                let done = (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0);
+                if !done {
+                    byte |= 0x80;
+                }
+                out.push(byte);
+                if done {
+                    break;
+                }
+            }
+        }
+        let emit_op = |code: &mut Vec<u8>, op: u16| {
+            let sub = if op >= 0xfd00 {
+                u32::from(op - 0xfd00)
+            } else {
+                u32::from(op - 0xfa00 + 0x100)
+            };
+            simd_op(code, sub);
+        };
+        let emit_case =
+            |code: &mut Vec<u8>, mode_local: u8, mode: i32, f: &dyn Fn(&mut Vec<u8>)| {
+                code.extend_from_slice(&[0x20, mode_local, 0x41]);
+                push_sleb(code, mode);
+                code.extend_from_slice(&[0x46, 0x04, 0x40]); // if local[mode_local] == mode
+                f(code);
+                code.extend_from_slice(&[0x0f, 0x0b]); // return; end
+            };
+
+        // Types:
+        //  0: (v128, v128, v128, i32) -> v128 ("w3_fma": relaxed FMA + F64x2MulAdd + aliasing + guards)
+        //  1: (v128, v128, i32, i32) -> v128  ("hot_simd": f32/f64/i8/i16/i32/i64 hot unboxed ops)
+        //  2: (v128, i32) -> i32              ("masks_extract": any_true, bitmask, extract_lane)
+        //  3: (i32, v128, v128, v128) -> v128 ("fma_loop": counted FMA+hot SIMD loop for fuel parity)
+        let mut type_sec = vec![4];
+        type_sec.extend_from_slice(&[0x60, 4, 0x7b, 0x7b, 0x7b, 0x7f, 1, 0x7b]); // 0
+        type_sec.extend_from_slice(&[0x60, 4, 0x7b, 0x7b, 0x7f, 0x7f, 1, 0x7b]); // 1
+        type_sec.extend_from_slice(&[0x60, 2, 0x7b, 0x7f, 1, 0x7f]); // 2
+        type_sec.extend_from_slice(&[0x60, 4, 0x7f, 0x7b, 0x7b, 0x7b, 1, 0x7b]); // 3
+
+        let func_sec = vec![4, 0, 1, 2, 3];
+        let mut exp_sec = vec![4];
+        for (idx, name) in ["w3_fma", "hot_simd", "masks_extract", "fma_loop"]
+            .iter()
+            .enumerate()
+        {
+            exp_sec.push(name.len() as u8);
+            exp_sec.extend_from_slice(name.as_bytes());
+            exp_sec.push(0x00);
+            exp_sec.push(idx as u8);
+        }
+
+        // Body 0 ("w3_fma"): (a: v128, b: v128, c: v128, mode: i32) -> v128, local 4: v128
+        let mut c0 = Vec::new();
+        // Modes 0..=3: 0xfa05..=0xfa08 (f32x4/f64x2 relaxed madd/nmadd)
+        for (m, op) in [(0, 0xfa05u16), (1, 0xfa06), (2, 0xfa07), (3, 0xfa08)] {
+            emit_case(&mut c0, 3, m, &|c| {
+                c.extend_from_slice(&[0x20, 0, 0x20, 1, 0x20, 2]);
+                emit_op(c, op);
+            });
+        }
+        // Modes 4..=7: Register aliasing dst == a / dst == b / dst == c / dst == a == b == c!
+        emit_case(&mut c0, 3, 4, &|c| {
+            c.extend_from_slice(&[0x20, 0, 0x20, 1, 0x20, 2]);
+            emit_op(c, 0xfa05);
+            c.extend_from_slice(&[0x22, 0]); // local.tee 0 (dst == a)
+        });
+        emit_case(&mut c0, 3, 5, &|c| {
+            c.extend_from_slice(&[0x20, 0, 0x20, 1, 0x20, 2]);
+            emit_op(c, 0xfa06);
+            c.extend_from_slice(&[0x22, 1]); // local.tee 1 (dst == b)
+        });
+        emit_case(&mut c0, 3, 6, &|c| {
+            c.extend_from_slice(&[0x20, 0, 0x20, 1, 0x20, 2]);
+            emit_op(c, 0xfa07);
+            c.extend_from_slice(&[0x22, 2]); // local.tee 2 (dst == c)
+        });
+        emit_case(&mut c0, 3, 7, &|c| {
+            c.extend_from_slice(&[0x20, 0, 0x20, 0, 0x20, 0]);
+            emit_op(c, 0xfa08);
+            c.extend_from_slice(&[0x22, 0]); // local.tee 0 (dst == a == b == c)
+        });
+        // Mode 8: fused two-rounding F64x2MulAdd: c + (a * b)
+        emit_case(&mut c0, 3, 8, &|c| {
+            c.extend_from_slice(&[0x20, 2, 0x20, 0, 0x20, 1]);
+            emit_op(c, 0xfdf2); // f64x2.mul
+            emit_op(c, 0xfdf0); // f64x2.add -> F64x2MulAdd
+        });
+        // Mode 9: F64x2MulAdd with aliasing dst == a (`local.set 0`)
+        emit_case(&mut c0, 3, 9, &|c| {
+            c.extend_from_slice(&[0x20, 2, 0x20, 0, 0x20, 1]);
+            emit_op(c, 0xfdf2);
+            emit_op(c, 0xfdf0);
+            c.extend_from_slice(&[0x22, 0]);
+        });
+        // Mode 10: `f64x2.mul; local.tee 4; f64x2.add` (must NOT fuse away local 4 write!)
+        emit_case(&mut c0, 3, 10, &|c| {
+            c.extend_from_slice(&[0x20, 2, 0x20, 0, 0x20, 1]);
+            emit_op(c, 0xfdf2);
+            c.extend_from_slice(&[0x22, 4]); // local.tee 4
+            emit_op(c, 0xfdf0);
+            c.extend_from_slice(&[0x20, 4]);
+            emit_op(c, 0xfd51); // xor with local 4 so clobbering local 4 would fail
+        });
+        // Mode 11: `f64x2.mul` across block boundary before `f64x2.add` (block-boundary guard!)
+        emit_case(&mut c0, 3, 11, &|c| {
+            c.extend_from_slice(&[0x20, 2, 0x02, 0x7b, 0x20, 0, 0x20, 1]);
+            emit_op(c, 0xfdf2);
+            c.push(0x0b); // end block
+            emit_op(c, 0xfdf0);
+        });
+        c0.extend_from_slice(&[0x20, 0]);
+        let b0 = body(&[(1, 0x7b)], &c0);
+
+        // Body 1 ("hot_simd"): (a: v128, b: v128, sh: i32, mode: i32) -> v128
+        let mut c1 = Vec::new();
+        let mut mode = 0i32;
+        // Unary v128 -> v128 ops:
+        for op in [
+            0xfde3u16, // f32x4.sqrt
+            0xfdec,    // f64x2.abs
+            0xfded,    // f64x2.neg
+            0xfdef,    // f64x2.sqrt
+            0xfdfa,    // f32x4.convert_i32x4_s
+            0xfdfb,    // f32x4.convert_i32x4_u
+        ] {
+            emit_case(&mut c1, 3, mode, &|c| {
+                c.extend_from_slice(&[0x20, 0]);
+                emit_op(c, op);
+                c.extend_from_slice(&[0x22, 0]); // also exercises dst == src aliasing!
+            });
+            mode += 1;
+        }
+        // Splat8 & Splat16 from scalar `sh` (local 2):
+        for op in [0xfd0fu16, 0xfd10] {
+            emit_case(&mut c1, 3, mode, &|c| {
+                c.extend_from_slice(&[0x20, 2]);
+                emit_op(c, op);
+            });
+            mode += 1;
+        }
+        // Binary v128 x v128 -> v128 ops:
+        let bin_ops: &[u16] = &[
+            0xfdf4, 0xfa0f, 0xfdf5, 0xfa10, 0xfdf6, 0xfdf7, // f64x2 min/max/pmin/pmax
+            0xfd47, 0xfd48, 0xfd49, 0xfd4a, 0xfd4b, 0xfd4c, // f64x2 cmp
+            0xfd6e, 0xfd71, // i8x16 add/sub
+            0xfd8e, 0xfd91, 0xfd95, // i16x8 add/sub/mul
+            0xfdd5, // i64x2 mul
+            0xfd37, 0xfd38, 0xfd39, 0xfd3a, 0xfd3b, 0xfd3c, 0xfd3d, 0xfd3e, 0xfd3f,
+            0xfd40, // i32x4 cmp (all 10)
+        ];
+        for &op in bin_ops {
+            emit_case(&mut c1, 3, mode, &|c| {
+                c.extend_from_slice(&[0x20, 0, 0x20, 1]);
+                emit_op(c, op);
+                c.extend_from_slice(&[0x22, 0]); // exercises dst == a aliasing!
+            });
+            mode += 1;
+        }
+        // Binary v128 x i32 -> v128 shifts (i32x4.{shl, shr_s, shr_u}):
+        for op in [0xfdabu16, 0xfdac, 0xfdad] {
+            emit_case(&mut c1, 3, mode, &|c| {
+                c.extend_from_slice(&[0x20, 0, 0x20, 2]);
+                emit_op(c, op);
+                c.extend_from_slice(&[0x22, 0]); // exercises dst == a aliasing!
+            });
+            mode += 1;
+        }
+        let hot_simd_modes = mode;
+        c1.extend_from_slice(&[0x20, 0]);
+        let b1 = body(&[], &c1);
+
+        // Body 2 ("masks_extract"): (v: v128, mode: i32) -> i32
+        let mut c2 = Vec::new();
+        // Modes 0..=2: v128.any_true, i8x16.bitmask, i32x4.bitmask
+        for (m, op) in [(0, 0xfd53u16), (1, 0xfd64), (2, 0xfda4)] {
+            emit_case(&mut c2, 1, m, &|c| {
+                c.extend_from_slice(&[0x20, 0]);
+                emit_op(c, op);
+            });
+        }
+        // Modes 3..=6: i32x4.extract_lane 0..=3
+        for lane in 0u8..4 {
+            emit_case(&mut c2, 1, 3 + i32::from(lane), &|c| {
+                c.extend_from_slice(&[0x20, 0]);
+                emit_op(c, 0xfd1b);
+                c.push(lane);
+            });
+        }
+        // Modes 7..=10: f32x4.extract_lane 0..=3 + i32.reinterpret_f32 (exact bit equality!)
+        for lane in 0u8..4 {
+            emit_case(&mut c2, 1, 7 + i32::from(lane), &|c| {
+                c.extend_from_slice(&[0x20, 0]);
+                emit_op(c, 0xfd1f);
+                c.push(lane);
+                c.push(0xbc); // i32.reinterpret_f32
+            });
+        }
+        c2.extend_from_slice(&[0x41, 0x00]);
+        let b2 = body(&[], &c2);
+
+        // Body 3 ("fma_loop"): (n: i32, acc: v128, a: v128, b: v128) -> v128
+        // Counted loop exercising relaxed FMA + F64x2MulAdd + cmp/bitmask/any_true/extract under fuel!
+        let mut c3 = Vec::new();
+        c3.extend_from_slice(&[0x03, 0x40]); // loop
+        c3.extend_from_slice(&[0x20, 0, 0x45, 0x04, 0x40, 0x20, 1, 0x0f, 0x0b]); // if n == 0 return acc
+        // acc = f32x4.relaxed_madd(a, b, acc)
+        c3.extend_from_slice(&[0x20, 2, 0x20, 3, 0x20, 1]);
+        emit_op(&mut c3, 0xfa05);
+        c3.extend_from_slice(&[0x21, 1]);
+        // acc = f64x2.relaxed_nmadd(acc, a, b)
+        c3.extend_from_slice(&[0x20, 1, 0x20, 2, 0x20, 3]);
+        emit_op(&mut c3, 0xfa08);
+        c3.extend_from_slice(&[0x21, 1]);
+        // acc = acc + (a * b) (f64x2 -> F64x2MulAdd)
+        c3.extend_from_slice(&[0x20, 1, 0x20, 2, 0x20, 3]);
+        emit_op(&mut c3, 0xfdf2);
+        emit_op(&mut c3, 0xfdf0);
+        c3.extend_from_slice(&[0x21, 1]);
+        // mix in i32x4.cmp + i32x4.bitmask + v128.any_true + i32x4.extract_lane + i32x4.shl
+        c3.extend_from_slice(&[0x20, 1, 0x20, 2]);
+        emit_op(&mut c3, 0xfd39); // i32x4.lt_s
+        emit_op(&mut c3, 0xfda4); // i32x4.bitmask
+        c3.extend_from_slice(&[0x20, 1]);
+        emit_op(&mut c3, 0xfd53); // v128.any_true
+        c3.push(0x6a); // i32.add
+        c3.extend_from_slice(&[0x20, 1]);
+        emit_op(&mut c3, 0xfd1b);
+        c3.push(2); // i32x4.extract_lane 2
+        c3.push(0x73); // i32.xor
+        emit_op(&mut c3, 0xfd0f); // i8x16.splat
+        c3.extend_from_slice(&[0x20, 0]);
+        emit_op(&mut c3, 0xfdab); // i32x4.shl
+        c3.extend_from_slice(&[0x20, 1]);
+        emit_op(&mut c3, 0xfd51); // v128.xor
+        c3.extend_from_slice(&[0x21, 1]);
+        // n -= 1; br 0
+        c3.extend_from_slice(&[0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0x00, 0x0b]);
+        c3.extend_from_slice(&[0x20, 1]);
+        let b3 = body(&[], &c3);
+
+        let mut code_sec = vec![4];
+        for b in [&b0, &b1, &b2, &b3] {
+            code_sec.extend_from_slice(b);
+        }
+        let wasm = wasm_mod(&[
+            sec(1, &type_sec),
+            sec(3, &func_sec),
+            sec(7, &exp_sec),
+            sec(10, &code_sec),
+        ]);
+
+        let mut cfg = Config::default();
+        cfg.features.simd = true;
+        cfg.features.relaxed_simd = true;
+
+        // 1) Verify EVERY SINGLE ONE of the 30 new RegOp variants is emitted and NO boxing fallback!
+        let reg_eng =
+            Engine::with_execution_policy(cfg.clone(), ExecutionPolicy::Register).unwrap();
+        let reg_mod = reg_eng.compile(&wasm).unwrap();
+        let funcs: Vec<_> = (0..4)
+            .map(|i| get_or_compile_ref(&reg_mod, i).expect("body admitted"))
+            .collect();
+        for (i, f) in funcs.iter().enumerate() {
+            assert!(
+                f.ops.iter().all(|op| !matches!(
+                    op,
+                    RegOp::SimdUnary { .. } | RegOp::SimdBinary { .. } | RegOp::SimdTernary { .. }
+                )),
+                "body {i} must not emit boxed SimdUnary/SimdBinary/SimdTernary"
+            );
+        }
+        let all_ops: Vec<RegOp> = funcs.iter().flat_map(|f| f.ops.iter().copied()).collect();
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32x4RelaxedMadd { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32x4RelaxedNmadd { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2RelaxedMadd { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2RelaxedNmadd { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32x4Sqrt { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2Abs { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2Neg { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2Sqrt { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2Min { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2Max { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2PMin { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2PMax { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2Cmp { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F64x2MulAdd { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32x4ConvertI32x4S { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::F32x4ConvertI32x4U { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::V128Splat8 { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::V128Splat16 { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I8x16Add { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I8x16Sub { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I16x8Add { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I16x8Sub { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I16x8Mul { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I64x2Mul { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I32x4Cmp { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I32x4Shift { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::V128AnyTrue { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I8x16Bitmask { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::I32x4Bitmask { .. }))
+        );
+        assert!(
+            all_ops
+                .iter()
+                .any(|op| matches!(op, RegOp::SimdExtract32 { .. }))
+        );
+
+        // Instantiate both Decoded and Register once for fast parity loops.
+        let dec_eng = Engine::with_execution_policy(cfg.clone(), ExecutionPolicy::Decoded).unwrap();
+        let dec_mod = dec_eng.compile(&wasm).unwrap();
+        let mut st_dec = Store::new(&dec_eng);
+        let ins_dec = Linker::new(&dec_eng)
+            .instantiate(&mut st_dec, &dec_mod)
+            .unwrap();
+        let mut st_reg = Store::new(&reg_eng);
+        let ins_reg = Linker::new(&reg_eng)
+            .instantiate(&mut st_reg, &reg_mod)
+            .unwrap();
+
+        let invoke_pair = |st_d: &mut Store,
+                           st_r: &mut Store,
+                           name: &str,
+                           args: &[Value]|
+         -> (RunOutcome, RunOutcome) {
+            let External::Func(fd) = ins_dec.export(st_d, name).unwrap() else {
+                panic!()
+            };
+            let External::Func(fr) = ins_reg.export(st_r, name).unwrap() else {
+                panic!()
+            };
+            (
+                st_d.invoke(fd, args).unwrap(),
+                st_r.invoke(fr, args).unwrap(),
+            )
+        };
+
+        // 2) Relaxed FMA (`0xfa05..=0xfa08`) + F64x2MulAdd + aliasing + NaN / -0.0 / single-vs-two-rounding parity!
+        let f32_1p = 1.0_f32.to_bits() + 1;
+        let f32_1m = 1.0_f32.to_bits() - 1;
+        let f64_1p = 1.0_f64.to_bits() + 1;
+        let f64_1m = 1.0_f64.to_bits() - 1;
+        let fma_triples: [([u8; 16], [u8; 16], [u8; 16]); 4] = [
+            // Single-rounding vs two-rounding f32 discriminator + -0.0 + subnormal + finite
+            (
+                v128_from_f32s([
+                    f32_1p,
+                    (-0.0_f32).to_bits(),
+                    0x0000_0001,
+                    (-3.25_f32).to_bits(),
+                ]),
+                v128_from_f32s([
+                    f32_1m,
+                    0.0_f32.to_bits(),
+                    1.5_f32.to_bits(),
+                    2.5_f32.to_bits(),
+                ]),
+                v128_from_f32s([
+                    (-1.0_f32).to_bits(),
+                    (-0.0_f32).to_bits(),
+                    0.0_f32.to_bits(),
+                    7.75_f32.to_bits(),
+                ]),
+            ),
+            // f32 sNaN / +qNaN / -qNaN / ±inf
+            (
+                v128_from_f32s([
+                    0x7f80_0001,
+                    0xffc0_1234,
+                    f32::INFINITY.to_bits(),
+                    (-0.0_f32).to_bits(),
+                ]),
+                v128_from_f32s([
+                    0x7fc0_5678,
+                    2.0_f32.to_bits(),
+                    0.0_f32.to_bits(),
+                    f32::NEG_INFINITY.to_bits(),
+                ]),
+                v128_from_f32s([
+                    1.0_f32.to_bits(),
+                    0x7fc0_9999,
+                    (-1.0_f32).to_bits(),
+                    0.0_f32.to_bits(),
+                ]),
+            ),
+            // Single-rounding vs two-rounding f64 discriminator + -0.0
+            (
+                v128_from_f64s([f64_1p, (-0.0_f64).to_bits()]),
+                v128_from_f64s([f64_1m, 0.0_f64.to_bits()]),
+                v128_from_f64s([(-1.0_f64).to_bits(), (-0.0_f64).to_bits()]),
+            ),
+            // f64 sNaN / -qNaN / dual-NaN payload ordering
+            (
+                v128_from_f64s([0x7ff0_0000_0000_0001, 0xfff8_0000_0000_1234]),
+                v128_from_f64s([0x7ff8_0000_0000_5678, 3.5_f64.to_bits()]),
+                v128_from_f64s([0x7ff8_0000_0000_0009, f64::INFINITY.to_bits()]),
+            ),
+        ];
+        for (va, vb, vc) in fma_triples {
+            for m in 0..=11 {
+                let (d, r) = invoke_pair(
+                    &mut st_dec,
+                    &mut st_reg,
+                    "w3_fma",
+                    &[
+                        Value::V128(V128(va)),
+                        Value::V128(V128(vb)),
+                        Value::V128(V128(vc)),
+                        Value::I32(m),
+                    ],
+                );
+                assert_eq!(d, r, "w3_fma bit-exact parity mismatch for mode={m}");
+            }
+        }
+
+        // 3) Hot f64x2 / f32x4 / i8x16 / i16x8 / i32x4 / i64x2 ops parity!
+        let pairs: [([u8; 16], [u8; 16]); 5] = [
+            (
+                v128_from_f64s([0x7ff0_0000_0000_0001, (-0.0_f64).to_bits()]),
+                v128_from_f64s([0xfff8_0000_0000_1234, 0.0_f64.to_bits()]),
+            ),
+            (
+                v128_from_f64s([(-4.0_f64).to_bits(), 9.0_f64.to_bits()]),
+                v128_from_f64s([f64::NEG_INFINITY.to_bits(), f64::INFINITY.to_bits()]),
+            ),
+            (
+                v128_from_f32s([
+                    (-0.0_f32).to_bits(),
+                    (-1.0_f32).to_bits(),
+                    0x7f80_0003,
+                    16.0_f32.to_bits(),
+                ]),
+                v128_from_f32s([0x8000_0000, 0x7fff_ffff, 0xffff_ffff, 0x0000_0000]),
+            ),
+            // Byte/word wrapping boundaries (0xff+1, 0x00-1, 0x7f+1, 0x80-1, 0xffff*0xffff)
+            (
+                [
+                    0xff, 0x00, 0x7f, 0x80, 0x01, 0xfe, 0xaa, 0x55, 0xff, 0xff, 0x00, 0x00, 0xff,
+                    0x7f, 0x00, 0x80,
+                ],
+                [
+                    0x01, 0x01, 0x01, 0x01, 0xff, 0x03, 0x56, 0xab, 0x01, 0x00, 0x01, 0x00, 0x01,
+                    0x00, 0x01, 0x00,
+                ],
+            ),
+            // i32x4 signed vs unsigned boundaries + i64x2 wrapping mul
+            (
+                v128_from_f32s([0x8000_0000, 0x7fff_ffff, 0xffff_ffff, 0x0000_0000]),
+                v128_from_f32s([0x7fff_ffff, 0x8000_0000, 0x0000_0001, 0xffff_ffff]),
+            ),
+        ];
+        let shifts = [0i32, 1, 7, 31, 32, 33, -1, 63, 0x1234_abcd_u32 as i32];
+        for (va, vb) in pairs {
+            for m in 0..hot_simd_modes {
+                let sh_list: &[i32] = if m >= hot_simd_modes - 3 || m == 6 || m == 7 {
+                    &shifts
+                } else {
+                    &[5]
+                };
+                for &sh in sh_list {
+                    let (d, r) = invoke_pair(
+                        &mut st_dec,
+                        &mut st_reg,
+                        "hot_simd",
+                        &[
+                            Value::V128(V128(va)),
+                            Value::V128(V128(vb)),
+                            Value::I32(sh),
+                            Value::I32(m),
+                        ],
+                    );
+                    assert_eq!(d, r, "hot_simd parity mismatch for mode={m}, sh={sh}");
+                }
+            }
+        }
+
+        // 4) v128.any_true, i8x16.bitmask, i32x4.bitmask, i32x4/f32x4.extract_lane parity!
+        let mut mask_vecs: Vec<[u8; 16]> = vec![
+            [0u8; 16],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0x7f; 16],
+            [0x80; 16],
+            [
+                0x80, 0x7f, 0xff, 0x00, 0x81, 0x01, 0x7e, 0xfe, 0x00, 0x80, 0x7f, 0xff, 0x01, 0x81,
+                0xaa, 0x55,
+            ],
+            v128_from_f32s([
+                0x7f80_0005,          // +sNaN
+                (-0.0_f32).to_bits(), // -0.0
+                0xffc0_4321,          // -qNaN
+                0xffff_ffff,          // -1 / NaN
+            ]),
+        ];
+        // Cover all 16 combinations of i32x4 lane sign bits (with non-zero low 31 bits!).
+        for bits in 0u32..16 {
+            mask_vecs.push(v128_from_f32s([
+                ((bits & 1) << 31) | 0x1234_5678,
+                (((bits >> 1) & 1) << 31) | 0x7fff_ffff,
+                (((bits >> 2) & 1) << 31) | 0x0000_0001,
+                (((bits >> 3) & 1) << 31),
+            ]));
+        }
+        for v in mask_vecs {
+            for m in 0..=10 {
+                let (d, r) = invoke_pair(
+                    &mut st_dec,
+                    &mut st_reg,
+                    "masks_extract",
+                    &[Value::V128(V128(v)), Value::I32(m)],
+                );
+                assert_eq!(
+                    d, r,
+                    "masks_extract parity mismatch for mode={m}, v={v:02x?}"
+                );
+            }
+        }
+
+        // 5) Exact fuel exhaustion & remaining-fuel parity on counted FMA + hot SIMD loop!
+        let acc0 = v128_from_f32s([
+            1.0_f32.to_bits(),
+            (-2.5_f32).to_bits(),
+            0.25_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+        ]);
+        let a0 = v128_from_f32s([
+            1.5_f32.to_bits(),
+            0.5_f32.to_bits(),
+            (-1.25_f32).to_bits(),
+            3.0_f32.to_bits(),
+        ]);
+        let b0_v = v128_from_f32s([
+            (-0.75_f32).to_bits(),
+            2.0_f32.to_bits(),
+            0.125_f32.to_bits(),
+            1.25_f32.to_bits(),
+        ]);
+        for fuel in (0u64..=80).chain([250]) {
+            let mut pair = Vec::with_capacity(2);
+            for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                let mut fcfg = cfg.clone();
+                fcfg.limits.fuel = Some(fuel);
+                let eng = Engine::with_execution_policy(fcfg, policy).unwrap();
+                let m = eng.compile(&wasm).unwrap();
+                let mut st = Store::new(&eng);
+                let ins = Linker::new(&eng).instantiate(&mut st, &m).unwrap();
+                let External::Func(f) = ins.export(&st, "fma_loop").unwrap() else {
+                    panic!()
+                };
+                let res = st
+                    .invoke(
+                        f,
+                        &[
+                            Value::I32(4),
+                            Value::V128(V128(acc0)),
+                            Value::V128(V128(a0)),
+                            Value::V128(V128(b0_v)),
+                        ],
+                    )
+                    .map_err(|e| (e.kind, e.trap_code, e.message));
+                pair.push((res, st.current_fuel));
+            }
+            assert_eq!(
+                pair[0], pair[1],
+                "fma_loop fuel parity mismatch for fuel={fuel}"
+            );
         }
     }
 }
