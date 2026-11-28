@@ -44,6 +44,9 @@ pub(crate) enum SoMapping {
     Mmap {
         base: *mut u8,
         map_len: usize,
+        /// Reported byte length for `Module::image_range()` (matches serialized artifact length
+        /// when loaded via `deserialize*`, or `map_len` for in-memory compiled modules).
+        image_len: usize,
         /// Optional file range holding the raw ELF64 `.so` bytes (`(file, so_file_offset, so_len)`)
         /// so `Module::serialize()` works without retaining a duplicate heap `Vec<u8>`.
         backing: Option<(Arc<File>, u64, usize)>,
@@ -195,7 +198,7 @@ impl Module {
 
     /// Loads a raw `StoreCdylib` ELF64 `.so` image into `engine`.
     pub fn from_so_bytes(engine: &Engine, so_bytes: Vec<u8>) -> Result<Self> {
-        let so = load_so_from_slice(engine, &so_bytes, None)?;
+        let so = load_so_from_slice(engine, &so_bytes, None, None)?;
         Self::from_loaded_so(engine, so, Some(so_bytes))
     }
 
@@ -410,7 +413,8 @@ impl Module {
         }
         let (so_rel_off, so_len) = parse_serialized_envelope_slice(engine, bytes)?;
         let so_slice = &bytes[so_rel_off..so_rel_off + so_len];
-        Self::from_so_bytes(engine, so_slice.to_vec())
+        let so = load_so_from_slice(engine, so_slice, None, Some(bytes.len()))?;
+        Self::from_loaded_so(engine, so, Some(so_slice.to_vec()))
     }
 
     /// Deserializes a precompiled artifact from an open file.
@@ -475,7 +479,13 @@ impl Module {
         // (always true for `WTMS0002`, where `so_rel_off == 0`).
         #[cfg(target_os = "linux")]
         if so_file_offset.is_multiple_of(page_size as u64)
-            && let Some(so) = load_so_mmap_file(engine, Arc::clone(&file), so_file_offset, so_len)?
+            && let Some(so) = load_so_mmap_file(
+                engine,
+                Arc::clone(&file),
+                so_file_offset,
+                so_len,
+                Some(len),
+            )?
         {
             return Self::from_loaded_so(engine, so, None);
         }
@@ -483,7 +493,12 @@ impl Module {
         // map via temporary buffer without retaining `so_bytes` because `file` backs `serialize()`.
         let mut buf = vec![0u8; so_len];
         file.read_exact_at(&mut buf, so_file_offset)?;
-        let so = load_so_from_slice(engine, &buf, Some((file, so_file_offset, so_len)))?;
+        let so = load_so_from_slice(
+            engine,
+            &buf,
+            Some((file, so_file_offset, so_len)),
+            Some(len),
+        )?;
         Self::from_loaded_so(engine, so, None)
     }
 
@@ -527,7 +542,18 @@ impl Module {
     }
 
     pub fn image_range(&self) -> std::ops::Range<*const u8> {
-        (self.inner.so.desc.code_start as *const u8)..(self.inner.so.desc.code_end as *const u8)
+        match &self.inner.so.mapping {
+            SoMapping::Mmap {
+                base, image_len, ..
+            } if !base.is_null() && *image_len > 0 => {
+                let start = *base as *const u8;
+                // SAFETY: `start..start.wrapping_add(image_len)` describes the module's mapped image span.
+                let end = start.wrapping_add(*image_len);
+                start..end
+            }
+            _ => (self.inner.so.desc.code_start as *const u8)
+                ..(self.inner.so.desc.code_end as *const u8),
+        }
     }
 
     pub fn text(&self) -> &[u8] {
@@ -1198,6 +1224,7 @@ fn load_so_mmap_file(
     file: Arc<File>,
     so_file_offset: u64,
     so_len: usize,
+    reported_image_len: Option<usize>,
 ) -> Result<Option<LoadedSo>> {
     if so_len < 64 {
         return Ok(None);
@@ -1274,6 +1301,7 @@ fn load_so_mmap_file(
         mapping: SoMapping::Mmap {
             base,
             map_len: parsed.map_len,
+            image_len: reported_image_len.unwrap_or(parsed.map_len),
             backing: Some((file, so_file_offset, so_len)),
         },
         desc,
@@ -1288,6 +1316,7 @@ fn load_so_mmap_slice(
     engine: &Engine,
     so_bytes: &[u8],
     backing: Option<(Arc<File>, u64, usize)>,
+    reported_image_len: Option<usize>,
 ) -> Result<Option<LoadedSo>> {
     let Some(parsed) = parse_store_elf_headers(so_bytes, so_bytes.len()) else {
         return Ok(None);
@@ -1360,6 +1389,7 @@ fn load_so_mmap_slice(
         mapping: SoMapping::Mmap {
             base,
             map_len: parsed.map_len,
+            image_len: reported_image_len.unwrap_or(parsed.map_len),
             backing,
         },
         desc,
@@ -1371,11 +1401,14 @@ fn load_so_from_slice(
     engine: &Engine,
     so_bytes: &[u8],
     backing: Option<(Arc<File>, u64, usize)>,
+    reported_image_len: Option<usize>,
 ) -> Result<LoadedSo> {
     #[cfg(target_os = "linux")]
     {
         let backing_clone = backing.clone();
-        if let Some(loaded) = load_so_mmap_slice(engine, so_bytes, backing_clone)? {
+        if let Some(loaded) =
+            load_so_mmap_slice(engine, so_bytes, backing_clone, reported_image_len)?
+        {
             return Ok(loaded);
         }
     }

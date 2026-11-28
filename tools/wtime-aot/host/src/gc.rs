@@ -375,6 +375,29 @@ impl GcHeap {
         }
     }
 
+    /// Releases physical pages of the currently inactive GC semi-space back to the OS
+    /// (`MADV_DONTNEED` + `PROT_NONE`), leaving the active semi-space and all live objects untouched.
+    /// Safe and O(1) no-op when the inactive semi-space is already released.
+    pub(crate) fn reclaim_inactive_space(&mut self) {
+        let inactive_is_b = !self.active_is_b;
+        let commit = *self.space_commit_mut(inactive_is_b);
+        if commit == 0 {
+            return;
+        }
+        let page_start = if inactive_is_b {
+            self.space_b_start()
+        } else {
+            self.space_a_start()
+        };
+        self.interrupt.remove_region(page_start);
+        unsafe {
+            let _ = libc::madvise(page_start as *mut libc::c_void, commit, libc::MADV_DONTNEED);
+            let _ = libc::mprotect(page_start as *mut libc::c_void, commit, libc::PROT_NONE);
+        }
+        *self.space_commit_mut(inactive_is_b) = 0;
+        *self.space_dirty_mut(inactive_is_b) = 0;
+    }
+
     #[inline]
     pub(crate) fn active_from_base(&self) -> u64 {
         let base = if self.active_is_b {

@@ -805,7 +805,11 @@ impl Engine {
         }
     }
 
-    /// Deterministic hash covering target ABI, optimization level, features, and module version.
+    /// Deterministic hash covering target ABI, runtime features, and module version.
+    ///
+    /// Optimization level (`cranelift_opt_level`) affects only compilation, not the runtime ABI
+    /// of deserialized modules, so engines with different optimization levels (or with compilation
+    /// disabled) remain compatible with precompiled artifacts.
     pub fn precompile_compatibility_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         // Stable FNV-1a 64-bit hash so identical configs across processes produce the exact same key.
@@ -825,7 +829,6 @@ impl Engine {
         std::env::consts::ARCH.as_bytes().hash(&mut h);
         wtime_aot::x64::store_rt::STORE_ABI_VERSION.hash(&mut h);
         let c = &self.inner.config;
-        (c.opt_level as u8).hash(&mut h);
         c.collector.map(|v| v as u8).hash(&mut h);
         c.gc_support.hash(&mut h);
         c.wasm_reference_types.hash(&mut h);

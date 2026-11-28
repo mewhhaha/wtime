@@ -142,19 +142,12 @@ fn emit_restore_fp_lr(a: &mut A64Asm, off: i32) {
 
 /// Computes exact byte size of the post-link sorted `SafepointHeader + entries + slots` table.
 pub fn planned_a64_safepoint_table_bytes(def_asms: &[A64Asm]) -> Result<usize, String> {
-    let mut n_entries: usize = 0;
-    let mut n_slots: usize = 0;
-    for asm in def_asms {
-        n_entries = n_entries
-            .checked_add(asm.safepoints.len())
-            .ok_or("aarch64: safepoint count overflow")?;
-        for sp in &asm.safepoints {
-            n_slots = n_slots
-                .checked_add(sp.gc_slots.len())
-                .and_then(|v| v.checked_add(sp.ext_slots.len()))
-                .ok_or("aarch64: safepoint slot count overflow")?;
-        }
-    }
+    let (n_entries, slot_pool) = crate::x64::gc_rt::build_deduped_safepoint_slot_pool(
+        def_asms
+            .iter()
+            .flat_map(|asm| asm.safepoints.iter())
+            .map(|sp| (sp.gc_slots.as_slice(), sp.ext_slots.as_slice())),
+    )?;
     16usize
         .checked_add(
             n_entries
@@ -163,7 +156,9 @@ pub fn planned_a64_safepoint_table_bytes(def_asms: &[A64Asm]) -> Result<usize, S
         )
         .and_then(|v| {
             v.checked_add(
-                n_slots
+                slot_pool
+                    .pool
+                    .len()
                     .checked_mul(4)
                     .ok_or("aarch64: safepoint slots size overflow")
                     .ok()?,
@@ -202,6 +197,11 @@ pub fn emit_a64_safepoint_table_rodata(
         return Err("aarch64: duplicate safepoint return address detected".into());
     }
 
+    let (_, slot_pool) = crate::x64::gc_rt::build_deduped_safepoint_slot_pool(
+        flat.iter()
+            .map(|&(_, _, sp)| (sp.gc_slots.as_slice(), sp.ext_slots.as_slice())),
+    )?;
+
     let num_entries =
         u32::try_from(flat.len()).map_err(|_| "aarch64: safepoint count exceeds u32")?;
     let entries_rel_off: i32 = 16;
@@ -221,27 +221,24 @@ pub fn emit_a64_safepoint_table_rodata(
     write_u32(rodata, slots_rel_off as u32);
 
     // Entries (16 bytes each): ret_pc_rel, frame_caller_ret_off, first_slot_idx, num_slots.
-    let mut slot_cursor: u32 = 0;
     for &(pc_rel, frame_ret_off, sp) in &flat {
-        let n_sp_slots = u32::try_from(sp.gc_slots.len() + sp.ext_slots.len())
-            .map_err(|_| "aarch64: safepoint slot count exceeds u32")?;
+        let canon = crate::x64::gc_rt::canonical_safepoint_slots(&sp.gc_slots, &sp.ext_slots);
+        let n_sp_slots =
+            u32::try_from(canon.len()).map_err(|_| "aarch64: safepoint slot count exceeds u32")?;
+        let first_idx = if n_sp_slots == 0 {
+            0
+        } else {
+            slot_pool.offsets[&canon]
+        };
         write_u32(rodata, pc_rel);
         write_u32(rodata, frame_ret_off);
-        write_u32(rodata, slot_cursor);
+        write_u32(rodata, first_idx);
         write_u32(rodata, n_sp_slots);
-        slot_cursor = slot_cursor
-            .checked_add(n_sp_slots)
-            .ok_or("aarch64: safepoint total slot index overflow")?;
     }
 
-    // Slots (`[i32]`): `gc_slots` followed by `ext_slots` for each entry.
-    for &(_, _, sp) in &flat {
-        for &off in &sp.gc_slots {
-            write_u32(rodata, off as u32);
-        }
-        for &off in &sp.ext_slots {
-            write_u32(rodata, off as u32);
-        }
+    // Shared deduplicated slots (`[i32]`).
+    for &off in &slot_pool.pool {
+        write_u32(rodata, off as u32);
     }
     Ok(())
 }

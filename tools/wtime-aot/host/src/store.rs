@@ -929,6 +929,13 @@ impl<T> Store<T> {
         unsafe { collect_store_gc(&mut self.inner, 0, 0, true).map_err(Error::from) }
     }
 
+    /// Returns physical pages of the warm inactive GC semi-space to the OS without running a collection.
+    /// Useful when an isolate transitions to idle so active throughput keeps zero-syscall warm flips
+    /// while idle isolates shed inactive semi-space RSS.
+    pub fn reclaim_inactive_gc_space(&mut self) {
+        self.inner.gc.reclaim_inactive_space();
+    }
+
     pub fn gc_heap_capacity(&self) -> usize {
         self.inner.gc.from_cap
     }

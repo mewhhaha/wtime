@@ -1108,3 +1108,102 @@ fn warm_semispace_reuse_zero_initializes_large_arrays() {
         );
     }
 }
+
+#[test]
+fn precompiled_module_deserializes_across_opt_levels_and_reports_image_range() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (func (export "mul") (param i32 i32) (result i32)
+                local.get 0
+                local.get 1
+                i32.mul)
+        )"#,
+    )
+    .expect("wat");
+
+    let mut compile_cfg = Config::new();
+    compile_cfg.cranelift_opt_level(wtime_aot_host::OptLevel::SpeedAndSize);
+    let compile_engine = Engine::new(&compile_cfg).expect("compile engine");
+    let bytes = compile_engine.precompile_module(&wasm).expect("precompile");
+
+    // Deserializing with a different OptLevel and compiler disabled must succeed.
+    let mut load_cfg = Config::new();
+    load_cfg
+        .cranelift_opt_level(wtime_aot_host::OptLevel::Speed)
+        .enable_compiler(false);
+    let load_engine = Engine::new(&load_cfg).expect("load engine");
+    let mem_mod = unsafe { Module::deserialize(&load_engine, &bytes) }.expect("deserialize mem");
+    let mem_range = mem_mod.image_range();
+    assert_eq!(mem_range.end as usize - mem_range.start as usize, bytes.len());
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "wtime-aot-host-image-range-{}.wtmn",
+        std::process::id()
+    ));
+    std::fs::write(&tmp_path, &bytes).expect("write wtmn");
+    let file = std::fs::File::open(&tmp_path).expect("open wtmn");
+    let file_mod =
+        unsafe { Module::deserialize_open_file(&load_engine, file) }.expect("deserialize file");
+    let _ = std::fs::remove_file(&tmp_path);
+    let file_range = file_mod.image_range();
+    assert_eq!(
+        file_range.end as usize - file_range.start as usize,
+        bytes.len()
+    );
+
+    let mut store = Store::new(&load_engine, ());
+    let inst = Instance::new(&mut store, &file_mod, &[]).expect("instantiate");
+    let mul = inst
+        .get_typed_func::<(i32, i32), i32>(&mut store, "mul")
+        .expect("mul");
+    assert_eq!(mul.call(&mut store, (6, 7)).unwrap(), 42);
+}
+
+#[test]
+fn reclaim_inactive_gc_space_preserves_live_objects_and_subsequent_gcs() {
+    let mut cfg = Config::new();
+    cfg.collector(Collector::Copying)
+        .wasm_gc(true)
+        .gc_heap_initial_size(2 * 1024 * 1024);
+    let engine = Engine::new(&cfg).expect("engine");
+    let mut store = Store::new(&engine, ());
+    let arr_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, StorageType::I8));
+    let pre = ArrayRefPre::new(&mut store, arr_ty);
+
+    // Dirty both semi-spaces so `inactive` is populated.
+    let mut scope = RootScope::new(&mut store);
+    let kept = ArrayRef::new(&mut scope, &pre, &Val::I32(0x3C), 4096).expect("kept");
+    for _ in 0..16 {
+        let mut inner = RootScope::new(&mut scope);
+        let _ = ArrayRef::new(&mut inner, &pre, &Val::I32(0x77), 256 * 1024).expect("garbage");
+    }
+    drop(scope);
+    // Keep a rooted object across reclaim + another GC cycle via a Store global.
+    let mut scope = RootScope::new(&mut store);
+    let survivor = ArrayRef::new(&mut scope, &pre, &Val::I32(0x55), 8192).expect("survivor");
+    let rooted = survivor.to_anyref().to_owned_rooted(&mut scope).unwrap();
+    drop(scope);
+
+    store.gc(None).unwrap();
+    store.reclaim_inactive_gc_space();
+    // Second call is a safe no-op.
+    store.reclaim_inactive_gc_space();
+
+    // Allocate again and trigger another GC flip after reclaiming inactive space.
+    for _ in 0..20 {
+        let mut inner = RootScope::new(&mut store);
+        let _ = ArrayRef::new(&mut inner, &pre, &Val::I32(0x11), 256 * 1024).expect("post-reclaim");
+    }
+    store.gc(None).unwrap();
+
+    let mut scope = RootScope::new(&mut store);
+    let arr = rooted
+        .to_rooted(&mut scope)
+        .as_array(&scope)
+        .unwrap()
+        .expect("survivor array");
+    assert_eq!(arr.len(&scope).unwrap(), 8192);
+    assert_eq!(arr.get(&mut scope, 0).unwrap().i32(), Some(0x55));
+    assert_eq!(arr.get(&mut scope, 8191).unwrap().i32(), Some(0x55));
+    let _ = kept;
+}
