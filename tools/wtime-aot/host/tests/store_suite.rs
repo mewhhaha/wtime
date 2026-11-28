@@ -1953,3 +1953,321 @@ fn store_snapshot_roundtrips_gc_heap_funcrefs_globals_memory_and_weak_state() {
         assert!(eph.is_live(&store).unwrap());
     }
 }
+
+#[test]
+fn store_snapshot_portable_bytes_roundtrip_across_engines_with_shifted_canon_ids() {
+    use wtime_aot_host::{GcEphemeron, StoreSnapshot, WeakAnyRef};
+
+    let decoy_wasm = wat::parse_str(
+        r#"(module
+            (type $d0 (struct (field i64) (field f64)))
+            (type $d1 (array (mut i32)))
+            (type $d2 (struct (field (ref null $d0)) (field (ref null $d1))))
+            (func (export "noop") (param (ref null $d2)) (result i32) (i32.const 1))
+        )"#,
+    )
+    .expect("decoy wat");
+
+    let main_wasm = wat::parse_str(
+        r#"(module
+            (type $fn_i32 (func (param i32) (result i32)))
+            (type $node (struct (field (ref $fn_i32)) (field (mut i32)) (field (mut (ref null $node)))))
+            (type $bytes (array (mut i8)))
+            (import "host" "add_bias" (func $host_add (type $fn_i32)))
+            (memory 1)
+            (global $g_node (mut (ref null $node)) (ref.null $node))
+            (global $g_buf (mut (ref null $bytes)) (ref.null $bytes))
+            (elem declare func $double $host_add)
+            (func $double (type $fn_i32) (i32.mul (local.get 0) (i32.const 2)))
+            (func (export "seed") (result eqref)
+                (local $leaf (ref $node))
+                (local $head (ref $node))
+                (local $arr (ref $bytes))
+                (local.set $leaf (struct.new $node (ref.func $host_add) (i32.const 9) (ref.null $node)))
+                (local.set $head (struct.new $node (ref.func $double) (i32.const 4) (local.get $leaf)))
+                (local.set $arr (array.new $bytes (i32.const 0x5A) (i32.const 16)))
+                (global.set $g_node (local.get $head))
+                (global.set $g_buf (local.get $arr))
+                (i32.store (i32.const 128) (i32.const 777))
+                (local.get $head))
+            (func (export "check") (param $x i32) (result i32)
+                (local $head (ref $node))
+                (local $leaf (ref $node))
+                (local $arr (ref $bytes))
+                (local $v i32)
+                (local.set $head (ref.as_non_null (global.get $g_node)))
+                (local.set $leaf (ref.as_non_null (struct.get $node 2 (local.get $head))))
+                (local.set $arr (ref.as_non_null (global.get $g_buf)))
+                (local.set $v (call_ref $fn_i32 (local.get $x) (struct.get $node 0 (local.get $head))))
+                (local.set $v (call_ref $fn_i32 (local.get $v) (struct.get $node 0 (local.get $leaf))))
+                (i32.add
+                    (i32.add (local.get $v) (i32.load (i32.const 128)))
+                    (i32.add (array.get_u $bytes (local.get $arr) (i32.const 3)) (array.len (local.get $arr)))))
+        )"#,
+    )
+    .expect("main wat");
+
+    let make_engine = || {
+        let mut cfg = Config::new();
+        cfg.collector(Collector::Copying)
+            .wasm_gc(true)
+            .gc_heap_initial_size(256 * 1024);
+        Engine::new(&cfg).expect("engine")
+    };
+
+    // Process/Engine A: compile `main_wasm`, serialize both the Module and the StoreSnapshot to raw bytes!
+    let engine_a = make_engine();
+    let mod_a = Module::new(&engine_a, &main_wasm).expect("mod_a");
+    let mod_bytes = mod_a.serialize().expect("serialize mod_a");
+    let fp_a = mod_a.fingerprint();
+
+    let mut store_a = Store::new(&engine_a, 10i32);
+    let mut linker_a = Linker::new(&engine_a);
+    linker_a
+        .func_wrap(
+            "host",
+            "add_bias",
+            |caller: Caller<'_, i32>, v: i32| -> i32 { v + *caller.data() },
+        )
+        .unwrap();
+    let inst_a = linker_a.instantiate(&mut store_a, &mod_a).unwrap();
+    assert_eq!(store_a.instance_count(), 1);
+    assert_eq!(store_a.instance_module(0).unwrap().fingerprint(), fp_a);
+    assert!(store_a.instance_module(1).is_none());
+
+    let root_a = inst_a
+        .get_typed_func::<(), Option<Rooted<EqRef>>>(&mut store_a, "seed")
+        .unwrap()
+        .call(&mut store_a, ())
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store_a)
+        .unwrap();
+    let eph_parts = GcEphemeron::new(&mut store_a, &root_a, &root_a, Some(&root_a))
+        .unwrap()
+        .to_raw_parts();
+    let weak_parts = WeakAnyRef::new(&mut store_a, &root_a, &root_a)
+        .unwrap()
+        .to_raw_parts();
+
+    let snap_a = store_a.capture_snapshot(&[&root_a]).expect("capture");
+    let snap_bytes = snap_a.to_bytes();
+    assert!(snap_bytes.len() > 64);
+    drop(store_a);
+    drop(mod_a);
+    drop(engine_a);
+
+    // Integrity / corruption checks on `from_bytes`.
+    assert!(StoreSnapshot::from_bytes(&snap_bytes[..12]).is_err());
+    let mut tampered = snap_bytes.clone();
+    tampered[20] ^= 0xFF;
+    assert!(StoreSnapshot::from_bytes(&tampered).is_err());
+
+    // Process/Engine B: load `decoy_wasm` FIRST so EVERY canonical type ID of `main_wasm` shifts!
+    let engine_b = make_engine();
+    let _decoy = Module::new(&engine_b, &decoy_wasm).expect("decoy");
+    let mod_b = unsafe { Module::deserialize(&engine_b, &mod_bytes) }.expect("deserialize mod_b");
+    assert_eq!(mod_b.fingerprint(), fp_a);
+
+    let snap_b = StoreSnapshot::from_bytes(&snap_bytes).expect("decode snapshot");
+    assert_eq!(snap_b.instance_count(), 1);
+
+    let mut store_b = Store::new(&engine_b, 500i32);
+    let mut linker_b = Linker::new(&engine_b);
+    linker_b
+        .func_wrap(
+            "host",
+            "add_bias",
+            |caller: Caller<'_, i32>, v: i32| -> i32 { v + *caller.data() },
+        )
+        .unwrap();
+    let inst_b = linker_b.instantiate(&mut store_b, &mod_b).unwrap();
+    let restored_roots = store_b
+        .restore_snapshot(&snap_b)
+        .expect("cross-engine restore with shifted canon IDs");
+    assert_eq!(restored_roots.len(), 1);
+
+    // Reconstruct WeakAnyRef & GcEphemeron solely from raw `(slot_idx, generation)` parts!
+    let eph_b = store_b.ephemeron_from_raw_parts(eph_parts.0, eph_parts.1);
+    let weak_b = store_b.weak_ref_from_raw_parts(weak_parts.0, weak_parts.1);
+    assert!(eph_b.is_live(&store_b).unwrap());
+    {
+        let mut scope = RootScope::new(&mut store_b);
+        let ev = eph_b.value(&mut scope).unwrap().unwrap();
+        let wv = weak_b.upgrade(&mut scope).unwrap().unwrap();
+        let rv = restored_roots[0].to_rooted(&mut scope).to_anyref();
+        assert!(Rooted::ref_eq(&scope, &ev, &rv).unwrap());
+        assert!(Rooted::ref_eq(&scope, &wv, &rv).unwrap());
+    }
+
+    // Call restored closures + verify remapped struct/array types + linear memory + post-restore GC!
+    let check_b = inst_b
+        .get_typed_func::<i32, i32>(&mut store_b, "check")
+        .unwrap();
+    // x=11 -> double(11)=22 -> host_add(22)=522 -> + 777 + 0x5A (90) + 16 = 1405
+    assert_eq!(check_b.call(&mut store_b, 11).unwrap(), 1405);
+    store_b.gc(None).unwrap();
+    assert_eq!(check_b.call(&mut store_b, 11).unwrap(), 1405);
+    assert!(eph_b.is_live(&store_b).unwrap());
+}
+
+#[test]
+fn store_snapshot_with_externs_roundtrips_host_payloads_and_weak_handles_across_engines() {
+    use wtime_aot_host::{ExternRef, StoreSnapshot, WeakAnyRef};
+
+    struct TaggedWeak {
+        tag: u32,
+        weak: WeakAnyRef,
+    }
+
+    let wasm = wat::parse_str(
+        r#"(module
+            (type $box (struct (field (mut i32)) (field (mut externref)) (field (mut anyref))))
+            (global $g_box (mut (ref null $box)) (ref.null $box))
+
+            (func (export "alloc") (param $n i32) (param $ext externref) (result eqref)
+                (local $b (ref $box))
+                (local.set $b (struct.new $box (local.get $n) (local.get $ext) (any.convert_extern (local.get $ext))))
+                (global.set $g_box (local.get $b))
+                (local.get $b))
+
+            (func (export "get_ext") (result externref)
+                (struct.get $box 1 (ref.as_non_null (global.get $g_box))))
+
+            (func (export "get_boxed_ext") (result externref)
+                (extern.convert_any (struct.get $box 2 (ref.as_non_null (global.get $g_box)))))
+
+            (func (export "get_num") (result i32)
+                (struct.get $box 0 (ref.as_non_null (global.get $g_box))))
+        )"#,
+    )
+    .expect("wat");
+
+    let make_engine = || {
+        let mut cfg = Config::new();
+        cfg.wasm_gc(true);
+        Engine::new(&cfg).expect("engine")
+    };
+
+    let engine_a = make_engine();
+    let mod_a = Module::new(&engine_a, &wasm).expect("compile");
+    let mod_bytes = mod_a.serialize().expect("serialize");
+    let mut store_a = Store::new(&engine_a, ());
+    let linker_a = Linker::new(&engine_a);
+    let inst_a = linker_a.instantiate(&mut store_a, &mod_a).unwrap();
+
+    let root_a = {
+        let mut scope = RootScope::new(&mut store_a);
+        let target = inst_a
+            .get_typed_func::<(i32, Option<Rooted<ExternRef>>), Option<Rooted<EqRef>>>(
+                &mut scope, "alloc",
+            )
+            .unwrap()
+            .call(&mut scope, (77, None))
+            .unwrap()
+            .unwrap()
+            .to_owned_rooted(&mut scope)
+            .unwrap();
+        let weak = WeakAnyRef::new(&mut scope, &target, &target).unwrap();
+        let ext = ExternRef::new(&mut scope, TaggedWeak { tag: 0xBEEF, weak }).unwrap();
+        let boxed = inst_a
+            .get_typed_func::<(i32, Option<Rooted<ExternRef>>), Option<Rooted<EqRef>>>(
+                &mut scope, "alloc",
+            )
+            .unwrap()
+            .call(&mut scope, (42, Some(ext)))
+            .unwrap()
+            .unwrap();
+        (target, boxed.to_owned_rooted(&mut scope).unwrap())
+    };
+
+    // Default capture_snapshot without extern encoder must still refuse live host ExternRefs.
+    assert!(store_a.capture_snapshot(&[&root_a.0, &root_a.1]).is_err());
+
+    let snap_bytes = store_a
+        .capture_snapshot_with_externs(&[&root_a.0, &root_a.1], |any| {
+            let tw = any
+                .downcast_ref::<TaggedWeak>()
+                .ok_or_else(|| wtime_aot_host::Error::msg("unexpected extern payload"))?;
+            let (slot, gen_id) = tw.weak.to_raw_parts();
+            let mut buf = Vec::with_capacity(12);
+            buf.extend_from_slice(&tw.tag.to_le_bytes());
+            buf.extend_from_slice(&slot.to_le_bytes());
+            buf.extend_from_slice(&gen_id.to_le_bytes());
+            Ok(buf)
+        })
+        .expect("capture_snapshot_with_externs")
+        .to_bytes();
+
+    drop(store_a);
+    drop(mod_a);
+    drop(engine_a);
+
+    let engine_b = make_engine();
+    let mod_b = unsafe { Module::deserialize(&engine_b, &mod_bytes) }.unwrap();
+    let snap_b = StoreSnapshot::from_bytes(&snap_bytes).unwrap();
+    let mut store_b = Store::new(&engine_b, ());
+    let linker_b = Linker::new(&engine_b);
+    let inst_b = linker_b.instantiate(&mut store_b, &mod_b).unwrap();
+
+    // Default restore_snapshot without decoder must refuse snapshots containing extern entries.
+    assert!(store_b.restore_snapshot(&snap_b).is_err());
+
+    let restored = store_b
+        .restore_snapshot_with_externs(&snap_b, |ctx, bytes| {
+            assert_eq!(bytes.len(), 12);
+            let tag = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+            let slot = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+            let gen_id = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            Ok(Box::new(TaggedWeak {
+                tag,
+                weak: ctx.weak_ref_from_raw_parts(slot, gen_id),
+            }))
+        })
+        .expect("restore_snapshot_with_externs");
+    assert_eq!(restored.len(), 2);
+
+    // Verify both the direct externref field and the InternalExternBox roundtrip + survive GC!
+    store_b.gc(None).unwrap();
+    assert_eq!(
+        inst_b
+            .get_typed_func::<(), i32>(&mut store_b, "get_num")
+            .unwrap()
+            .call(&mut store_b, ())
+            .unwrap(),
+        42
+    );
+    {
+        let mut scope = RootScope::new(&mut store_b);
+        let e1 = inst_b
+            .get_typed_func::<(), Option<Rooted<ExternRef>>>(&mut scope, "get_ext")
+            .unwrap()
+            .call(&mut scope, ())
+            .unwrap()
+            .expect("direct externref");
+        let e2 = inst_b
+            .get_typed_func::<(), Option<Rooted<ExternRef>>>(&mut scope, "get_boxed_ext")
+            .unwrap()
+            .call(&mut scope, ())
+            .unwrap()
+            .expect("boxed externref");
+        let tw1 = e1
+            .data(&scope)
+            .unwrap()
+            .unwrap()
+            .downcast_ref::<TaggedWeak>()
+            .unwrap();
+        let tw2 = e2
+            .data(&scope)
+            .unwrap()
+            .unwrap()
+            .downcast_ref::<TaggedWeak>()
+            .unwrap();
+        assert_eq!(tw1.tag, 0xBEEF);
+        assert_eq!(tw2.tag, 0xBEEF);
+        let weak_copy = tw1.weak;
+        let upgraded = weak_copy.upgrade(&mut scope).unwrap().expect("weak alive");
+        let target_ref = restored[0].to_rooted(&mut scope).to_anyref();
+        assert!(Rooted::ref_eq(&scope, &upgraded, &target_ref).unwrap());
+    }
+}

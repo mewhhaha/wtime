@@ -31,7 +31,7 @@ pub use instance::{
 pub use memory::SharedMemory;
 pub use module::Module;
 pub use signal::InterruptHandle;
-pub use snapshot::StoreSnapshot;
+pub use snapshot::{SnapshotRestoreContext, StoreSnapshot};
 pub use store::{
     AsContext, AsContextMut, Store, StoreContext, StoreContextMut, StoreLimits, StoreLimitsBuilder,
 };

@@ -3047,6 +3047,11 @@ impl WeakAnyRef {
         Ok(Some(Rooted::from_abi_word(inner, target, false, false)))
     }
 
+    /// Returns the store-relative `(slot_idx, generation)` handle parts for snapshot serialization.
+    pub fn to_raw_parts(self) -> (u32, u32) {
+        (self.slot_idx, self.generation)
+    }
+
     pub fn remove(&self, mut store: impl AsContextMut) -> Result<()> {
         let inner = store.as_store_inner_mut();
         if inner.id != self.store_id {
@@ -3416,6 +3421,11 @@ impl GcEphemeron {
         }
         e.value = val_w;
         Ok(())
+    }
+
+    /// Returns the store-relative `(slot_idx, generation)` handle parts for snapshot serialization.
+    pub fn to_raw_parts(self) -> (u32, u32) {
+        (self.slot_idx, self.generation)
     }
 
     pub fn remove(&self, mut store: impl AsContextMut) -> Result<()> {

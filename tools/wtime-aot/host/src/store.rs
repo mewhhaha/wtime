@@ -968,6 +968,24 @@ impl<T> Store<T> {
         crate::snapshot::capture_store_snapshot(&mut self.inner, extra_roots)
     }
 
+    /// Captures a shareable binary snapshot like [`Self::capture_snapshot`], invoking
+    /// `encode_extern` to serialize each live host `ExternRef` payload into portable bytes.
+    pub fn capture_snapshot_with_externs<R, F>(
+        &mut self,
+        extra_roots: &[R],
+        encode_extern: F,
+    ) -> Result<crate::snapshot::StoreSnapshot>
+    where
+        R: crate::gc::RootedRef<crate::gc::EqRef>,
+        F: FnMut(&dyn std::any::Any) -> Result<Vec<u8>>,
+    {
+        crate::snapshot::capture_store_snapshot_with_externs(
+            &mut self.inner,
+            extra_roots,
+            encode_extern,
+        )
+    }
+
     /// Restores a previously captured [`StoreSnapshot`](crate::snapshot::StoreSnapshot) into
     /// this freshly instantiated Store, rebasing all GC heap pointers and `StoreFuncRef`s.
     pub fn restore_snapshot(
@@ -975,6 +993,26 @@ impl<T> Store<T> {
         snapshot: &crate::snapshot::StoreSnapshot,
     ) -> Result<Vec<crate::gc::OwnedRooted<crate::gc::EqRef>>> {
         crate::snapshot::restore_store_snapshot(&mut self.inner, snapshot)
+    }
+
+    /// Restores a previously captured [`StoreSnapshot`](crate::snapshot::StoreSnapshot),
+    /// invoking `decode_extern` to reconstruct each serialized host `ExternRef` payload.
+    pub fn restore_snapshot_with_externs<F>(
+        &mut self,
+        snapshot: &crate::snapshot::StoreSnapshot,
+        decode_extern: F,
+    ) -> Result<Vec<crate::gc::OwnedRooted<crate::gc::EqRef>>>
+    where
+        F: FnMut(
+            &crate::snapshot::SnapshotRestoreContext,
+            &[u8],
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>>,
+    {
+        crate::snapshot::restore_store_snapshot_with_externs(
+            &mut self.inner,
+            snapshot,
+            decode_extern,
+        )
     }
 
     /// Rebinds a [`GcEphemeron`](crate::gc::GcEphemeron) handle captured from a snapshot's
@@ -987,6 +1025,40 @@ impl<T> Store<T> {
     /// source Store so it addresses the restored slot in this Store.
     pub fn rebind_weak_ref(&self, weak: crate::gc::WeakAnyRef) -> crate::gc::WeakAnyRef {
         crate::snapshot::rebind_weak_ref(&self.inner, weak)
+    }
+
+    /// Reconstructs a [`GcEphemeron`](crate::gc::GcEphemeron) bound to this Store from
+    /// serialized `(slot_idx, generation)` parts after [`Self::restore_snapshot`].
+    pub fn ephemeron_from_raw_parts(
+        &self,
+        slot_idx: u32,
+        generation: u32,
+    ) -> crate::gc::GcEphemeron {
+        crate::gc::GcEphemeron {
+            store_id: self.inner.id,
+            slot_idx,
+            generation,
+        }
+    }
+
+    /// Reconstructs a [`WeakAnyRef`](crate::gc::WeakAnyRef) bound to this Store from
+    /// serialized `(slot_idx, generation)` parts after [`Self::restore_snapshot`].
+    pub fn weak_ref_from_raw_parts(&self, slot_idx: u32, generation: u32) -> crate::gc::WeakAnyRef {
+        crate::gc::WeakAnyRef {
+            store_id: self.inner.id,
+            slot_idx,
+            generation,
+        }
+    }
+
+    /// Returns the number of Wasm module instances instantiated in this Store.
+    pub fn instance_count(&self) -> usize {
+        self.inner.instances.len()
+    }
+
+    /// Returns a clone of the [`Module`](crate::module::Module) backing instance `index`, if any.
+    pub fn instance_module(&self, index: usize) -> Option<crate::module::Module> {
+        self.inner.instances.get(index).map(|i| i.module.clone())
     }
 
     pub fn throw<R>(&mut self, exn: Rooted<ExnRef>) -> Result<R> {

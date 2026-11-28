@@ -113,6 +113,7 @@ impl Drop for LoadedSo {
 
 pub(crate) struct ModuleInner {
     pub(crate) id: u64,
+    pub(crate) fingerprint: [u8; 32],
     pub(crate) engine: Engine,
     pub(crate) so: LoadedSo,
     /// Retained raw ELF64 `.so` image for in-memory compiled modules (`None` for file-backed
@@ -172,6 +173,12 @@ impl std::fmt::Debug for Module {
 impl Module {
     pub fn same(a: &Self, b: &Self) -> bool {
         Arc::ptr_eq(&a.inner, &b.inner)
+    }
+
+    /// Returns a deterministic SHA-256 fingerprint of this compiled module's metadata,
+    /// ABI version, target architecture, and native code image.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        self.inner.fingerprint
     }
 
     /// Validates Wasm binary bytes against the Engine's feature set without compiling.
@@ -359,10 +366,40 @@ impl Module {
             exports_cache.push((name.clone(), ExternType::Tag(TagType::new(ft))));
         }
 
+        let fingerprint = {
+            let mut h = wtime_aot::sha256::Sha256::new();
+            h.update(b"WTMODFP1");
+            h.update(&STORE_ABI_VERSION.to_le_bytes());
+            let arch = std::env::consts::ARCH.as_bytes();
+            h.update(&(arch.len() as u32).to_le_bytes());
+            h.update(arch);
+            let code_len = so.desc.code_end.saturating_sub(so.desc.code_start);
+            h.update(&(code_len as u64).to_le_bytes());
+            if so.desc.code_start != 0 && code_len > 0 {
+                // SAFETY: `code_start..code_end` is the immutable RX `.text` segment of `so`.
+                let text = unsafe {
+                    std::slice::from_raw_parts(so.desc.code_start as *const u8, code_len)
+                };
+                if text.len() <= 65536 {
+                    h.update(text);
+                } else {
+                    const SAMPLE: usize = 16384;
+                    let mid = (text.len() - SAMPLE) / 2;
+                    h.update(&text[..SAMPLE]);
+                    h.update(&text[mid..mid + SAMPLE]);
+                    h.update(&text[text.len() - SAMPLE..]);
+                }
+            }
+            h.update(&(meta_slice.len() as u64).to_le_bytes());
+            h.update(meta_slice);
+            h.finish()
+        };
+
         let id = NEXT_MODULE_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             inner: Arc::new(ModuleInner {
                 id,
+                fingerprint,
                 engine: engine.clone(),
                 so,
                 so_bytes,
