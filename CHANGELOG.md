@@ -2,6 +2,39 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.17] - 2026-11-28
+
+Portable binary `StoreSnapshot` serialization (`WTSN0001`), deterministic
+module fingerprints, cross-`Engine` canonical type-ID remapping, and extensible
+host `ExternRef` snapshot hooks in `wtime-aot-host` to enable full isolate I/O
+hibernation ("sleep/wake") across processes and `Engine` instances. Core crates
+(`wtime-types`, `wtime-decode`, `wtime-validate`, `wtime-runtime`) and
+`wtime-cli` remain `#![forbid(unsafe_code)]` with zero external production
+dependencies, and `tools/wtime-aot` remains `#![forbid(unsafe_code)]` with zero
+external production dependencies.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- **Portable `StoreSnapshot` wire format (`WTSN0001`)**:
+  - Added SHA-256-authenticated, bounds-checked `StoreSnapshot::to_bytes` and
+    `StoreSnapshot::from_bytes` (`tools/wtime-aot/host/src/snapshot.rs`),
+    encoding ABI/architecture tags, compacted GC heap bytes, relocation tables,
+    sparse linear memories, tables, globals, WeakMap/WeakRef/Ephemeron arenas,
+    and host `ExternRef` entries.
+- **Cross-`Engine` restore & deterministic module fingerprints**:
+  - Added deterministic SHA-256 `Module::fingerprint()` (`src/module.rs`)
+    replacing process-local pointer identity, plus automatic canonical type-ID
+    remapping (`cid_remap`) across GC struct/array headers and host function
+    signatures when restoring into a separate `Engine` with shifted type IDs.
+  - Added `Store::instance_count`, `Store::instance_module`,
+    `Store::weak_ref_from_raw_parts`, `Store::ephemeron_from_raw_parts`, and
+    `to_raw_parts` on `WeakAnyRef` / `GcEphemeron` (`src/store.rs`, `src/gc.rs`).
+- **Host-extensible `ExternRef` snapshot hooks**:
+  - Added `Store::capture_snapshot_with_externs`,
+    `Store::restore_snapshot_with_externs`, and `SnapshotRestoreContext` so
+    embedders can portably serialize and rebind host `ExternRef` payloads (such
+    as JavaScript `WeakRef` and `FinalizationRegistry` cells) while preserving
+    default rejection of opaque host payloads.
+
 ## [0.1.16] - 2026-11-28
 
 Unified `main` release combining `v0.1.14` (per-function x64 `StoreCdylib`

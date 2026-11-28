@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "wtime-aot"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "wtime-types",
  "wtime-validate",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "wtime-aot-host"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "libc",
  "wat",
@@ -130,18 +130,18 @@ dependencies = [
 
 [[package]]
 name = "wtime-decode"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "wtime-types",
 ]
 
 [[package]]
 name = "wtime-types"
-version = "0.1.16"
+version = "0.1.17"
 
 [[package]]
 name = "wtime-validate"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "wtime-decode",
  "wtime-types",
