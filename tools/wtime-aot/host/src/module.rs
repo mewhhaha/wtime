@@ -479,13 +479,8 @@ impl Module {
         // (always true for `WTMS0002`, where `so_rel_off == 0`).
         #[cfg(target_os = "linux")]
         if so_file_offset.is_multiple_of(page_size as u64)
-            && let Some(so) = load_so_mmap_file(
-                engine,
-                Arc::clone(&file),
-                so_file_offset,
-                so_len,
-                Some(len),
-            )?
+            && let Some(so) =
+                load_so_mmap_file(engine, Arc::clone(&file), so_file_offset, so_len, Some(len))?
         {
             return Self::from_loaded_so(engine, so, None);
         }
@@ -551,8 +546,10 @@ impl Module {
                 let end = start.wrapping_add(*image_len);
                 start..end
             }
-            _ => (self.inner.so.desc.code_start as *const u8)
-                ..(self.inner.so.desc.code_end as *const u8),
+            _ => {
+                (self.inner.so.desc.code_start as *const u8)
+                    ..(self.inner.so.desc.code_end as *const u8)
+            }
         }
     }
 

@@ -1134,7 +1134,10 @@ fn precompiled_module_deserializes_across_opt_levels_and_reports_image_range() {
     let load_engine = Engine::new(&load_cfg).expect("load engine");
     let mem_mod = unsafe { Module::deserialize(&load_engine, &bytes) }.expect("deserialize mem");
     let mem_range = mem_mod.image_range();
-    assert_eq!(mem_range.end as usize - mem_range.start as usize, bytes.len());
+    assert_eq!(
+        mem_range.end as usize - mem_range.start as usize,
+        bytes.len()
+    );
 
     let tmp_path = std::env::temp_dir().join(format!(
         "wtime-aot-host-image-range-{}.wtmn",
@@ -1206,4 +1209,653 @@ fn reclaim_inactive_gc_space_preserves_live_objects_and_subsequent_gcs() {
     assert_eq!(arr.get(&mut scope, 0).unwrap().i32(), Some(0x55));
     assert_eq!(arr.get(&mut scope, 8191).unwrap().i32(), Some(0x55));
     let _ = kept;
+}
+
+#[test]
+fn generational_minor_gc_write_barriers_preserve_old_to_young_edges() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (type $node (struct (field (mut (ref null $node))) (field (mut i32))))
+            (type $arr (array (mut (ref null $node))))
+
+            (func (export "mk_node") (param i32) (result anyref)
+                (struct.new $node (ref.null $node) (local.get 0)))
+
+            (func (export "mk_arr") (param i32) (result anyref)
+                (array.new_default $arr (local.get 0)))
+
+            (func (export "set_child") (param anyref anyref)
+                (struct.set $node 0
+                    (ref.cast (ref $node) (local.get 0))
+                    (ref.cast (ref null $node) (local.get 1))))
+
+            (func (export "get_child_val") (param anyref) (result i32)
+                (struct.get $node 1
+                    (ref.as_non_null
+                        (struct.get $node 0
+                            (ref.cast (ref $node) (local.get 0))))))
+
+            (func (export "arr_set") (param anyref i32 anyref)
+                (array.set $arr
+                    (ref.cast (ref $arr) (local.get 0))
+                    (local.get 1)
+                    (ref.cast (ref null $node) (local.get 2))))
+
+            (func (export "arr_fill") (param anyref i32 anyref i32)
+                (array.fill $arr
+                    (ref.cast (ref $arr) (local.get 0))
+                    (local.get 1)
+                    (ref.cast (ref null $node) (local.get 2))
+                    (local.get 3)))
+
+            (func (export "arr_copy") (param anyref i32 anyref i32 i32)
+                (array.copy $arr $arr
+                    (ref.cast (ref $arr) (local.get 0))
+                    (local.get 1)
+                    (ref.cast (ref $arr) (local.get 2))
+                    (local.get 3)
+                    (local.get 4)))
+
+            (func (export "arr_get_val") (param anyref i32) (result i32)
+                (struct.get $node 1
+                    (ref.as_non_null
+                        (array.get $arr
+                            (ref.cast (ref $arr) (local.get 0))
+                            (local.get 1)))))
+
+            ;; Allocates short-lived garbage to trigger multiple Minor GCs.
+            (func (export "churn") (param $n i32) (result i32)
+                (local $i i32)
+                (local $sum i32)
+                (loop $lp
+                    (local.set $sum
+                        (i32.add (local.get $sum)
+                            (struct.get $node 1
+                                (struct.new $node (ref.null $node) (local.get $i)))))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $lp (i32.lt_u (local.get $i) (local.get $n))))
+                (local.get $sum))
+
+            ;; Keeps 8 live GC refs in registers across allocation safepoints (Hill 10 + Hill 11).
+            (func (export "live_regs_across_gc") (param $iters i32) (result i32)
+                (local $a (ref $node))
+                (local $b (ref $node))
+                (local $c (ref $node))
+                (local $d (ref $node))
+                (local $e (ref $node))
+                (local $f (ref $node))
+                (local $g (ref $node))
+                (local $h (ref $node))
+                (local $i i32)
+                (local.set $a (struct.new $node (ref.null $node) (i32.const 10)))
+                (local.set $b (struct.new $node (ref.null $node) (i32.const 20)))
+                (local.set $c (struct.new $node (ref.null $node) (i32.const 30)))
+                (local.set $d (struct.new $node (ref.null $node) (i32.const 40)))
+                (local.set $e (struct.new $node (ref.null $node) (i32.const 50)))
+                (local.set $f (struct.new $node (ref.null $node) (i32.const 60)))
+                (local.set $g (struct.new $node (ref.null $node) (i32.const 70)))
+                (local.set $h (struct.new $node (ref.null $node) (i32.const 80)))
+                (loop $lp
+                    (drop (struct.new $node (local.get $a) (local.get $i)))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $lp (i32.lt_u (local.get $i) (local.get $iters))))
+                (i32.add
+                    (i32.add
+                        (i32.add (struct.get $node 1 (local.get $a)) (struct.get $node 1 (local.get $b)))
+                        (i32.add (struct.get $node 1 (local.get $c)) (struct.get $node 1 (local.get $d))))
+                    (i32.add
+                        (i32.add (struct.get $node 1 (local.get $e)) (struct.get $node 1 (local.get $f)))
+                        (i32.add (struct.get $node 1 (local.get $g)) (struct.get $node 1 (local.get $h))))))
+        )"#,
+    )
+    .expect("wat");
+
+    let mut cfg = Config::new();
+    cfg.collector(Collector::Copying)
+        .wasm_gc(true)
+        .gc_heap_initial_size(256 * 1024);
+    let engine = Engine::new(&cfg).expect("engine");
+    let module = Module::new(&engine, &wasm).expect("module");
+    let mut store = Store::new(&engine, ());
+    let inst = Instance::new(&mut store, &module, &[]).expect("inst");
+
+    let mk_node = inst
+        .get_typed_func::<i32, Option<Rooted<AnyRef>>>(&mut store, "mk_node")
+        .unwrap();
+    let mk_arr = inst
+        .get_typed_func::<i32, Option<Rooted<AnyRef>>>(&mut store, "mk_arr")
+        .unwrap();
+    let set_child = inst
+        .get_typed_func::<(Option<Rooted<AnyRef>>, Option<Rooted<AnyRef>>), ()>(
+            &mut store,
+            "set_child",
+        )
+        .unwrap();
+    let get_child_val = inst
+        .get_typed_func::<Option<Rooted<AnyRef>>, i32>(&mut store, "get_child_val")
+        .unwrap();
+    let arr_set = inst
+        .get_typed_func::<(Option<Rooted<AnyRef>>, i32, Option<Rooted<AnyRef>>), ()>(
+            &mut store, "arr_set",
+        )
+        .unwrap();
+    let arr_fill = inst
+        .get_typed_func::<(Option<Rooted<AnyRef>>, i32, Option<Rooted<AnyRef>>, i32), ()>(
+            &mut store, "arr_fill",
+        )
+        .unwrap();
+    let arr_copy = inst
+        .get_typed_func::<(
+            Option<Rooted<AnyRef>>,
+            i32,
+            Option<Rooted<AnyRef>>,
+            i32,
+            i32,
+        ), ()>(&mut store, "arr_copy")
+        .unwrap();
+    let arr_get_val = inst
+        .get_typed_func::<(Option<Rooted<AnyRef>>, i32), i32>(&mut store, "arr_get_val")
+        .unwrap();
+    let churn = inst
+        .get_typed_func::<i32, i32>(&mut store, "churn")
+        .unwrap();
+    let live_regs = inst
+        .get_typed_func::<i32, i32>(&mut store, "live_regs_across_gc")
+        .unwrap();
+
+    // Allocate parents and promote them into Old Space via Major GC.
+    let old_parent = mk_node
+        .call(&mut store, 1)
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store)
+        .unwrap();
+    let old_host_parent = mk_node
+        .call(&mut store, 2)
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store)
+        .unwrap();
+    let old_arr = mk_arr
+        .call(&mut store, 512)
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store)
+        .unwrap(); // 4 KiB > 8 cards
+    let old_fill_arr = mk_arr
+        .call(&mut store, 64)
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store)
+        .unwrap();
+    let old_copy_dst = mk_arr
+        .call(&mut store, 64)
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store)
+        .unwrap();
+    store.gc(None).unwrap();
+
+    let major_before = store.gc_major_count();
+    let old_parent_raw = old_parent.to_raw(&mut store).unwrap();
+    let old_arr_raw = old_arr.to_raw(&mut store).unwrap();
+
+    // Mutate Old objects to point to fresh Young Nursery objects across 2 full rounds!
+    for round in 0..2i32 {
+        let base = round * 1000;
+        {
+            let mut scope = RootScope::new(&mut store);
+            let y1 = mk_node.call(&mut scope, base + 111).unwrap().unwrap();
+            let y2 = mk_node.call(&mut scope, base + 222).unwrap().unwrap();
+            let y3 = mk_node.call(&mut scope, base + 333).unwrap().unwrap();
+            let y4 = mk_node.call(&mut scope, base + 444).unwrap().unwrap();
+            let y5 = mk_node.call(&mut scope, base + 555).unwrap().unwrap();
+            let y_src = mk_arr.call(&mut scope, 8).unwrap().unwrap();
+
+            let p = old_parent.to_rooted(&mut scope);
+            let hp = old_host_parent.to_rooted(&mut scope);
+            let a = old_arr.to_rooted(&mut scope);
+            let fa = old_fill_arr.to_rooted(&mut scope);
+            let ca = old_copy_dst.to_rooted(&mut scope);
+
+            // Wasm struct.set, array.set (index 400 is > 3 KiB from array header!), array.fill, array.copy
+            set_child.call(&mut scope, (Some(p), Some(y1))).unwrap();
+            arr_set.call(&mut scope, (Some(a), 400, Some(y2))).unwrap();
+            arr_fill
+                .call(&mut scope, (Some(fa), 10, Some(y3), 20))
+                .unwrap();
+            arr_set
+                .call(&mut scope, (Some(y_src), 3, Some(y4)))
+                .unwrap();
+            arr_copy
+                .call(&mut scope, (Some(ca), 12, Some(y_src), 3, 1))
+                .unwrap();
+
+            // Host StructRef::set_field + ArrayRef::set write barriers!
+            hp.as_struct(&scope)
+                .unwrap()
+                .unwrap()
+                .set_field(&mut scope, 0, Val::AnyRef(Some(y5)))
+                .unwrap();
+            a.as_array(&scope)
+                .unwrap()
+                .unwrap()
+                .set(&mut scope, 500, Val::AnyRef(Some(y5)))
+                .unwrap();
+        }
+
+        // Churn ~400 KiB of short-lived garbage -> triggers >= 3 Minor GCs without copying Old Space!
+        let _ = churn.call(&mut store, 16_000).unwrap();
+
+        let mut scope = RootScope::new(&mut store);
+        let p = old_parent.to_rooted(&mut scope);
+        let hp = old_host_parent.to_rooted(&mut scope);
+        let a = old_arr.to_rooted(&mut scope);
+        let fa = old_fill_arr.to_rooted(&mut scope);
+        let ca = old_copy_dst.to_rooted(&mut scope);
+
+        assert_eq!(get_child_val.call(&mut scope, Some(p)).unwrap(), base + 111);
+        assert_eq!(
+            arr_get_val.call(&mut scope, (Some(a), 400)).unwrap(),
+            base + 222
+        );
+        assert_eq!(
+            arr_get_val.call(&mut scope, (Some(fa), 25)).unwrap(),
+            base + 333
+        );
+        assert_eq!(
+            arr_get_val.call(&mut scope, (Some(ca), 12)).unwrap(),
+            base + 444
+        );
+        assert_eq!(
+            get_child_val.call(&mut scope, Some(hp)).unwrap(),
+            base + 555
+        );
+        assert_eq!(
+            arr_get_val.call(&mut scope, (Some(a), 500)).unwrap(),
+            base + 555
+        );
+    }
+
+    assert!(
+        store.gc_minor_count() >= 5,
+        "expected >= 5 minor GCs, got {}",
+        store.gc_minor_count()
+    );
+    assert_eq!(
+        store.gc_major_count(),
+        major_before,
+        "Old Space should not have triggered a Major GC while headroom remained"
+    );
+    assert_eq!(
+        old_parent.to_raw(&mut store).unwrap(),
+        old_parent_raw,
+        "Old object address must remain stable across Minor GCs"
+    );
+    assert_eq!(
+        old_arr.to_raw(&mut store).unwrap(),
+        old_arr_raw,
+        "Old array address must remain stable across Minor GCs"
+    );
+
+    // Exercise Hill 10 register-allocated GC refs across both Minor and Major GCs!
+    assert_eq!(live_regs.call(&mut store, 40_000).unwrap(), 360);
+    assert!(store.gc_minor_count() >= 10);
+}
+
+#[test]
+fn generational_minor_gc_weakmap_ephemeron_and_externref_semantics() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wtime_aot_host::{
+        ArrayRef, ArrayRefPre, ArrayType, ExternRef, FieldType, GcEphemeron, Mutability,
+        StorageType, StructRef, StructRefPre, StructType, WeakAnyRef,
+    };
+
+    struct DropCounter(Arc<AtomicUsize>);
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let mut cfg = Config::new();
+    cfg.collector(Collector::Copying)
+        .wasm_gc(true)
+        .gc_heap_initial_size(256 * 1024);
+    let engine = Engine::new(&cfg).expect("engine");
+    let mut store = Store::new(&engine, ());
+
+    let st_ty = StructType::new(
+        &engine,
+        [
+            FieldType::new(
+                Mutability::Var,
+                StorageType::ValType(wtime_aot_host::ValType::I32),
+            ),
+            FieldType::new(
+                Mutability::Var,
+                StorageType::ValType(wtime_aot_host::ValType::EXTERNREF),
+            ),
+        ],
+    )
+    .unwrap();
+    let st_pre = StructRefPre::new(&mut store, st_ty);
+    let eq_arr_ty = ArrayType::new(
+        &engine,
+        FieldType::new(
+            Mutability::Var,
+            StorageType::ValType(wtime_aot_host::ValType::ANYREF),
+        ),
+    );
+    let eq_arr_pre = ArrayRefPre::new(&mut store, eq_arr_ty);
+    let i8_arr_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, StorageType::I8));
+    let i8_pre = ArrayRefPre::new(&mut store, i8_arr_ty);
+
+    let dropped_live = Arc::new(AtomicUsize::new(0));
+    let dropped_dead = Arc::new(AtomicUsize::new(0));
+
+    // Create Old objects: weakmap table, old key, old owner, and old struct holding live ExternRef.
+    let (old_wm, old_owner, old_key, old_ext_holder) = {
+        let mut scope = RootScope::new(&mut store);
+        let ext_live = ExternRef::new(&mut scope, DropCounter(Arc::clone(&dropped_live))).unwrap();
+        let _ext_dead = ExternRef::new(&mut scope, DropCounter(Arc::clone(&dropped_dead))).unwrap();
+        let holder = StructRef::new(
+            &mut scope,
+            &st_pre,
+            &[Val::I32(99), Val::ExternRef(Some(ext_live))],
+        )
+        .unwrap();
+        let wm = ArrayRef::new(&mut scope, &eq_arr_pre, &Val::AnyRef(None), 6).unwrap();
+        let owner =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(1), Val::ExternRef(None)]).unwrap();
+        let key =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(2), Val::ExternRef(None)]).unwrap();
+        let wm_raw = wm.to_anyref().to_raw(&mut scope).unwrap();
+        unsafe { GcEphemeron::register_table_raw(&mut scope, wm_raw).unwrap() };
+        (
+            wm.to_owned_rooted(&mut scope).unwrap(),
+            owner.to_owned_rooted(&mut scope).unwrap(),
+            key.to_owned_rooted(&mut scope).unwrap(),
+            holder.to_owned_rooted(&mut scope).unwrap(),
+        )
+    };
+    // Promote them to Old Space (and sweep `_ext_dead`).
+    store.gc(None).unwrap();
+    assert_eq!(dropped_dead.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped_live.load(Ordering::SeqCst), 0);
+    let major_before = store.gc_major_count();
+
+    // Populate Old WeakMap, Ephemerons, and WeakRefs with Young objects!
+    let (eph_live, eph_dead, weak_live, weak_dead, young_live_key) = {
+        let mut scope = RootScope::new(&mut store);
+        let y_val_for_old_key =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(777), Val::ExternRef(None)]).unwrap();
+        let y_live_k =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(888), Val::ExternRef(None)]).unwrap();
+        let y_live_v =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(889), Val::ExternRef(None)]).unwrap();
+        let y_dead_k =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(666), Val::ExternRef(None)]).unwrap();
+        let y_dead_v =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(667), Val::ExternRef(None)]).unwrap();
+        let y_eph_v =
+            StructRef::new(&mut scope, &st_pre, &[Val::I32(555), Val::ExternRef(None)]).unwrap();
+
+        let wm = old_wm.to_rooted(&mut scope);
+        let ok = old_key.to_rooted(&mut scope);
+        wm.set(&mut scope, 0, Val::AnyRef(Some(ok.to_anyref())))
+            .unwrap();
+        wm.set(
+            &mut scope,
+            1,
+            Val::AnyRef(Some(y_val_for_old_key.to_anyref())),
+        )
+        .unwrap();
+        wm.set(&mut scope, 2, Val::AnyRef(Some(y_live_k.to_anyref())))
+            .unwrap();
+        wm.set(&mut scope, 3, Val::AnyRef(Some(y_live_v.to_anyref())))
+            .unwrap();
+        wm.set(&mut scope, 4, Val::AnyRef(Some(y_dead_k.to_anyref())))
+            .unwrap();
+        wm.set(&mut scope, 5, Val::AnyRef(Some(y_dead_v.to_anyref())))
+            .unwrap();
+
+        let e_live = GcEphemeron::new(&mut scope, &old_owner, &old_key, Some(&y_eph_v)).unwrap();
+        let e_dead = GcEphemeron::new(&mut scope, &old_owner, &y_dead_k, Some(&y_dead_v)).unwrap();
+        let w_live = WeakAnyRef::new(&mut scope, &old_owner, &y_live_k).unwrap();
+        let w_dead = WeakAnyRef::new(&mut scope, &old_owner, &y_dead_k).unwrap();
+        (
+            e_live,
+            e_dead,
+            w_live,
+            w_dead,
+            y_live_k.to_owned_rooted(&mut scope).unwrap(),
+        )
+    };
+
+    // Trigger several Minor GCs via short-lived byte arrays (NOT a Major GC).
+    for _ in 0..12 {
+        let mut scope = RootScope::new(&mut store);
+        let _ = ArrayRef::new(&mut scope, &i8_pre, &Val::I32(3), 24 * 1024).unwrap();
+    }
+    assert!(store.gc_minor_count() >= 2);
+    assert_eq!(store.gc_major_count(), major_before);
+    // Live ExternRef inside Old struct MUST NOT be dropped by Minor GC!
+    assert_eq!(dropped_live.load(Ordering::SeqCst), 0);
+
+    // Check WeakMap, Ephemerons, and WeakRefs after Minor GC.
+    {
+        let mut scope = RootScope::new(&mut store);
+        let wm = old_wm.to_rooted(&mut scope);
+        let v0 = wm
+            .get(&mut scope, 1)
+            .unwrap()
+            .unwrap_anyref()
+            .expect("old_key -> young_val promoted");
+        assert_eq!(
+            v0.as_struct(&scope)
+                .unwrap()
+                .unwrap()
+                .field(&mut scope, 0)
+                .unwrap()
+                .unwrap_i32(),
+            777
+        );
+        let v1 = wm
+            .get(&mut scope, 3)
+            .unwrap()
+            .unwrap_anyref()
+            .expect("young_live_k -> young_live_v promoted");
+        assert_eq!(
+            v1.as_struct(&scope)
+                .unwrap()
+                .unwrap()
+                .field(&mut scope, 0)
+                .unwrap()
+                .unwrap_i32(),
+            889
+        );
+        assert!(
+            wm.get(&mut scope, 4).unwrap().unwrap_anyref().is_none(),
+            "dead young key must clear"
+        );
+        assert!(
+            wm.get(&mut scope, 5).unwrap().unwrap_anyref().is_none(),
+            "dead young val must clear"
+        );
+
+        assert!(eph_live.is_live(&scope).unwrap());
+        let ev = eph_live
+            .value(&mut scope)
+            .unwrap()
+            .expect("ephemeron young value promoted");
+        assert_eq!(
+            ev.as_struct(&scope)
+                .unwrap()
+                .unwrap()
+                .field(&mut scope, 0)
+                .unwrap()
+                .unwrap_i32(),
+            555
+        );
+        assert!(!eph_dead.is_live(&scope).unwrap());
+
+        assert!(weak_live.upgrade(&mut scope).unwrap().is_some());
+        assert!(weak_dead.upgrade(&mut scope).unwrap().is_none());
+    }
+
+    // Now drop `old_ext_holder` and trigger Major GC -> live ExternRef must finally be swept!
+    drop(old_ext_holder);
+    drop(young_live_key);
+    store.gc(None).unwrap();
+    assert_eq!(dropped_live.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn store_snapshot_roundtrips_gc_heap_funcrefs_globals_memory_and_weak_state() {
+    use wtime_aot_host::{GcEphemeron, WeakAnyRef};
+
+    let wasm = wat::parse_str(
+        r#"(module
+            (type $fn_i32 (func (param i32) (result i32)))
+            (type $closure (struct (field (ref $fn_i32)) (field (mut i32)) (field (mut (ref null $closure)))))
+            (type $arr (array (mut (ref null $closure))))
+
+            (import "host" "bump" (func $host_bump (type $fn_i32)))
+
+            (memory 1)
+            (table $ftbl 2 funcref)
+            (global $g_root (mut (ref null $closure)) (ref.null $closure))
+            (global $g_fn (mut (ref null $fn_i32)) (ref.null $fn_i32))
+            (global $g_counter (mut i32) (i32.const 0))
+
+            (elem declare func $add_ten $host_bump)
+
+            (func $add_ten (type $fn_i32)
+                (i32.add (local.get 0) (i32.const 10)))
+
+            (func (export "init_state") (result eqref)
+                (local $leaf (ref $closure))
+                (local $head (ref $closure))
+                (local.set $leaf (struct.new $closure (ref.func $host_bump) (i32.const 7) (ref.null $closure)))
+                (local.set $head (struct.new $closure (ref.func $add_ten) (i32.const 3) (local.get $leaf)))
+                (global.set $g_root (local.get $head))
+                (global.set $g_fn (ref.func $add_ten))
+                (global.set $g_counter (i32.const 42))
+                (table.set $ftbl (i32.const 0) (ref.func $add_ten))
+                (table.set $ftbl (i32.const 1) (ref.func $host_bump))
+                (i32.store (i32.const 64) (i32.const 0x12345678))
+                (local.get $head))
+
+            (func (export "invoke_snapshot_state") (param $x i32) (result i32)
+                (local $head (ref $closure))
+                (local $leaf (ref $closure))
+                (local $r1 i32)
+                (local $r2 i32)
+                (local $r3 i32)
+                (local.set $head (ref.as_non_null (global.get $g_root)))
+                (local.set $leaf (ref.as_non_null (struct.get $closure 2 (local.get $head))))
+                ;; Call Wasm funcref stored inside GC struct (`$add_ten(x)` = x + 10)
+                (local.set $r1 (call_ref $fn_i32 (local.get $x) (struct.get $closure 0 (local.get $head))))
+                ;; Call Host funcref stored inside nested GC struct (`$host_bump(r1)` = r1 + host_bias)
+                (local.set $r2 (call_ref $fn_i32 (local.get $r1) (struct.get $closure 0 (local.get $leaf))))
+                ;; Call indirect via restored table[1] (`$host_bump(100)`) + linear memory + global counter
+                (local.set $r3 (call_indirect $ftbl (type $fn_i32) (i32.const 100) (i32.const 1)))
+                (i32.add
+                    (i32.add (local.get $r2) (local.get $r3))
+                    (i32.add (i32.load (i32.const 64)) (global.get $g_counter))))
+
+            (func (export "mutate_and_churn") (param $new_val i32) (result i32)
+                (local $head (ref $closure))
+                (local $fresh (ref $closure))
+                (local $i i32)
+                (local.set $head (ref.as_non_null (global.get $g_root)))
+                (local.set $fresh (struct.new $closure (ref.func $add_ten) (local.get $new_val) (ref.null $closure)))
+                ;; Write barrier on Old restored object -> Young fresh child!
+                (struct.set $closure 2 (local.get $head) (local.get $fresh))
+                (loop $lp
+                    (drop (struct.new $closure (ref.func $add_ten) (local.get $i) (ref.null $closure)))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $lp (i32.lt_u (local.get $i) (i32.const 12000))))
+                (struct.get $closure 1 (ref.as_non_null (struct.get $closure 2 (local.get $head)))))
+        )"#,
+    )
+    .expect("wat");
+
+    let mut cfg = Config::new();
+    cfg.collector(Collector::Copying)
+        .wasm_gc(true)
+        .gc_heap_initial_size(256 * 1024);
+    let engine = Engine::new(&cfg).expect("engine");
+    let module = Module::new(&engine, &wasm).expect("module");
+
+    let make_store = |bias: i32| {
+        let mut store = Store::new(&engine, bias);
+        let mut linker = Linker::new(&engine);
+        linker
+            .func_wrap("host", "bump", |caller: Caller<'_, i32>, v: i32| -> i32 {
+                v + *caller.data()
+            })
+            .unwrap();
+        let inst = linker.instantiate(&mut store, &module).unwrap();
+        (store, inst)
+    };
+
+    // 1. Initialize Store A (host bias = 1000) and capture snapshot + extra root + ephemeron + weak ref.
+    let (mut store_a, inst_a) = make_store(1000);
+    let init_a = inst_a
+        .get_typed_func::<(), Option<Rooted<EqRef>>>(&mut store_a, "init_state")
+        .unwrap();
+    let head_root = init_a
+        .call(&mut store_a, ())
+        .unwrap()
+        .unwrap()
+        .to_owned_rooted(&mut store_a)
+        .unwrap();
+    let eph_a = GcEphemeron::new(&mut store_a, &head_root, &head_root, Some(&head_root)).unwrap();
+    let weak_a = WeakAnyRef::new(&mut store_a, &head_root, &head_root).unwrap();
+
+    let snap = store_a
+        .capture_snapshot(&[&head_root])
+        .expect("capture snapshot");
+    assert!(snap.heap_bytes_len() > 0);
+    drop(store_a); // Destroy Store A completely before restoring into Store B & C!
+
+    // 2. Restore into Store B (host bias = 5) and Store C (host bias = 200) — verifies host FuncRef remapping!
+    for &(bias, mutate_v) in &[(5i32, 9001i32), (200i32, 7777i32)] {
+        let (mut store, inst) = make_store(bias);
+        let restored_roots = store.restore_snapshot(&snap).expect("restore snapshot");
+        assert_eq!(restored_roots.len(), 1);
+
+        // Verify rebound ephemeron & weak ref resolve cleanly to the restored root in this Store.
+        let eph = store.rebind_ephemeron(eph_a);
+        let weak = store.rebind_weak_ref(weak_a);
+        assert!(eph.is_live(&store).unwrap());
+        {
+            let mut scope = RootScope::new(&mut store);
+            let e_val = eph.value(&mut scope).unwrap().expect("ephemeron value");
+            let w_val = weak.upgrade(&mut scope).unwrap().expect("weak upgrade");
+            let r_val = restored_roots[0].to_rooted(&mut scope).to_anyref();
+            assert!(Rooted::ref_eq(&scope, &e_val, &r_val).unwrap());
+            assert!(Rooted::ref_eq(&scope, &w_val, &r_val).unwrap());
+        }
+
+        // Invoke restored GC closures (both Wasm & Host FuncRefs!), indirect table, linear memory, globals!
+        let invoke = inst
+            .get_typed_func::<i32, i32>(&mut store, "invoke_snapshot_state")
+            .unwrap();
+        // x=5 -> r1=15, r2=15+bias, r3=100+bias, mem=0x12345678, global=42
+        let expected = (15 + bias) + (100 + bias) + 0x1234_5678 + 42;
+        assert_eq!(invoke.call(&mut store, 5).unwrap(), expected);
+
+        // Mutate restored Old object to point to fresh Young child + trigger Minor GCs + Major GC!
+        let mutate = inst
+            .get_typed_func::<i32, i32>(&mut store, "mutate_and_churn")
+            .unwrap();
+        assert_eq!(mutate.call(&mut store, mutate_v).unwrap(), mutate_v);
+        assert!(store.gc_minor_count() >= 1);
+        store.gc(None).unwrap();
+        assert!(eph.is_live(&store).unwrap());
+    }
 }

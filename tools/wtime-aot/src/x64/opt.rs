@@ -2337,9 +2337,6 @@ pub fn try_collect_pre_inline_summary(
                 | Op::PgoRecordCi { .. } => {
                     has_disallowed = true;
                 }
-                op if op.is_gc_op() => {
-                    has_disallowed = true;
-                }
                 _ => {}
             }
         }
@@ -2417,7 +2414,7 @@ fn callee_has_inlinable_ops(ir: &IrFunc) -> bool {
                     | Op::ExnGetPayload { .. }
                     | Op::PgoFuncEnter(_)
                     | Op::PgoRecordCi { .. }
-            ) || inst.op.is_gc_op()
+            )
         })
     })
 }
@@ -2628,7 +2625,7 @@ fn clone_callee_into_caller(
         return Err("x64: inline block limit".into());
     }
     if !callee_has_inlinable_ops(callee) {
-        return Err("x64: cannot inline EH/GC/PGO/Store-ref callee".into());
+        return Err("x64: cannot inline EH/PGO/Store-ref callee".into());
     }
     let mut needed_pool = 0usize;
     for td in &callee.br_tables {
@@ -2643,6 +2640,12 @@ fn clone_callee_into_caller(
                     needed_pool = needed_pool
                         .saturating_add(args.len as usize)
                         .saturating_add(rets.len as usize);
+                }
+                Op::StructNew { fields, .. } => {
+                    needed_pool = needed_pool.saturating_add(fields.len as usize);
+                }
+                Op::ArrayNewFixed { elems, .. } => {
+                    needed_pool = needed_pool.saturating_add(elems.len as usize);
                 }
                 _ => {}
             }
@@ -2680,6 +2683,27 @@ fn clone_callee_into_caller(
 
     caller.val_tys.extend_from_slice(&callee.val_tys);
     caller.v128_consts.extend_from_slice(&callee.v128_consts);
+    if callee.uses_gc {
+        if !caller.uses_gc {
+            caller.uses_gc = true;
+            caller
+                .val_ref_kinds
+                .resize(base_val as usize, super::ir::ValRefKind::None);
+        }
+        if callee.val_ref_kinds.len() == callee.val_tys.len() {
+            caller
+                .val_ref_kinds
+                .extend_from_slice(&callee.val_ref_kinds);
+        } else {
+            caller
+                .val_ref_kinds
+                .resize(caller.val_tys.len(), super::ir::ValRefKind::None);
+        }
+    } else if caller.uses_gc {
+        caller
+            .val_ref_kinds
+            .resize(caller.val_tys.len(), super::ir::ValRefKind::None);
+    }
 
     // Split caller block at `call_inst_idx`:
     let ret_vals: Vec<Val> = caller.pool_slice(call_rets).to_vec();
@@ -3245,36 +3269,159 @@ fn clone_callee_into_caller(
                 | Op::PgoRecordCi { .. } => {
                     unreachable!("EH/PGO-gen callee excluded by is_inlinable_ir")
                 }
-                Op::GcNull
-                | Op::ExternNull
-                | Op::GcConstI31(_)
-                | Op::ExternConstI31(_)
-                | Op::RefEq(_, _)
-                | Op::RefI31(_)
-                | Op::I31GetS(_)
-                | Op::I31GetU(_)
-                | Op::AnyConvertExtern(_)
-                | Op::ExternConvertAny(_)
-                | Op::StructNew { .. }
-                | Op::StructNewDefault(_)
-                | Op::StructGet { .. }
-                | Op::StructSet { .. }
-                | Op::ArrayNew { .. }
-                | Op::ArrayNewDefault { .. }
-                | Op::ArrayNewFixed { .. }
-                | Op::ArrayNewData { .. }
-                | Op::ArrayNewElem { .. }
-                | Op::ArrayGet { .. }
-                | Op::ArraySet { .. }
-                | Op::ArrayLen(_)
-                | Op::ArrayFill { .. }
-                | Op::ArrayCopy { .. }
-                | Op::ArrayInitData { .. }
-                | Op::ArrayInitElem { .. }
-                | Op::RefTest { .. }
-                | Op::RefCast { .. } => {
-                    unreachable!("GC callee excluded by is_inlinable_ir")
-                }
+                Op::GcNull => Op::GcNull,
+                Op::ExternNull => Op::ExternNull,
+                Op::GcConstI31(c) => Op::GcConstI31(c),
+                Op::ExternConstI31(c) => Op::ExternConstI31(c),
+                Op::RefEq(a, b) => Op::RefEq(map_v(a), map_v(b)),
+                Op::RefI31(a) => Op::RefI31(map_v(a)),
+                Op::I31GetS(a) => Op::I31GetS(map_v(a)),
+                Op::I31GetU(a) => Op::I31GetU(map_v(a)),
+                Op::AnyConvertExtern(a) => Op::AnyConvertExtern(map_v(a)),
+                Op::ExternConvertAny(a) => Op::ExternConvertAny(map_v(a)),
+                Op::StructNew { ty, fields } => Op::StructNew {
+                    ty,
+                    fields: map_range(&mut caller.val_pool, &callee.val_pool, fields)?,
+                },
+                Op::StructNewDefault(ty) => Op::StructNewDefault(ty),
+                Op::StructGet {
+                    ty,
+                    field,
+                    kind,
+                    obj,
+                } => Op::StructGet {
+                    ty,
+                    field,
+                    kind,
+                    obj: map_v(obj),
+                },
+                Op::StructSet {
+                    ty,
+                    field,
+                    obj,
+                    val,
+                } => Op::StructSet {
+                    ty,
+                    field,
+                    obj: map_v(obj),
+                    val: map_v(val),
+                },
+                Op::ArrayNew { ty, init, len } => Op::ArrayNew {
+                    ty,
+                    init: map_v(init),
+                    len: map_v(len),
+                },
+                Op::ArrayNewDefault { ty, len } => Op::ArrayNewDefault {
+                    ty,
+                    len: map_v(len),
+                },
+                Op::ArrayNewFixed { ty, elems } => Op::ArrayNewFixed {
+                    ty,
+                    elems: map_range(&mut caller.val_pool, &callee.val_pool, elems)?,
+                },
+                Op::ArrayNewData { ty, data, src, len } => Op::ArrayNewData {
+                    ty,
+                    data,
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::ArrayNewElem { ty, elem, src, len } => Op::ArrayNewElem {
+                    ty,
+                    elem,
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::ArrayGet { ty, kind, arr, idx } => Op::ArrayGet {
+                    ty,
+                    kind,
+                    arr: map_v(arr),
+                    idx: map_v(idx),
+                },
+                Op::ArraySet { ty, arr, idx, val } => Op::ArraySet {
+                    ty,
+                    arr: map_v(arr),
+                    idx: map_v(idx),
+                    val: map_v(val),
+                },
+                Op::ArrayLen(a) => Op::ArrayLen(map_v(a)),
+                Op::ArrayFill {
+                    ty,
+                    arr,
+                    dst,
+                    val,
+                    len,
+                } => Op::ArrayFill {
+                    ty,
+                    arr: map_v(arr),
+                    dst: map_v(dst),
+                    val: map_v(val),
+                    len: map_v(len),
+                },
+                Op::ArrayCopy {
+                    dst_ty,
+                    src_ty,
+                    dst,
+                    dst_off,
+                    src,
+                    src_off,
+                    len,
+                } => Op::ArrayCopy {
+                    dst_ty,
+                    src_ty,
+                    dst: map_v(dst),
+                    dst_off: map_v(dst_off),
+                    src: map_v(src),
+                    src_off: map_v(src_off),
+                    len: map_v(len),
+                },
+                Op::ArrayInitData {
+                    ty,
+                    data,
+                    arr,
+                    dst,
+                    src,
+                    len,
+                } => Op::ArrayInitData {
+                    ty,
+                    data,
+                    arr: map_v(arr),
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::ArrayInitElem {
+                    ty,
+                    elem,
+                    arr,
+                    dst,
+                    src,
+                    len,
+                } => Op::ArrayInitElem {
+                    ty,
+                    elem,
+                    arr: map_v(arr),
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::RefTest {
+                    val,
+                    nullable,
+                    heap,
+                } => Op::RefTest {
+                    val: map_v(val),
+                    nullable,
+                    heap,
+                },
+                Op::RefCast {
+                    val,
+                    nullable,
+                    heap,
+                } => Op::RefCast {
+                    val: map_v(val),
+                    nullable,
+                    heap,
+                },
                 Op::AtomicFence => Op::AtomicFence,
                 Op::AtomicLoad {
                     mem,
@@ -4886,34 +5033,6 @@ pub fn try_compute_fn_own_effects(
                 | Op::MemCopyConst { .. }
                 | Op::MemFillConst { .. }
                 | Op::MemByteBlur3Div { .. }
-                | Op::GcNull
-                | Op::ExternNull
-                | Op::GcConstI31(_)
-                | Op::ExternConstI31(_)
-                | Op::RefEq(_, _)
-                | Op::RefI31(_)
-                | Op::I31GetS(_)
-                | Op::I31GetU(_)
-                | Op::AnyConvertExtern(_)
-                | Op::ExternConvertAny(_)
-                | Op::StructNew { .. }
-                | Op::StructNewDefault(_)
-                | Op::StructGet { .. }
-                | Op::StructSet { .. }
-                | Op::ArrayNew { .. }
-                | Op::ArrayNewDefault { .. }
-                | Op::ArrayNewFixed { .. }
-                | Op::ArrayNewData { .. }
-                | Op::ArrayNewElem { .. }
-                | Op::ArrayGet { .. }
-                | Op::ArraySet { .. }
-                | Op::ArrayLen(_)
-                | Op::ArrayFill { .. }
-                | Op::ArrayCopy { .. }
-                | Op::ArrayInitData { .. }
-                | Op::ArrayInitElem { .. }
-                | Op::RefTest { .. }
-                | Op::RefCast { .. }
                 | Op::AtomicFence
                 | Op::AtomicLoad { .. }
                 | Op::AtomicStore { .. }
@@ -5505,7 +5624,9 @@ fn is_pure_licm_op(op: &Op) -> bool {
         | Op::V128Bin { .. }
         | Op::V128Ternary { .. }
         | Op::V128ToI32 { .. }
-        | Op::V128Shift { .. } => true,
+        | Op::V128Shift { .. }
+        | Op::RefEq(_, _)
+        | Op::RefTest { .. } => true,
         Op::I32Bin(bop, _, _) | Op::I64Bin(bop, _, _) => !matches!(
             bop,
             IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
@@ -6204,6 +6325,14 @@ enum GvnKey {
     TruncSat(TruncOp, Val),
     Select(Val, Val, Val),
     V128Un(u16, Val),
+    RefEq(Val, Val),
+    RefTest(Val, bool, super::ir::GcHeapTarget),
+    RefCast(Val, bool, super::ir::GcHeapTarget),
+    I31GetS(Val),
+    I31GetU(Val),
+    ArrayLen(Val),
+    ImmStructGet(u32, u32, super::ir::GcFieldLoadKind, Val),
+    MutStructGet(u32, u32, super::ir::GcFieldLoadKind, Val, u32, u32),
 }
 
 fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
@@ -6311,6 +6440,21 @@ fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
         Op::Trunc(t, a) if !t.can_trap() => GvnKey::TruncSat(t, a),
         Op::Select { cond, a, b } => GvnKey::Select(cond, a, b),
         Op::V128Un { op, a } => GvnKey::V128Un(op, a),
+        Op::RefEq(a, b) => {
+            if a.0 <= b.0 {
+                GvnKey::RefEq(a, b)
+            } else {
+                GvnKey::RefEq(b, a)
+            }
+        }
+        Op::RefTest {
+            val,
+            nullable,
+            heap,
+        } => GvnKey::RefTest(val, nullable, heap),
+        Op::I31GetS(a) => GvnKey::I31GetS(a),
+        Op::I31GetU(a) => GvnKey::I31GetU(a),
+        Op::ArrayLen(a) => GvnKey::ArrayLen(a),
         _ => return None,
     })
 }
@@ -6465,6 +6609,8 @@ struct GvnState<'a> {
     grow_epoch: u32,
     glob_epoch: u32,
     tbl_epoch: u32,
+    gc_write_epoch: u32,
+    gc_alloc_epoch: u32,
 }
 
 impl<'a> GvnState<'a> {
@@ -7076,34 +7222,6 @@ fn run_dom_gvn_and_bce_with_scratch(
                 | Op::StoreMem { .. }
                 | Op::V128StoreLaneMem { .. }
                 | Op::MemByteBlur3Div { .. }
-                | Op::GcNull
-                | Op::ExternNull
-                | Op::GcConstI31(_)
-                | Op::ExternConstI31(_)
-                | Op::RefEq(_, _)
-                | Op::RefI31(_)
-                | Op::I31GetS(_)
-                | Op::I31GetU(_)
-                | Op::AnyConvertExtern(_)
-                | Op::ExternConvertAny(_)
-                | Op::StructNew { .. }
-                | Op::StructNewDefault(_)
-                | Op::StructGet { .. }
-                | Op::StructSet { .. }
-                | Op::ArrayNew { .. }
-                | Op::ArrayNewDefault { .. }
-                | Op::ArrayNewFixed { .. }
-                | Op::ArrayNewData { .. }
-                | Op::ArrayNewElem { .. }
-                | Op::ArrayGet { .. }
-                | Op::ArraySet { .. }
-                | Op::ArrayLen(_)
-                | Op::ArrayFill { .. }
-                | Op::ArrayCopy { .. }
-                | Op::ArrayInitData { .. }
-                | Op::ArrayInitElem { .. }
-                | Op::RefTest { .. }
-                | Op::RefCast { .. }
                 | Op::AtomicFence
                 | Op::AtomicLoad { .. }
                 | Op::AtomicStore { .. }
@@ -7353,6 +7471,8 @@ fn run_dom_gvn_and_bce_with_scratch(
         grow_epoch: 1,
         glob_epoch: 1,
         tbl_epoch: 1,
+        gc_write_epoch: 1,
+        gc_alloc_epoch: 1,
     };
 
     #[derive(Clone, Copy)]
@@ -7372,7 +7492,7 @@ fn run_dom_gvn_and_bce_with_scratch(
         Enter(u32, EdgeFact),
         Exit {
             mark: usize,
-            epochs: (u32, u32, u32),
+            epochs: (u32, u32, u32, u32, u32),
         },
     }
     let mut stack: Vec<DfsAction> = vec![DfsAction::Enter(0, EdgeFact::None)];
@@ -7396,6 +7516,8 @@ fn run_dom_gvn_and_bce_with_scratch(
                 st.grow_epoch = epochs.0;
                 st.glob_epoch = epochs.1;
                 st.tbl_epoch = epochs.2;
+                st.gc_write_epoch = epochs.3;
+                st.gc_alloc_epoch = epochs.4;
             }
             DfsAction::Enter(bid, edge_fact) => {
                 pending_enters -= 1;
@@ -7403,7 +7525,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                 st.record_undo = need_undo;
                 if need_undo {
                     let mark = st.undo.len();
-                    let saved_epochs = (st.grow_epoch, st.glob_epoch, st.tbl_epoch);
+                    let saved_epochs = (
+                        st.grow_epoch,
+                        st.glob_epoch,
+                        st.tbl_epoch,
+                        st.gc_write_epoch,
+                        st.gc_alloc_epoch,
+                    );
                     stack.push(DfsAction::Exit {
                         mark,
                         epochs: saved_epochs,
@@ -7470,6 +7598,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                     }
                     if st.fn_writes_all_tables || st.fn_written_tables != 0 {
                         st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
+                    }
+                    if ir.uses_gc {
+                        st.gc_write_epoch = st.gc_write_epoch.wrapping_add(1);
+                        st.gc_alloc_epoch = st.gc_alloc_epoch.wrapping_add(1);
                     }
                 }
 
@@ -7875,34 +8007,6 @@ fn run_dom_gvn_and_bce_with_scratch(
                         | Op::StoreMem { .. }
                         | Op::V128StoreLaneMem { .. }
                         | Op::MemByteBlur3Div { .. }
-                        | Op::GcNull
-                        | Op::ExternNull
-                        | Op::GcConstI31(_)
-                        | Op::ExternConstI31(_)
-                        | Op::RefEq(_, _)
-                        | Op::RefI31(_)
-                        | Op::I31GetS(_)
-                        | Op::I31GetU(_)
-                        | Op::AnyConvertExtern(_)
-                        | Op::ExternConvertAny(_)
-                        | Op::StructNew { .. }
-                        | Op::StructNewDefault(_)
-                        | Op::StructGet { .. }
-                        | Op::StructSet { .. }
-                        | Op::ArrayNew { .. }
-                        | Op::ArrayNewDefault { .. }
-                        | Op::ArrayNewFixed { .. }
-                        | Op::ArrayNewData { .. }
-                        | Op::ArrayNewElem { .. }
-                        | Op::ArrayGet { .. }
-                        | Op::ArraySet { .. }
-                        | Op::ArrayLen(_)
-                        | Op::ArrayFill { .. }
-                        | Op::ArrayCopy { .. }
-                        | Op::ArrayInitData { .. }
-                        | Op::ArrayInitElem { .. }
-                        | Op::RefTest { .. }
-                        | Op::RefCast { .. }
                         | Op::AtomicFence
                         | Op::AtomicLoad { .. }
                         | Op::AtomicStore { .. }
@@ -7920,6 +8024,225 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             out_insts.push(inst);
                             continue;
+                        }
+                        Op::StructNew { ty, fields } => {
+                            st.gc_alloc_epoch = st.gc_alloc_epoch.wrapping_add(1);
+                            if let Some(res) = inst.res {
+                                let ty_u = *ty;
+                                let fields_r = *fields;
+                                if let super::module::GcCompositeInfo::Struct {
+                                    fields: ref sfields,
+                                    ..
+                                } = st.module.gc_type(ty_u).composite
+                                {
+                                    let fvals = &pool[fields_r.start as usize
+                                        ..fields_r.start as usize + fields_r.len as usize];
+                                    for (fi, (sf, &fv)) in
+                                        sfields.iter().zip(fvals.iter()).enumerate()
+                                    {
+                                        let exact_kind = match sf.storage {
+                                            super::module::GcStorageKind::I32 => {
+                                                Some(super::ir::GcFieldLoadKind::Val(Ty::I32))
+                                            }
+                                            super::module::GcStorageKind::I64
+                                            | super::module::GcStorageKind::GcRef
+                                            | super::module::GcStorageKind::ExternRef
+                                            | super::module::GcStorageKind::OtherRef => {
+                                                Some(super::ir::GcFieldLoadKind::Val(Ty::I64))
+                                            }
+                                            super::module::GcStorageKind::F32 => {
+                                                Some(super::ir::GcFieldLoadKind::Val(Ty::F32))
+                                            }
+                                            super::module::GcStorageKind::F64 => {
+                                                Some(super::ir::GcFieldLoadKind::Val(Ty::F64))
+                                            }
+                                            super::module::GcStorageKind::V128 => {
+                                                Some(super::ir::GcFieldLoadKind::Val(Ty::V128))
+                                            }
+                                            super::module::GcStorageKind::I8
+                                            | super::module::GcStorageKind::I16 => None,
+                                        };
+                                        if let Some(lk) = exact_kind {
+                                            let is_traced =
+                                                X64Module::storage_ref_kind(sf.storage).is_traced();
+                                            let key = if !sf.mutable && !is_traced {
+                                                GvnKey::ImmStructGet(ty_u, fi as u32, lk, res)
+                                            } else {
+                                                let w_ep =
+                                                    if sf.mutable { st.gc_write_epoch } else { 0 };
+                                                let a_ep =
+                                                    if is_traced { st.gc_alloc_epoch } else { 0 };
+                                                GvnKey::MutStructGet(
+                                                    ty_u, fi as u32, lk, res, w_ep, a_ep,
+                                                )
+                                            };
+                                            st.insert_expr(key, fv);
+                                        }
+                                    }
+                                }
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::StructNewDefault(_)
+                        | Op::ArrayNew { .. }
+                        | Op::ArrayNewDefault { .. }
+                        | Op::ArrayNewFixed { .. }
+                        | Op::ArrayNewData { .. }
+                        | Op::ArrayNewElem { .. }
+                        | Op::AnyConvertExtern(_) => {
+                            st.gc_alloc_epoch = st.gc_alloc_epoch.wrapping_add(1);
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::StructSet {
+                            ty,
+                            field,
+                            obj,
+                            val,
+                        } => {
+                            st.gc_write_epoch = st.gc_write_epoch.wrapping_add(1);
+                            let ty_u = *ty;
+                            let field_u = *field;
+                            let obj_v = *obj;
+                            let val_v = *val;
+                            if let super::module::GcCompositeInfo::Struct { ref fields, .. } =
+                                st.module.gc_type(ty_u).composite
+                                && let Some(sf) = fields.get(field_u as usize)
+                            {
+                                let exact_kind = match sf.storage {
+                                    super::module::GcStorageKind::I32 => {
+                                        Some(super::ir::GcFieldLoadKind::Val(Ty::I32))
+                                    }
+                                    super::module::GcStorageKind::I64
+                                    | super::module::GcStorageKind::GcRef
+                                    | super::module::GcStorageKind::ExternRef
+                                    | super::module::GcStorageKind::OtherRef => {
+                                        Some(super::ir::GcFieldLoadKind::Val(Ty::I64))
+                                    }
+                                    super::module::GcStorageKind::F32 => {
+                                        Some(super::ir::GcFieldLoadKind::Val(Ty::F32))
+                                    }
+                                    super::module::GcStorageKind::F64 => {
+                                        Some(super::ir::GcFieldLoadKind::Val(Ty::F64))
+                                    }
+                                    super::module::GcStorageKind::V128 => {
+                                        Some(super::ir::GcFieldLoadKind::Val(Ty::V128))
+                                    }
+                                    super::module::GcStorageKind::I8
+                                    | super::module::GcStorageKind::I16 => None,
+                                };
+                                if let Some(lk) = exact_kind {
+                                    let is_traced =
+                                        X64Module::storage_ref_kind(sf.storage).is_traced();
+                                    let a_ep = if is_traced { st.gc_alloc_epoch } else { 0 };
+                                    st.insert_expr(
+                                        GvnKey::MutStructGet(
+                                            ty_u,
+                                            field_u,
+                                            lk,
+                                            obj_v,
+                                            st.gc_write_epoch,
+                                            a_ep,
+                                        ),
+                                        val_v,
+                                    );
+                                }
+                            }
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::StructGet {
+                            ty,
+                            field,
+                            kind,
+                            obj,
+                        } => {
+                            if let Some(res) = inst.res {
+                                let ty_u = *ty;
+                                let field_u = *field;
+                                let kind_v = *kind;
+                                let obj_v = *obj;
+                                if let super::module::GcCompositeInfo::Struct { ref fields, .. } =
+                                    st.module.gc_type(ty_u).composite
+                                    && let Some(sf) = fields.get(field_u as usize)
+                                {
+                                    let is_traced =
+                                        X64Module::storage_ref_kind(sf.storage).is_traced();
+                                    let key = if !sf.mutable && !is_traced {
+                                        GvnKey::ImmStructGet(ty_u, field_u, kind_v, obj_v)
+                                    } else {
+                                        let w_ep = if sf.mutable { st.gc_write_epoch } else { 0 };
+                                        let a_ep = if is_traced { st.gc_alloc_epoch } else { 0 };
+                                        GvnKey::MutStructGet(
+                                            ty_u, field_u, kind_v, obj_v, w_ep, a_ep,
+                                        )
+                                    };
+                                    if let Some(&prev_v) = st.exprs.get(&key) {
+                                        st.set_subst(res, prev_v);
+                                        ir_mutated = true;
+                                        continue;
+                                    }
+                                    st.insert_expr(key, res);
+                                }
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::RefCast {
+                            val,
+                            nullable,
+                            heap,
+                        } => {
+                            if let Some(res) = inst.res {
+                                let val_v = *val;
+                                let null_b = *nullable;
+                                let heap_t = *heap;
+                                let redundant = st
+                                    .exprs
+                                    .contains_key(&GvnKey::RefCast(val_v, false, heap_t))
+                                    || (null_b
+                                        && st
+                                            .exprs
+                                            .contains_key(&GvnKey::RefCast(val_v, true, heap_t)));
+                                if redundant {
+                                    st.set_subst(res, val_v);
+                                    ir_mutated = true;
+                                    continue;
+                                }
+                                st.insert_expr(GvnKey::RefCast(val_v, null_b, heap_t), val_v);
+                                if !null_b {
+                                    st.insert_expr(GvnKey::RefCast(val_v, true, heap_t), val_v);
+                                }
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::RefTest {
+                            val,
+                            nullable,
+                            heap,
+                        } => {
+                            let val_v = *val;
+                            let null_b = *nullable;
+                            let heap_t = *heap;
+                            let proven_true = st
+                                .exprs
+                                .contains_key(&GvnKey::RefCast(val_v, false, heap_t))
+                                || (null_b
+                                    && st
+                                        .exprs
+                                        .contains_key(&GvnKey::RefCast(val_v, true, heap_t)));
+                            if proven_true {
+                                inst.op = Op::ConstI32(1);
+                                ir_mutated = true;
+                            }
                         }
                         Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                             st.clear_mem_facts();
@@ -8062,6 +8385,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                             {
                                 st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
                             }
+                            if ir.uses_gc {
+                                st.gc_write_epoch = st.gc_write_epoch.wrapping_add(1);
+                                st.gc_alloc_epoch = st.gc_alloc_epoch.wrapping_add(1);
+                            }
                             if let Some(res) = inst.res {
                                 st.def_op[res.0 as usize] = Some(inst.op);
                             }
@@ -8075,6 +8402,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             st.glob_epoch = st.glob_epoch.wrapping_add(1);
                             st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
+                            if ir.uses_gc {
+                                st.gc_write_epoch = st.gc_write_epoch.wrapping_add(1);
+                                st.gc_alloc_epoch = st.gc_alloc_epoch.wrapping_add(1);
+                            }
                             if let Some(res) = inst.res {
                                 st.def_op[res.0 as usize] = Some(inst.op);
                             }
@@ -17136,34 +17467,6 @@ fn forward_loop_carried_scaled_loads(ir: &mut IrFunc, dom: &CfgDom, module: &X64
                 | Op::MemGrow(_)
                 | Op::MemGrowIdx { .. }
                 | Op::MemByteBlur3Div { .. }
-                | Op::GcNull
-                | Op::ExternNull
-                | Op::GcConstI31(_)
-                | Op::ExternConstI31(_)
-                | Op::RefEq(_, _)
-                | Op::RefI31(_)
-                | Op::I31GetS(_)
-                | Op::I31GetU(_)
-                | Op::AnyConvertExtern(_)
-                | Op::ExternConvertAny(_)
-                | Op::StructNew { .. }
-                | Op::StructNewDefault(_)
-                | Op::StructGet { .. }
-                | Op::StructSet { .. }
-                | Op::ArrayNew { .. }
-                | Op::ArrayNewDefault { .. }
-                | Op::ArrayNewFixed { .. }
-                | Op::ArrayNewData { .. }
-                | Op::ArrayNewElem { .. }
-                | Op::ArrayGet { .. }
-                | Op::ArraySet { .. }
-                | Op::ArrayLen(_)
-                | Op::ArrayFill { .. }
-                | Op::ArrayCopy { .. }
-                | Op::ArrayInitData { .. }
-                | Op::ArrayInitElem { .. }
-                | Op::RefTest { .. }
-                | Op::RefCast { .. }
                 | Op::AtomicFence
                 | Op::AtomicLoad { .. }
                 | Op::AtomicStore { .. }

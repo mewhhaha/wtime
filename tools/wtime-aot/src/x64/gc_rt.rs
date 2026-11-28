@@ -440,9 +440,7 @@ pub(crate) fn build_deduped_safepoint_slot_pool<'a>(
     let mut unique: Vec<Vec<i32>> = Vec::new();
     let mut seen: std::collections::HashSet<Vec<i32>> = std::collections::HashSet::new();
     for (gc_slots, ext_slots) in records {
-        n_entries = n_entries
-            .checked_add(1)
-            .ok_or("safepoint count overflow")?;
+        n_entries = n_entries.checked_add(1).ok_or("safepoint count overflow")?;
         if gc_slots.is_empty() && ext_slots.is_empty() {
             continue;
         }

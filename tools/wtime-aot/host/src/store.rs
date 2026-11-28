@@ -309,17 +309,16 @@ impl StoreInner {
             (snap, ver)
         };
 
-        let from_base = gc.active_from_base();
-        let from_cap = gc.from_cap as u64;
-        let to_base = gc.inactive_to_base();
+        let nursery_base = gc.nursery_base();
+        let nursery_cap = gc.nursery_cap as u64;
 
         let state = StoreState {
-            gc_alloc_ptr: from_base,
-            gc_alloc_limit: from_base + from_cap,
-            gc_from_base: from_base,
-            gc_from_cap: from_cap,
-            gc_to_base: to_base,
-            gc_to_cap: 0,
+            gc_alloc_ptr: nursery_base,
+            gc_alloc_limit: nursery_base + nursery_cap,
+            gc_from_base: gc.arena_base as u64,
+            gc_from_cap: crate::gc::GC_ADDR_RANGE_BYTES as u64,
+            gc_to_base: gc.card_table_base(),
+            gc_to_cap: nursery_base,
             gc_heap_cap: gc.heap_cap as u64,
             gc_count: 0,
             gc_walk_stop_rsp: 0,
@@ -483,13 +482,20 @@ impl StoreInner {
         let cap_aligned = ((cap + 4095) & !4095).min(crate::gc::SEMI_SPACE_RESERVE_BYTES - 4096);
         self.gc.heap_cap = cap_aligned;
         self.gc.init_cap = self.gc.init_cap.min(cap_aligned);
+        self.gc.nursery_init_cap = self.gc.nursery_init_cap.min(cap_aligned);
         self.state.gc_heap_cap = cap_aligned as u64;
-        if self.gc.from_cap > cap_aligned {
-            let used = (self.state.gc_alloc_ptr - self.state.gc_from_base) as usize;
-            if used <= cap_aligned {
-                self.gc.from_cap = cap_aligned;
-                self.state.gc_from_cap = cap_aligned as u64;
-                self.state.gc_alloc_limit = self.state.gc_from_base + cap_aligned as u64;
+        if self.gc.old_cap > cap_aligned {
+            let old_used = (self.gc.old_alloc_ptr - self.gc.active_old_base()) as usize;
+            if old_used <= cap_aligned {
+                self.gc.old_cap = cap_aligned;
+            }
+        }
+        if self.gc.nursery_cap > cap_aligned {
+            let nursery_base = self.gc.nursery_base();
+            let nursery_used = (self.state.gc_alloc_ptr - nursery_base) as usize;
+            if nursery_used <= cap_aligned {
+                self.gc.nursery_cap = cap_aligned;
+                self.state.gc_alloc_limit = nursery_base + cap_aligned as u64;
             }
         }
     }
@@ -900,6 +906,14 @@ impl<T> Store<T> {
         self.inner.state.gc_count
     }
 
+    pub fn gc_minor_count(&self) -> u64 {
+        self.inner.gc.minor_gc_count
+    }
+
+    pub fn gc_major_count(&self) -> u64 {
+        self.inner.gc.major_gc_count
+    }
+
     pub fn gc_weak_retire_count(&self) -> u64 {
         self.inner.gc.weak_retire_count
     }
@@ -933,11 +947,46 @@ impl<T> Store<T> {
     /// Useful when an isolate transitions to idle so active throughput keeps zero-syscall warm flips
     /// while idle isolates shed inactive semi-space RSS.
     pub fn reclaim_inactive_gc_space(&mut self) {
-        self.inner.gc.reclaim_inactive_space();
+        let nursery_empty = self.inner.state.gc_alloc_ptr == self.inner.gc.nursery_base();
+        self.inner.gc.reclaim_inactive_space(nursery_empty);
+        if nursery_empty {
+            self.inner.state.gc_alloc_limit =
+                self.inner.gc.nursery_base() + self.inner.gc.nursery_cap as u64;
+        }
     }
 
     pub fn gc_heap_capacity(&self) -> usize {
-        self.inner.gc.from_cap
+        self.inner.gc.heap_capacity()
+    }
+
+    /// Captures a shareable binary snapshot of this Store's compacted GC heap, globals,
+    /// linear memories, tables, and weak/ephemeron entries, plus `extra_roots`.
+    pub fn capture_snapshot<R: crate::gc::RootedRef<crate::gc::EqRef>>(
+        &mut self,
+        extra_roots: &[R],
+    ) -> Result<crate::snapshot::StoreSnapshot> {
+        crate::snapshot::capture_store_snapshot(&mut self.inner, extra_roots)
+    }
+
+    /// Restores a previously captured [`StoreSnapshot`](crate::snapshot::StoreSnapshot) into
+    /// this freshly instantiated Store, rebasing all GC heap pointers and `StoreFuncRef`s.
+    pub fn restore_snapshot(
+        &mut self,
+        snapshot: &crate::snapshot::StoreSnapshot,
+    ) -> Result<Vec<crate::gc::OwnedRooted<crate::gc::EqRef>>> {
+        crate::snapshot::restore_store_snapshot(&mut self.inner, snapshot)
+    }
+
+    /// Rebinds a [`GcEphemeron`](crate::gc::GcEphemeron) handle captured from a snapshot's
+    /// source Store so it addresses the restored slot in this Store.
+    pub fn rebind_ephemeron(&self, entry: crate::gc::GcEphemeron) -> crate::gc::GcEphemeron {
+        crate::snapshot::rebind_ephemeron(&self.inner, entry)
+    }
+
+    /// Rebinds a [`WeakAnyRef`](crate::gc::WeakAnyRef) handle captured from a snapshot's
+    /// source Store so it addresses the restored slot in this Store.
+    pub fn rebind_weak_ref(&self, weak: crate::gc::WeakAnyRef) -> crate::gc::WeakAnyRef {
+        crate::snapshot::rebind_weak_ref(&self.inner, weak)
     }
 
     pub fn throw<R>(&mut self, exn: Rooted<ExnRef>) -> Result<R> {
@@ -994,7 +1043,7 @@ impl<'a, T> StoreContext<'a, T> {
     }
 
     pub fn gc_heap_capacity(&self) -> usize {
-        self.inner.gc.from_cap
+        self.inner.gc.heap_capacity()
     }
 }
 
@@ -1022,7 +1071,7 @@ impl<'a, T> StoreContextMut<'a, T> {
     }
 
     pub fn gc_heap_capacity(&self) -> usize {
-        self.inner.gc.from_cap
+        self.inner.gc.heap_capacity()
     }
 
     pub fn throw<R>(&mut self, exn: Rooted<ExnRef>) -> Result<R> {

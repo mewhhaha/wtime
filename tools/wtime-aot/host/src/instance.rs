@@ -713,7 +713,7 @@ impl<T> Caller<'_, T> {
     }
 
     pub fn gc_heap_capacity(&self) -> usize {
-        self.inner.gc.from_cap
+        self.inner.gc.heap_capacity()
     }
 
     pub fn gc_count(&self) -> u64 {

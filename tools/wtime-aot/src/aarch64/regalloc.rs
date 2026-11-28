@@ -1935,6 +1935,8 @@ pub fn allocate_with_config(
                 inst_idx,
                 gc_slots,
                 ext_slots,
+                gc_regs: Vec::new(),
+                ext_regs: Vec::new(),
             });
             Ok(())
         };
@@ -2027,6 +2029,8 @@ pub fn allocate_with_config(
                             inst_idx: u32::MAX,
                             gc_slots: Vec::new(),
                             ext_slots: Vec::new(),
+                            gc_regs: Vec::new(),
+                            ext_regs: Vec::new(),
                         });
                     }
                     bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {

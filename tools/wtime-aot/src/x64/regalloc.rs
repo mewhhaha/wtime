@@ -437,6 +437,10 @@ pub struct SafepointPlan {
     pub gc_slots: Vec<i32>,
     /// Sorted unique frame offsets holding live `ValRefKind::ExternRef` values.
     pub ext_slots: Vec<i32>,
+    /// Sorted unique GP registers holding live `ValRefKind::GcRef` values at an inline GC alloc safepoint.
+    pub gc_regs: Vec<Gp>,
+    /// Sorted unique GP registers holding live `ValRefKind::ExternRef` values at an inline GC alloc safepoint.
+    pub ext_regs: Vec<Gp>,
 }
 
 pub struct AllocResult {
@@ -1033,13 +1037,9 @@ pub fn allocate_with_config_and_scratch(
     let clobbers = &mut scratch.clobbers;
     let mut slp_bcast_avoid_xmm0: Vec<u32> = Vec::new();
     let mut gc_safepoint_pos: Vec<u32> = Vec::new();
+    let mut gc_call_safepoint_pos: Vec<u32> = Vec::new();
     let mut gc_safepoint_blocks: Vec<bool> = if ir.uses_gc {
         vec![false; n_ord]
-    } else {
-        Vec::new()
-    };
-    let mut used_by_gc_alloc: Vec<bool> = if ir.uses_gc {
-        vec![false; n_vals]
     } else {
         Vec::new()
     };
@@ -1082,9 +1082,6 @@ pub fn allocate_with_config_and_scratch(
                 if pos_use > last_use[vi] {
                     last_use[vi] = pos_use;
                 }
-                if is_gc_alloc {
-                    used_by_gc_alloc[vi] = true;
-                }
             });
             if is_gc_alloc {
                 gc_safepoint_pos.push(pos_use);
@@ -1103,6 +1100,7 @@ pub fn allocate_with_config_and_scratch(
                     }
                     if ir.uses_gc {
                         gc_safepoint_pos.push(pos_use);
+                        gc_call_safepoint_pos.push(pos_use);
                         gc_safepoint_blocks[oi] = true;
                     }
                     clobbers.push(Clobber {
@@ -1375,6 +1373,7 @@ pub fn allocate_with_config_and_scratch(
                 });
                 if ir.uses_gc {
                     gc_safepoint_pos.push(pos_term);
+                    gc_call_safepoint_pos.push(pos_term);
                     gc_safepoint_blocks[oi] = true;
                 }
                 let arg_stack_bytes = layout_args_stack_bytes(
@@ -1439,6 +1438,7 @@ pub fn allocate_with_config_and_scratch(
                 });
                 if ir.uses_gc {
                     gc_safepoint_pos.push(pos_term);
+                    gc_call_safepoint_pos.push(pos_term);
                     gc_safepoint_blocks[oi] = true;
                 }
                 let arg_stack_bytes = layout_args_stack_bytes(
@@ -1491,6 +1491,7 @@ pub fn allocate_with_config_and_scratch(
                     });
                     if ir.uses_gc {
                         gc_safepoint_pos.push(pos_term);
+                        gc_call_safepoint_pos.push(pos_term);
                         gc_safepoint_blocks[oi] = true;
                     }
                     if arg_stack_bytes > max_outgoing_arg_bytes {
@@ -2849,32 +2850,31 @@ pub fn allocate_with_config_and_scratch(
                 let (cg, cx) = query_clobbers(lo, hi);
                 (s, e, 0, 0, u64::from((e - s).max(1)), cg, cx)
             };
-        let has_gc_safepoints = ir.uses_gc && !gc_safepoint_pos.is_empty();
-        let range_crosses_sp = |s: u32, e: u32| -> bool {
-            let lo = gc_safepoint_pos.partition_point(|&p| p <= s);
-            let hi = gc_safepoint_pos.partition_point(|&p| p < e);
+        let has_gc_call_safepoints = ir.uses_gc && !gc_call_safepoint_pos.is_empty();
+        let range_crosses_call_sp = |s: u32, e: u32| -> bool {
+            let lo = gc_call_safepoint_pos.partition_point(|&p| p <= s);
+            let hi = gc_call_safepoint_pos.partition_point(|&p| p < e);
             lo < hi
         };
         let mut clob_gp = clob_gp;
-        if has_gc_safepoints
+        if has_gc_call_safepoints
             && val_remat[vi].is_none()
             && ir.val_ref_kind(Val(vi as u32)).is_traced()
         {
-            let needs_spill = if used_by_gc_alloc[vi] {
-                true
-            } else if seg_len > 0 {
+            let needs_spill = if seg_len > 0 {
                 segs_pool[seg_off as usize..seg_off as usize + seg_len as usize]
                     .iter()
-                    .any(|&(s, e)| range_crosses_sp(s, e))
+                    .any(|&(s, e)| range_crosses_call_sp(s, e))
             } else if c != u32::MAX && cb_hull[c as usize].0 != u32::MAX {
-                range_crosses_sp(start, end)
+                range_crosses_call_sp(start, end)
             } else {
-                range_crosses_sp(start, last_use[vi].max(start))
+                range_crosses_call_sp(start, last_use[vi].max(start))
             };
             if needs_spill {
-                // Force traced non-remat GC/extern refs live across any GC safepoint (or consumed
-                // by an allocating GC op) into a spill slot so the precise copying GC can relocate
-                // them directly in `[rsp + off]`.
+                // Force traced non-remat GC/extern refs live across any call safepoint into a
+                // spill slot so the precise copying GC can relocate them directly in `[rsp + off]`.
+                // Traced refs that only cross inline bump-alloc safepoints stay in GP registers
+                // and are spilled/reloaded strictly on the cold out-of-line GC stub!
                 clob_gp = u16::MAX;
             }
         }
@@ -3782,6 +3782,7 @@ pub fn allocate_with_config_and_scratch(
             };
         let snapshot_plan = |block_id: u32,
                              inst_idx: u32,
+                             allow_regs: bool,
                              live_vals: &mut Vec<u32>,
                              live_stamp: &[u32],
                              cur_stamp: u32,
@@ -3790,33 +3791,45 @@ pub fn allocate_with_config_and_scratch(
          -> Result<(), String> {
             let mut gc_slots = Vec::new();
             let mut ext_slots = Vec::new();
+            let mut gc_regs = Vec::new();
+            let mut ext_regs = Vec::new();
             live_vals.retain(|&vi| live_stamp[vi as usize] == cur_stamp);
             for &vi in live_vals.iter() {
                 let kind = ir.val_ref_kind(Val(vi));
-                let off = match locs[vi as usize] {
-                    Loc::Spill(off) => off,
+                match locs[vi as usize] {
+                    Loc::Spill(off) => match kind {
+                        ValRefKind::GcRef => gc_slots.push(off),
+                        ValRefKind::ExternRef => ext_slots.push(off),
+                        ValRefKind::None => {}
+                    },
+                    Loc::Gp(g) if allow_regs => match kind {
+                        ValRefKind::GcRef => gc_regs.push(g),
+                        ValRefKind::ExternRef => ext_regs.push(g),
+                        ValRefKind::None => {}
+                    },
                     other => {
                         return Err(format!(
                             "x64: GC safepoint fn {} bb{block_id} inst {inst_idx}: live traced v{vi} ({kind:?}) in {other:?}",
                             ir.func_index
                         ));
                     }
-                };
-                match kind {
-                    ValRefKind::GcRef => gc_slots.push(off),
-                    ValRefKind::ExternRef => ext_slots.push(off),
-                    ValRefKind::None => {}
                 }
             }
             gc_slots.sort_unstable();
             gc_slots.dedup();
             ext_slots.sort_unstable();
             ext_slots.dedup();
+            gc_regs.sort_unstable_by_key(|g| g.id());
+            gc_regs.dedup();
+            ext_regs.sort_unstable_by_key(|g| g.id());
+            ext_regs.dedup();
             out.push(SafepointPlan {
                 block_id,
                 inst_idx,
                 gc_slots,
                 ext_slots,
+                gc_regs,
+                ext_regs,
             });
             Ok(())
         };
@@ -3860,6 +3873,7 @@ pub fn allocate_with_config_and_scratch(
                     snapshot_plan(
                         bid,
                         u32::MAX,
+                        false,
                         &mut live_vals,
                         &live_stamp,
                         stamp,
@@ -3882,6 +3896,7 @@ pub fn allocate_with_config_and_scratch(
                     snapshot_plan(
                         bid,
                         u32::MAX,
+                        false,
                         &mut live_vals,
                         &live_stamp,
                         stamp,
@@ -3911,6 +3926,8 @@ pub fn allocate_with_config_and_scratch(
                             inst_idx: u32::MAX,
                             gc_slots: Vec::new(),
                             ext_slots: Vec::new(),
+                            gc_regs: Vec::new(),
+                            ext_regs: Vec::new(),
                         });
                     }
                     bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
@@ -3935,6 +3952,7 @@ pub fn allocate_with_config_and_scratch(
                         snapshot_plan(
                             bid,
                             ii as u32,
+                            false,
                             &mut live_vals,
                             &live_stamp,
                             stamp,
@@ -3951,6 +3969,7 @@ pub fn allocate_with_config_and_scratch(
                     snapshot_plan(
                         bid,
                         ii as u32,
+                        true,
                         &mut live_vals,
                         &live_stamp,
                         stamp,
