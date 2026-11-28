@@ -101,13 +101,19 @@ Admitted constructs:
   including pure-assembly Ryū shortest round-trip `print_f64`/`print_f32`/
   `format_f64`/`format_f32`) / standalone Goose compiler OS & search imports
   (`env::gs_os_{arg_count,arg,getenv,file_exists,is_dir,read_file,write_file,
-  append_file,resource_dir}`, `env::gs_find_{any,pair}`, `goose.reserve`
+  append_file,resource_dir,realpath}`, `env::gs_find_{any,pair}`, `goose.reserve`
   callbacks, and sandbox CLI flags `--allow-files`, `--allow-env`,
   `--output-limit`, `--memory-limit-pages`, `--timing-json`, `--time-limit`,
   `--stack-limit-mib`, `--` enforced via `openat2` + `RESOLVE_BENEATH` +
   `O_NOFOLLOW`) / benchmark `env::{bench_input, bench_input_f64}` imports (for
   standalone static `ET_EXEC` executables), and globals of `i32`, `i64`, `f32`,
   `f64`, `v128`, or nullable/non-nullable `funcref`/`(ref $t)`/`externref`/`exnref`.
+
+`env::gs_os_realpath` takes a Goose input path slice and writable output
+slice. It returns the byte length of the absolute path without a terminator.
+It returns `-1` for inaccessible paths or insufficient capacity. The
+standalone runtime opens the path beneath a filesystem grant before obtaining
+its canonical name.
 - MVP opcodes, saturating float-to-int truncations, full bulk memory & table
   ops (`memory.init`, `data.drop`, `memory.copy` including cross-memory,
   `memory.fill`, `table.init`, `elem.drop`, `table.copy` including 64↔32 mixed

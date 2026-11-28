@@ -1458,7 +1458,8 @@ pub fn check_standalone_import_sig(
             "gs_os_write_file"
             | "gs_os_write_file_atomic"
             | "gs_os_append_file"
-            | "gs_os_rename_file",
+            | "gs_os_rename_file"
+            | "gs_os_realpath",
         ) => {
             matches!(ty.params.len(), 2 | 4)
                 && ty.params.iter().all(|&t| is_int(t))

@@ -56,6 +56,7 @@ const X64_STAT_OFF_SIZE: i32 = 48;
 const FS_OPEN_LIST: u32 = 5;
 const FS_OPEN_FILE_PARENT: u32 = 6;
 const FS_OPEN_DIR_PARENT: u32 = 7;
+const FS_OPEN_PATH: u32 = 8;
 
 /// Shared standalone policy slab layout (`64 KiB` mmap'd once when `--allow-files` or `--allow-env` is given).
 pub(crate) const POLICY_SLAB_BYTES: u64 = 65_536;
@@ -108,6 +109,80 @@ fn emit_fmt_u64_to_buf(a: &mut Asm, val: Gp, buf_end_disp: i32) {
     a.jcc(Cond::Ne, lbl_loop);
     a.lea(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, buf_end_disp));
     a.sub_rr(true, Gp::Rdx, Gp::Rsi);
+}
+
+fn emit_proc_fd_path(a: &mut Asm, fd: Gp, path: i32, digits_end: i32) {
+    let pfd_prefix = a.add_local_rodata(1, b"/proc/self/fd/");
+    a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(pfd_prefix));
+    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, path));
+    for i in 0..14i32 {
+        a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rsi, i));
+        a.mov_mr8(Mem::base_disp(Gp::Rdi, i), Gp::Rax);
+    }
+    emit_fmt_u64_to_buf(a, fd, digits_end); // Rsi = digits ptr, Rdx = digits len
+    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, path + 14));
+    let lbl_cp_fd = a.new_label();
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    a.bind(lbl_cp_fd);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+    a.jcc(Cond::B, lbl_cp_fd);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+}
+
+fn emit_realpath(a: &mut Asm, fixed_mem: bool) {
+    let out = Mem::base_disp(Gp::Rsp, 0);
+    let cap = Mem::base_disp(Gp::Rsp, 8);
+    let length = Mem::base_disp(Gp::Rsp, 16);
+    let oob = a.new_label();
+    let deny = a.new_label();
+    let leave = a.new_label();
+    emit_check_range(a, Gp::Rdi, Gp::Rsi, fixed_mem, oob);
+    emit_check_range(a, Gp::Rdx, Gp::Rcx, fixed_mem, oob);
+    a.push(Gp::Rbx);
+    a.sub_ri(true, Gp::Rsp, 80);
+    a.mov_mr(true, out, Gp::Rdx);
+    a.mov_mr(true, cap, Gp::Rcx);
+    a.mov_ri32(Gp::Rdx, FS_OPEN_PATH);
+    a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_FS));
+    a.test_rr(false, Gp::R11, Gp::R11);
+    a.jcc(Cond::Ne, leave);
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::L, deny);
+    // Inspect the descriptor opened beneath a grant. The guest supplies no procfs path.
+    a.mov_rr(true, Gp::Rbx, Gp::Rax);
+    emit_proc_fd_path(a, Gp::Rbx, 24, 80);
+    a.mov_ri64(Gp::Rdi, AT_FDCWD as u64);
+    a.lea(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 24));
+    a.mov_rm(true, Gp::Rdx, out);
+    a.lea(true, Gp::Rdx, Mem::indexed(Gp::R14, Gp::Rdx, 1, 0));
+    a.mov_rm(true, Gp::R10, cap);
+    a.mov_ri32(Gp::Rax, SYS_READLINKAT);
+    a.syscall();
+    a.mov_mr(true, length, Gp::Rax);
+    a.mov_rr(false, Gp::Rdi, Gp::Rbx);
+    a.mov_ri32(Gp::Rax, SYS_CLOSE);
+    a.syscall();
+    a.mov_rm(true, Gp::Rax, length);
+    a.cmp_ri(true, Gp::Rax, 1);
+    a.jcc(Cond::L, deny);
+    a.cmp_rm(true, Gp::Rax, cap);
+    a.jcc(Cond::Ae, deny);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.jmp(leave);
+    a.bind(deny);
+    a.mov_ri64(Gp::Rax, u64::MAX);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.bind(leave);
+    a.add_ri(true, Gp::Rsp, 80);
+    a.pop(Gp::Rbx);
+    a.ret();
+    a.bind(oob);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+    a.ret();
 }
 
 /// Helper: reads `CLOCK_MONOTONIC` (or `CLOCK_REALTIME`) in nanoseconds into `Rax`.
@@ -478,26 +553,7 @@ pub fn emit_standalone_entry(
     a.cmp_ri(true, Gp::Rax, 0);
     a.jcc(Cond::L, lbl_fail_usage);
     a.mov_rr(true, Gp::R14, Gp::Rax); // dirfd in R14
-    // Build "/proc/self/fd/<dirfd>\0" at [rsp + 144..]
-    let pfd_prefix = a.add_local_rodata(1, b"/proc/self/fd/");
-    a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(pfd_prefix));
-    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 144));
-    for i in 0..14i32 {
-        a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rsi, i));
-        a.mov_mr8(Mem::base_disp(Gp::Rdi, i), Gp::Rax);
-    }
-    emit_fmt_u64_to_buf(&mut a, Gp::R14, 224); // Rsi = digits ptr, Rdx = digits len
-    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 158));
-    let lbl_cp_fd = a.new_label();
-    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
-    a.bind(lbl_cp_fd);
-    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
-    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
-    a.add_ri(true, Gp::Rcx, 1);
-    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
-    a.jcc(Cond::B, lbl_cp_fd);
-    a.xor_rr(false, Gp::Rax, Gp::Rax);
-    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+    emit_proc_fd_path(&mut a, Gp::R14, 144, 224);
     // dst_buf = Rbp + POLICY_OFF_DIR_PATHS + (dir_count << 10)
     a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rbp, POLICY_OFF_DIR_COUNT));
     a.mov_rr(true, Gp::R9, Gp::R8);
@@ -2087,7 +2143,7 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
             goose::unpack_path(&mut a, ty.params.len() == 1, zext_param);
             goose::emit_remove_entry(&mut a, fixed_mem, fname == "gs_os_remove_dir");
         }
-        ("env", "gs_os_rename_file") => {
+        ("env", "gs_os_rename_file" | "gs_os_realpath") => {
             if ty.params.len() == 2 {
                 a.mov_rr(true, Gp::Rcx, Gp::Rsi);
                 a.shr_imm(true, Gp::Rcx, 32);
@@ -2101,7 +2157,11 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
                 zext_param(&mut a, Gp::Rdx, 2);
                 zext_param(&mut a, Gp::Rcx, 3);
             }
-            goose::emit_rename_file(&mut a, fixed_mem);
+            if fname == "gs_os_realpath" {
+                emit_realpath(&mut a, fixed_mem);
+            } else {
+                goose::emit_rename_file(&mut a, fixed_mem);
+            }
         }
         ("env", "gs_os_list_dir") => {
             if ty.params.len() == 2 {
@@ -3850,7 +3910,7 @@ pub fn emit_helper_standalone_reserve_copy(module: &X64Module) -> Result<Asm, St
 
 /// Emits `HELPER_STANDALONE_FS`: enforces `--allow-files` lexical + kernel `openat2(RESOLVE_BENEATH)`
 /// path sandboxing for `file_exists` (0), `is_dir` (1), `read_file` (2), `write_file` (3), `append_file` (4),
-/// `list_dir` (5), and opening a parent directory for a file (6) or directory (7).
+/// `list_dir` (5), opening a parent directory for a file (6) or directory (7), and a path (8).
 ///
 /// ABI: `Rdi = path_off` (bounds-checked), `Rsi = path_len`, `Rdx = mode`
 /// -> `Rax = 0/1 (stat) or fd/-1 (open)`, `R11d = 0 | TRAP_HOST` (embedded NUL for mode >= 2).
@@ -4132,6 +4192,9 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     let lbl_parent = a.new_label();
     a.mov_mi32(true, split_at, 0);
     a.mov_mi32(true, basename, 0);
+    let lbl_mpath = a.new_label();
+    a.cmp_ri(true, Gp::Rax, FS_OPEN_PATH as i32);
+    a.jcc(Cond::E, lbl_mpath);
     a.cmp_ri(true, Gp::Rax, FS_OPEN_FILE_PARENT as i32);
     a.jcc(Cond::Ae, lbl_parent);
     a.cmp_ri(true, Gp::Rax, FS_OPEN_LIST as i32);
@@ -4142,7 +4205,8 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.jcc(Cond::E, lbl_m3);
     a.cmp_ri(true, Gp::Rax, 4);
     a.jcc(Cond::E, lbl_m4);
-    // mode 0/1: O_PATH | O_CLOEXEC
+    // Stat and canonicalization both use a non-reading descriptor.
+    a.bind(lbl_mpath);
     a.mov_ri64(Gp::Rcx, u64::from(O_PATH | O_CLOEXEC));
     a.xor_rr(false, Gp::R8, Gp::R8);
     a.jmp(lbl_how_ready);

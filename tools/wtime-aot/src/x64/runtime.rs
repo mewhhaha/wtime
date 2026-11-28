@@ -3699,6 +3699,7 @@ pub fn emit_all_helpers(
                         | "gs_os_remove_file"
                         | "gs_os_remove_dir"
                         | "gs_os_rename_file"
+                        | "gs_os_realpath"
                 )
         });
     if need_standalone_fs {

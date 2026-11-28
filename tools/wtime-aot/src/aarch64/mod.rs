@@ -1802,6 +1802,7 @@ fn compile_wasm_to_aarch64_detailed(
                         | "gs_os_remove_file"
                         | "gs_os_remove_dir"
                         | "gs_os_rename_file"
+                        | "gs_os_realpath"
                 )
         });
     if needs_standalone_fs {

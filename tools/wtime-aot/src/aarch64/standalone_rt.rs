@@ -52,6 +52,7 @@ const SYS_OPENAT2: u64 = 437;
 const AT_REMOVEDIR: u32 = 0x200;
 const FS_OPEN_FILE_PARENT: u32 = 6;
 const FS_OPEN_DIR_PARENT: u32 = 7;
+const FS_OPEN_PATH: u32 = 8;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
 const O_RDONLY: u32 = 0;
@@ -160,6 +161,71 @@ fn emit_fmt_u64_to_buf(a: &mut A64Asm, val_reg: Reg, buf_end_off: u16) {
     a.cbnz(true, val_reg, lp);
     a.sub_r(true, Reg::X5, Reg::X4, Reg::X7);
     a.mov_r(true, Reg::X4, Reg::X7);
+}
+
+fn emit_proc_fd_path(a: &mut A64Asm, path: u16, digits_end: u16) {
+    let pfd_pref = a.add_local_rodata(1, b"/proc/self/fd/");
+    a.adr_reloc(Reg::X1, A64RelocTarget::LocalRodata(pfd_pref));
+    for i in 0..14u32 {
+        a.ldrb_uimm(Reg::X2, Reg::X1, i);
+        a.strb_uimm(Reg::X2, Reg::SP, u32::from(path) + i);
+    }
+    emit_fmt_u64_to_buf(a, Reg::X0, digits_end); // X4 = digits, X5 = len
+    a.add_imm(true, Reg::X1, Reg::SP, path + 14);
+    a.movz(true, Reg::X2, 0, 0);
+    let lbl_cp_fd = a.new_label();
+    a.bind(lbl_cp_fd);
+    a.ldrb_reg(Reg::X3, Reg::X4, Reg::X2, false);
+    a.strb_reg(Reg::X3, Reg::X1, Reg::X2, false);
+    a.add_imm(true, Reg::X2, Reg::X2, 1);
+    a.cmp_r(true, Reg::X2, Reg::X5);
+    a.b_cond(Cond::Lo, lbl_cp_fd);
+    a.strb_reg(Reg::XZR, Reg::X1, Reg::X2, false);
+}
+
+fn emit_realpath(a: &mut A64Asm) {
+    let oob = a.new_label();
+    let deny = a.new_label();
+    let leave = a.new_label();
+    emit_check_range(a, Reg::X0, Reg::X1, oob);
+    emit_check_range(a, Reg::X2, Reg::X3, oob);
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -112);
+    a.str_uimm(true, Reg::X2, Reg::SP, 16);
+    a.str_uimm(true, Reg::X3, Reg::SP, 24);
+    a.mov_imm32(Reg::X2, FS_OPEN_PATH);
+    a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+    a.cbnz(false, SGP1, leave);
+    a.cmp_imm(true, Reg::X0, 0);
+    a.b_cond(Cond::Lt, deny);
+    a.str_uimm(true, Reg::X0, Reg::SP, 32);
+    // The descriptor is already opened beneath a filesystem grant.
+    emit_proc_fd_path(a, 48, 112);
+    a.mov_imm64(Reg::X0, AT_FDCWD);
+    a.add_imm(true, Reg::X1, Reg::SP, 48);
+    a.ldr_uimm(true, Reg::X2, Reg::SP, 16);
+    a.add_r(true, Reg::X2, MEM_BASE_REG, Reg::X2);
+    a.ldr_uimm(true, Reg::X3, Reg::SP, 24);
+    emit_syscall(a, SYS_READLINKAT);
+    a.str_uimm(true, Reg::X0, Reg::SP, 40);
+    a.ldr_uimm(true, Reg::X0, Reg::SP, 32);
+    emit_syscall(a, SYS_CLOSE);
+    a.ldr_uimm(true, Reg::X0, Reg::SP, 40);
+    a.cmp_imm(true, Reg::X0, 1);
+    a.b_cond(Cond::Lt, deny);
+    a.ldr_uimm(true, Reg::X3, Reg::SP, 24);
+    a.cmp_r(true, Reg::X0, Reg::X3);
+    a.b_cond(Cond::Hs, deny);
+    a.movz(false, SGP1, 0, 0);
+    a.b(leave);
+    a.bind(deny);
+    a.mov_imm64(Reg::X0, u64::MAX);
+    a.movz(false, SGP1, 0, 0);
+    a.bind(leave);
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 112);
+    a.ret();
+    a.bind(oob);
+    a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+    a.ret();
 }
 
 /// Compares NUL-terminated string in `X0` against constant ASCII bytes in local rodata.
@@ -529,25 +595,7 @@ pub fn emit_a64_standalone_start(
     a.cmp_imm(true, Reg::X0, 0);
     a.b_cond(Cond::Lt, fail_usage);
     a.mov_r(true, Reg::X19, Reg::X0); // dirfd
-    // Build "/proc/self/fd/<fd>\0" at [SP + 64..]
-    let pfd_pref = a.add_local_rodata(1, b"/proc/self/fd/");
-    a.adr_reloc(Reg::X1, A64RelocTarget::LocalRodata(pfd_pref));
-    for i in 0..14u32 {
-        a.ldrb_uimm(Reg::X2, Reg::X1, i);
-        a.strb_uimm(Reg::X2, Reg::SP, 64 + i);
-    }
-    a.mov_r(true, Reg::X0, Reg::X19);
-    emit_fmt_u64_to_buf(&mut a, Reg::X0, 144); // X4 = digits, X5 = len
-    a.add_imm(true, Reg::X1, Reg::SP, 78);
-    a.movz(true, Reg::X2, 0, 0);
-    let lbl_cp_fd = a.new_label();
-    a.bind(lbl_cp_fd);
-    a.ldrb_reg(Reg::X3, Reg::X4, Reg::X2, false);
-    a.strb_reg(Reg::X3, Reg::X1, Reg::X2, false);
-    a.add_imm(true, Reg::X2, Reg::X2, 1);
-    a.cmp_r(true, Reg::X2, Reg::X5);
-    a.b_cond(Cond::Lo, lbl_cp_fd);
-    a.strb_reg(Reg::XZR, Reg::X1, Reg::X2, false);
+    emit_proc_fd_path(&mut a, 64, 144);
     // dst_buf = X24 + POLICY_OFF_DIR_PATHS + (dir_count << 10)
     a.ldr_uimm(true, Reg::X12, Reg::X24, POLICY_OFF_DIR_COUNT as u32);
     a.mov_imm64(Reg::X13, POLICY_OFF_DIR_PATHS as u64);
@@ -2780,6 +2828,20 @@ pub fn emit_a64_standalone_import_trampoline(
             a.mov_imm32(SGP1, u32::from(TRAP_HOST));
             a.ret();
         }
+        ("env", "gs_os_realpath") => {
+            if ty.params.len() == 2 {
+                a.lsr_imm(true, Reg::X3, Reg::X1, 32);
+                a.uxtw(Reg::X2, Reg::X1);
+                a.lsr_imm(true, Reg::X1, Reg::X0, 32);
+                a.uxtw(Reg::X0, Reg::X0);
+            } else {
+                zext_param(&mut a, Reg::X0, 0);
+                zext_param(&mut a, Reg::X1, 1);
+                zext_param(&mut a, Reg::X2, 2);
+                zext_param(&mut a, Reg::X3, 3);
+            }
+            emit_realpath(&mut a);
+        }
         ("env", "gs_os_rename_file") => {
             if ty.params.len() == 2 {
                 a.lsr_imm(true, Reg::X3, Reg::X1, 32);
@@ -4420,6 +4482,9 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
     let lbl_m4 = a.new_label();
     let lbl_parent = a.new_label();
     let lbl_hr = a.new_label();
+    let lbl_mpath = a.new_label();
+    a.cmp_imm(true, Reg::X3, FS_OPEN_PATH as u16);
+    a.b_cond(Cond::Eq, lbl_mpath);
     a.cmp_imm(true, Reg::X3, FS_OPEN_FILE_PARENT as u16);
     a.b_cond(Cond::Hs, lbl_parent);
     a.cmp_imm(true, Reg::X3, 2);
@@ -4428,6 +4493,7 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
     a.b_cond(Cond::Eq, lbl_m3);
     a.cmp_imm(true, Reg::X3, 4);
     a.b_cond(Cond::Eq, lbl_m4);
+    a.bind(lbl_mpath);
     a.mov_imm64(Reg::X4, u64::from(O_PATH | O_CLOEXEC));
     a.movz(true, Reg::X5, 0, 0);
     a.b(lbl_hr);
