@@ -1,5 +1,5 @@
 {
-  "source_sha256": "bf8c07d269fdc738fb18127323987d0543efcd22ae17f72ec2cbcfd5d4ec9566",
+  "source_sha256": "d8789331c0486bb81b911a9c1b21c451641f3cb0456cc9eb21b8801d2df53873",
   "source_stable": true,
   "executed": 4,
   "passed": true,
@@ -17,7 +17,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "20 + 22 = 42\n",
-      "stderr": "   Compiling wtime-runtime v0.1.14 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s\n     Running `target/evidence/debug/examples/embedding`\n"
+      "stderr": "   Compiling wtime-runtime v0.1.16 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s\n     Running `target/evidence/debug/examples/embedding`\n"
     },
     {
       "command": [
@@ -32,7 +32,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "suspended with 7; resumed with 9\n",
-      "stderr": "   Compiling wtime-runtime v0.1.14 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s\n     Running `target/evidence/debug/examples/suspension`\n"
+      "stderr": "   Compiling wtime-runtime v0.1.16 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s\n     Running `target/evidence/debug/examples/suspension`\n"
     },
     {
       "command": [
@@ -66,7 +66,7 @@
   "documents": {
     "docs/embedding.md": "c86ebbeeb814a344c901d72f32c8c1cacd1b221bdd6dac00db704c3bd13ca40c",
     "examples/README.md": "64926d38d7bb32bf80a51cc13a8a92e0f2c3dbb0cba6b274a8cb6511d5d74862",
-    "README.md": "d8d47f0f5e0131b932f662979a5c9f1d2e875b81d43ab569ef70d276ccc4a8ff",
+    "README.md": "f938a3cdb4fcc27737330fb84ad57fd945f59a91ceae4dd909b2fb3b55260cce",
     "examples/memory64-table64.wat": "666790be61e72bfa60bbe77486d9584fabfc3ab78bed2a057b3339cb4fdccbd6",
     "examples/memory64-table64.wasm": "3920201aeccfd378c6e88a8882392bbcb3cbf1b040ba604c1064b158708d5990",
     "docs/architecture/api.md": "cb61d31789dfa962a4817320f579a346c9109f136eb06414a37d3ced954e59af",
