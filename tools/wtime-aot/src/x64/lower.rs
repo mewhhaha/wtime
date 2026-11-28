@@ -600,6 +600,16 @@ struct Lower<'a> {
     edge_tramp_cache: HashMap<(u32, u32, u32), Label>,
     /// Cold out-of-line 128-bit overlap fallback stubs for `Op::SlpWideChain` (`(slow_lbl, resume_lbl, desc_idx, args)`).
     wide_slow_tramps: Vec<(Label, Label, u32, ValRange)>,
+    /// Cold out-of-line `HELPER_GC_COLLECT` slow-path stubs for inline GC bump allocation.
+    gc_alloc_stubs: Vec<ColdGcAllocStub>,
+    /// Globally non-null SSA `Val`s (from Wasm non-nullable ref types & non-null defs).
+    global_nonnull: Vec<bool>,
+    /// Flow-sensitive non-null tracking for GC ref `Val`s in the current basic block.
+    known_nonnull: Vec<bool>,
+    /// Trail of indices set in `known_nonnull` for O(1)-amortized block-entry reset.
+    nonnull_trail: Vec<u32>,
+    /// Intra-block zero-gap cache of the spilled 64-bit GC pointer currently held in `SCRATCH_GP2`.
+    sgp2_val: Option<(Val, usize)>,
     /// Lazily populated map of `Val`s defined by non-zero, non-NaN `ConstF32`/`ConstF64` ops
     /// (enables bit-exact SSE2 `min`/`max` lowering for non-strict `<=`/`>=` clamps like `clamp(x, -100.0, 100.0)`).
     fp_nz_consts: Option<Vec<bool>>,
@@ -674,6 +684,23 @@ impl SpillRegCache {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ColdGcAllocKind {
+    FixedStore(i32),
+    FixedStandalone(u32),
+    DynStore,
+    DynStandalone,
+}
+
+#[derive(Clone, Copy)]
+struct ColdGcAllocStub {
+    slow_lbl: Label,
+    ret_lbl: Label,
+    bb: u32,
+    inst: u32,
+    kind: ColdGcAllocKind,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StoreAddrScratch {
     /// `mem` does not reference `SCRATCH_GP1`.
@@ -733,7 +760,20 @@ impl<'a> Lower<'a> {
                                 ..
                             }
                             | Op::SimdOuterLoop { .. }
-                            | Op::V128ToI32 { .. } => true,
+                            | Op::V128ToI32 { .. }
+                            | Op::ArrayLen(_)
+                            | Op::I31GetS(_)
+                            | Op::I31GetU(_)
+                            | Op::RefEq(..)
+                            | Op::RefTest { .. } => true,
+                            Op::StructGet { kind, .. } | Op::ArrayGet { kind, .. } => matches!(
+                                kind,
+                                GcFieldLoadKind::I8S
+                                    | GcFieldLoadKind::I8U
+                                    | GcFieldLoadKind::I16S
+                                    | GcFieldLoadKind::I16U
+                                    | GcFieldLoadKind::Val(Ty::I32)
+                            ),
                             Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
                             Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
                             Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
@@ -814,11 +854,47 @@ impl<'a> Lower<'a> {
         self.ir.val_tys[v.0 as usize]
     }
 
+    #[inline]
+    fn is_known_nonnull(&self, v: Val) -> bool {
+        let idx = v.0 as usize;
+        self.global_nonnull.get(idx).copied().unwrap_or(false)
+            || self.known_nonnull.get(idx).copied().unwrap_or(false)
+    }
+
+    #[inline]
+    fn mark_known_nonnull(&mut self, v: Val) {
+        let idx = v.0 as usize;
+        if self.global_nonnull.get(idx).copied().unwrap_or(false) {
+            return;
+        }
+        if let Some(slot) = self.known_nonnull.get_mut(idx)
+            && !*slot
+        {
+            *slot = true;
+            self.nonnull_trail.push(v.0);
+        }
+    }
+
+    #[inline]
+    fn clear_known_nonnull(&mut self) {
+        for idx in self.nonnull_trail.drain(..) {
+            self.known_nonnull[idx as usize] = false;
+        }
+    }
+
     fn gp_read(&mut self, v: Val, scratch: Gp) -> Gp {
         match self.loc(v) {
             Loc::Gp(g) => g,
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
+                if is64
+                    && scratch == SCRATCH_GP2
+                    && let Some((cv, saved_len)) = self.sgp2_val
+                    && cv == v
+                    && self.asm.code.len() == saved_len
+                {
+                    return SCRATCH_GP2;
+                }
                 if let Some(reg) = self.spill_cache.lookup(v, self.asm.code.len()) {
                     if reg != scratch {
                         self.asm.mov_rr(is64, scratch, reg);
@@ -2099,7 +2175,9 @@ impl<'a> Lower<'a> {
                 Mem::base_disp(SCRATCH_GP1, (gt.canon_id as i32) * 4),
             );
             self.asm.shl_imm(false, SCRATCH_GP1, 3);
-            self.asm.or_ri(false, SCRATCH_GP1, kind_bits as i32);
+            if kind_bits != 0 {
+                self.asm.or_ri(false, SCRATCH_GP1, kind_bits as i32);
+            }
             self.asm
                 .mov_mr(is_struct_64, Mem::base_disp(obj_reg, 0), SCRATCH_GP1);
         } else if is_struct_64 {
@@ -2113,7 +2191,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Inline bump-pointer allocation of a fixed `size_bytes` (multiple of 8, `>= 8`) GC object
-    /// with a cold preserve-all `HELPER_GC_COLLECT` safepoint.
+    /// with a cold out-of-line preserve-all `HELPER_GC_COLLECT` safepoint.
     /// Returns the new object pointer in `SCRATCH_GP2 (R10)` while preserving all allocatable GP/XMM regs.
     fn emit_gc_alloc_fixed(&mut self, size_bytes: u32) -> Result<(), String> {
         let gc_off = self
@@ -2122,8 +2200,9 @@ impl<'a> Lower<'a> {
             .as_ref()
             .ok_or("x64: GC alloc without GcCtxLayout")?
             .gc_state_off;
-        let lbl_have = self.asm.new_label();
-        let trap_alloc = self.trap_alloc_lbl();
+        let slow_lbl = self.asm.new_label();
+        let ret_lbl = self.asm.new_label();
+        let _ = self.trap_alloc_lbl();
         if self.layout.is_store {
             let sz_i32 = i32::try_from(size_bytes)
                 .map_err(|_| "x64: StoreCdylib fixed GC alloc size exceeds i32")?;
@@ -2140,27 +2219,21 @@ impl<'a> Lower<'a> {
                 SCRATCH_GP2,
                 Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_LIMIT),
             );
-            self.asm.jcc(Cond::Be, lbl_have);
-            self.asm.mov_ri64(SCRATCH_GP2, u64::from(size_bytes));
-            self.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-            self.record_gc_safepoint(self.cur_inst)?;
-            self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-            self.asm.jcc(Cond::Ne, trap_alloc);
-            self.asm
-                .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-            self.asm.mov_rm(
-                true,
-                SCRATCH_GP2,
-                Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_PTR),
-            );
-            self.asm.add_ri(true, SCRATCH_GP2, sz_i32);
-            self.asm.bind(lbl_have);
+            self.asm.jcc(Cond::A, slow_lbl);
+            self.asm.bind(ret_lbl);
             self.asm.mov_mr(
                 true,
                 Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_PTR),
                 SCRATCH_GP2,
             );
             self.asm.sub_ri(true, SCRATCH_GP2, sz_i32);
+            self.gc_alloc_stubs.push(ColdGcAllocStub {
+                slow_lbl,
+                ret_lbl,
+                bb: self.cur_bb,
+                inst: self.cur_inst,
+                kind: ColdGcAllocKind::FixedStore(sz_i32),
+            });
             return Ok(());
         }
         self.asm.mov_rm(
@@ -2180,35 +2253,25 @@ impl<'a> Lower<'a> {
             SCRATCH_GP1,
             Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_LIMIT),
         );
-        self.asm.jcc(Cond::Be, lbl_have);
-        self.asm.mov_ri64(SCRATCH_GP2, u64::from(size_bytes));
-        self.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-        self.record_gc_safepoint(self.cur_inst)?;
-        self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-        self.asm.jcc(Cond::Ne, trap_alloc);
-        self.asm.mov_rm(
-            true,
-            SCRATCH_GP2,
-            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_PTR),
-        );
-        if let Ok(sz_i32) = i32::try_from(size_bytes) {
-            self.asm
-                .lea(true, SCRATCH_GP1, Mem::base_disp(SCRATCH_GP2, sz_i32));
-        } else {
-            self.asm.mov_ri64(SCRATCH_GP1, u64::from(size_bytes));
-            self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
-        }
-        self.asm.bind(lbl_have);
+        self.asm.jcc(Cond::A, slow_lbl);
+        self.asm.bind(ret_lbl);
         self.asm.mov_mr(
             true,
             Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_PTR),
             SCRATCH_GP1,
         );
+        self.gc_alloc_stubs.push(ColdGcAllocStub {
+            slow_lbl,
+            ret_lbl,
+            bb: self.cur_bb,
+            inst: self.cur_inst,
+            kind: ColdGcAllocKind::FixedStandalone(size_bytes),
+        });
         Ok(())
     }
 
     /// Inline bump-pointer allocation of a dynamic-length GC array (`align8(8 + len * elem_sz)`)
-    /// with a cold preserve-all `HELPER_GC_COLLECT` safepoint, using ONLY `SCRATCH_GP1`/`SCRATCH_GP2`
+    /// with a cold out-of-line preserve-all `HELPER_GC_COLLECT` safepoint, using ONLY `SCRATCH_GP1`/`SCRATCH_GP2`
     /// so ALL allocatable operand registers remain untouched.
     /// Stores the freshly allocated `new_obj` pointer into `[R15 + OFF_SCRATCH_TMP]`.
     fn emit_gc_alloc_array_dyn(&mut self, len_val: Val, elem_sz: u32) -> Result<(), String> {
@@ -2218,7 +2281,8 @@ impl<'a> Lower<'a> {
             .as_ref()
             .ok_or("x64: GC array alloc without GcCtxLayout")?
             .gc_state_off;
-        let lbl_have = self.asm.new_label();
+        let slow_lbl = self.asm.new_label();
+        let ret_lbl = self.asm.new_label();
         let trap_alloc = self.trap_alloc_lbl();
         let lr = self.gp_read(len_val, SCRATCH_GP1);
         // R10 = align8(8 + (len as u64) * elem_sz)
@@ -2253,23 +2317,8 @@ impl<'a> Lower<'a> {
                 SCRATCH_GP2,
                 Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_LIMIT),
             );
-            self.asm.jcc(Cond::Be, lbl_have);
-            self.asm
-                .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
-            self.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-            self.record_gc_safepoint(self.cur_inst)?;
-            self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-            self.asm.jcc(Cond::Ne, trap_alloc);
-            self.asm
-                .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
-            self.asm.mov_rm(
-                true,
-                SCRATCH_GP2,
-                Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_PTR),
-            );
-            self.asm
-                .add_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
-            self.asm.bind(lbl_have);
+            self.asm.jcc(Cond::A, slow_lbl);
+            self.asm.bind(ret_lbl);
             self.asm.mov_mr(
                 true,
                 Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_PTR),
@@ -2279,6 +2328,13 @@ impl<'a> Lower<'a> {
                 .sub_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
             self.asm
                 .mov_mr(true, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), SCRATCH_GP2);
+            self.gc_alloc_stubs.push(ColdGcAllocStub {
+                slow_lbl,
+                ret_lbl,
+                bb: self.cur_bb,
+                inst: self.cur_inst,
+                kind: ColdGcAllocKind::DynStore,
+            });
             return Ok(());
         }
 
@@ -2294,19 +2350,15 @@ impl<'a> Lower<'a> {
             SCRATCH_GP1,
             Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_LIMIT),
         );
-        self.asm.jcc(Cond::Be, lbl_have);
-        // R10 already holds `req_bytes`!
-        self.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-        self.record_gc_safepoint(self.cur_inst)?;
-        self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-        self.asm.jcc(Cond::Ne, trap_alloc);
-        self.asm.mov_rm(
-            true,
-            SCRATCH_GP1,
-            Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_PTR),
-        );
-        self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
-        self.asm.bind(lbl_have);
+        self.asm.jcc(Cond::A, slow_lbl);
+        self.asm.bind(ret_lbl);
+        self.gc_alloc_stubs.push(ColdGcAllocStub {
+            slow_lbl,
+            ret_lbl,
+            bb: self.cur_bb,
+            inst: self.cur_inst,
+            kind: ColdGcAllocKind::DynStandalone,
+        });
         self.asm.mov_mr(
             true,
             Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_PTR),
@@ -9957,13 +10009,17 @@ impl<'a> Lower<'a> {
                 let d = self.gp_write_reg(r);
                 self.asm.lea(false, d, Mem::indexed(xr, xr, 1, 1));
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
             }
             Op::I31GetS(v) => {
                 let r = res.unwrap();
-                let trap = self.trap_ci_lbl();
                 let vr = self.gp_read(v, SCRATCH_GP1);
-                self.asm.test_rr(true, vr, vr);
-                self.asm.jcc(Cond::E, trap);
+                if !self.is_known_nonnull(v) {
+                    let trap = self.trap_ci_lbl();
+                    self.asm.test_rr(true, vr, vr);
+                    self.asm.jcc(Cond::E, trap);
+                    self.mark_known_nonnull(v);
+                }
                 let d = self.gp_write_reg(r);
                 if d != vr {
                     self.asm.mov_rr(false, d, vr);
@@ -9973,10 +10029,13 @@ impl<'a> Lower<'a> {
             }
             Op::I31GetU(v) => {
                 let r = res.unwrap();
-                let trap = self.trap_ci_lbl();
                 let vr = self.gp_read(v, SCRATCH_GP1);
-                self.asm.test_rr(true, vr, vr);
-                self.asm.jcc(Cond::E, trap);
+                if !self.is_known_nonnull(v) {
+                    let trap = self.trap_ci_lbl();
+                    self.asm.test_rr(true, vr, vr);
+                    self.asm.jcc(Cond::E, trap);
+                    self.mark_known_nonnull(v);
+                }
                 let d = self.gp_write_reg(r);
                 if d != vr {
                     self.asm.mov_rr(false, d, vr);
@@ -10133,27 +10192,39 @@ impl<'a> Lower<'a> {
                 // `SCRATCH_GP2 (R10)` holds `new_obj`; write header + all fields BEFORE committing `r`.
                 self.emit_write_gc_header(SCRATCH_GP2, gt, true);
                 let fvals = self.ir.pool_slice(fields).to_vec();
+                let mut zero_in_sgp1 = false;
                 for (&fv, fd) in fvals.iter().zip(field_defs.iter()) {
                     let dst = Mem::base_disp(SCRATCH_GP2, fd.offset as i32);
                     match fd.storage {
-                        GcStorageKind::I8 => {
-                            let vr = self.gp_read(fv, SCRATCH_GP1);
-                            self.asm.mov_mr8(dst, vr);
-                        }
-                        GcStorageKind::I16 => {
-                            let vr = self.gp_read(fv, SCRATCH_GP1);
-                            self.asm.mov_mr16(dst, vr);
-                        }
-                        GcStorageKind::I32 => {
-                            let vr = self.gp_read(fv, SCRATCH_GP1);
-                            self.asm.mov_mr(false, dst, vr);
-                        }
-                        GcStorageKind::I64
+                        GcStorageKind::I8
+                        | GcStorageKind::I16
+                        | GcStorageKind::I32
+                        | GcStorageKind::I64
                         | GcStorageKind::GcRef
                         | GcStorageKind::ExternRef
                         | GcStorageKind::OtherRef => {
-                            let vr = self.gp_read(fv, SCRATCH_GP1);
-                            self.asm.mov_mr(true, dst, vr);
+                            let vr = if matches!(
+                                self.loc(fv),
+                                Loc::Remat(RematConst::I32(0) | RematConst::I64(0))
+                            ) {
+                                if !zero_in_sgp1 {
+                                    self.asm.xor_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                                    zero_in_sgp1 = true;
+                                }
+                                SCRATCH_GP1
+                            } else {
+                                let vr = self.gp_read(fv, SCRATCH_GP1);
+                                if vr == SCRATCH_GP1 {
+                                    zero_in_sgp1 = false;
+                                }
+                                vr
+                            };
+                            match fd.storage {
+                                GcStorageKind::I8 => self.asm.mov_mr8(dst, vr),
+                                GcStorageKind::I16 => self.asm.mov_mr16(dst, vr),
+                                GcStorageKind::I32 => self.asm.mov_mr(false, dst, vr),
+                                _ => self.asm.mov_mr(true, dst, vr),
+                            }
                         }
                         GcStorageKind::F32 => {
                             let fx = self.fp_read(fv, SCRATCH_FP1);
@@ -10174,6 +10245,10 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(true, d, SCRATCH_GP2);
                 }
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
+                if matches!(self.loc(r), Loc::Spill(_)) {
+                    self.sgp2_val = Some((r, self.asm.code.len()));
+                }
             }
             Op::StructNewDefault(ty) => {
                 let r = res.unwrap();
@@ -10200,6 +10275,10 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(true, d, SCRATCH_GP2);
                 }
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
+                if matches!(self.loc(r), Loc::Spill(_)) {
+                    self.sgp2_val = Some((r, self.asm.code.len()));
+                }
             }
             Op::StructGet {
                 obj,
@@ -10208,15 +10287,18 @@ impl<'a> Lower<'a> {
                 kind,
             } => {
                 let r = res.unwrap();
-                let trap = self.trap_ci_lbl();
                 let gt = self.module.gc_type(ty);
                 let foff = match &gt.composite {
                     GcCompositeInfo::Struct { fields, .. } => fields[field as usize].offset as i32,
                     _ => return Err("x64: StructGet on non-struct type".into()),
                 };
                 let or = self.gp_read(obj, SCRATCH_GP2);
-                self.asm.test_rr(true, or, or);
-                self.asm.jcc(Cond::E, trap);
+                if !self.is_known_nonnull(obj) {
+                    let trap = self.trap_ci_lbl();
+                    self.asm.test_rr(true, or, or);
+                    self.asm.jcc(Cond::E, trap);
+                    self.mark_known_nonnull(obj);
+                }
                 let mem = Mem::base_disp(or, foff);
                 match kind {
                     GcFieldLoadKind::I8S => {
@@ -10265,6 +10347,9 @@ impl<'a> Lower<'a> {
                         self.fp_commit(r, d);
                     }
                 }
+                if or == SCRATCH_GP2 {
+                    self.sgp2_val = Some((obj, self.asm.code.len()));
+                }
             }
             Op::StructSet {
                 obj,
@@ -10272,15 +10357,18 @@ impl<'a> Lower<'a> {
                 field,
                 val,
             } => {
-                let trap = self.trap_ci_lbl();
                 let gt = self.module.gc_type(ty);
                 let fd = match &gt.composite {
                     GcCompositeInfo::Struct { fields, .. } => fields[field as usize],
                     _ => return Err("x64: StructSet on non-struct type".into()),
                 };
                 let or = self.gp_read(obj, SCRATCH_GP2);
-                self.asm.test_rr(true, or, or);
-                self.asm.jcc(Cond::E, trap);
+                if !self.is_known_nonnull(obj) {
+                    let trap = self.trap_ci_lbl();
+                    self.asm.test_rr(true, or, or);
+                    self.asm.jcc(Cond::E, trap);
+                    self.mark_known_nonnull(obj);
+                }
                 let mem = Mem::base_disp(or, fd.offset as i32);
                 match fd.storage {
                     GcStorageKind::I8 => {
@@ -10314,6 +10402,9 @@ impl<'a> Lower<'a> {
                         let fx = self.fp_read(val, SCRATCH_FP1);
                         self.asm.movdqu_mx(mem, fx);
                     }
+                }
+                if or == SCRATCH_GP2 {
+                    self.sgp2_val = Some((obj, self.asm.code.len()));
                 }
             }
             Op::ArrayNew { ty, init, len } => {
@@ -10377,6 +10468,7 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(true, d, Gp::Rax);
                 }
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
             }
             Op::ArrayNewDefault { ty, len } => {
                 let r = res.unwrap();
@@ -10406,6 +10498,7 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(true, d, Gp::Rax);
                 }
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
             }
             Op::ArrayNewFixed { ty, elems } => {
                 let r = res.unwrap();
@@ -10422,27 +10515,39 @@ impl<'a> Lower<'a> {
                 self.emit_write_gc_header(SCRATCH_GP2, gt, false);
                 self.asm
                     .mov_mi32(false, Mem::base_disp(SCRATCH_GP2, 4), evals.len() as i32);
+                let mut zero_in_sgp1 = false;
                 for (i, &ev) in evals.iter().enumerate() {
                     let dst = Mem::base_disp(SCRATCH_GP2, 8 + (i as i32) * (elem_sz as i32));
                     match elem {
-                        GcStorageKind::I8 => {
-                            let vr = self.gp_read(ev, SCRATCH_GP1);
-                            self.asm.mov_mr8(dst, vr);
-                        }
-                        GcStorageKind::I16 => {
-                            let vr = self.gp_read(ev, SCRATCH_GP1);
-                            self.asm.mov_mr16(dst, vr);
-                        }
-                        GcStorageKind::I32 => {
-                            let vr = self.gp_read(ev, SCRATCH_GP1);
-                            self.asm.mov_mr(false, dst, vr);
-                        }
-                        GcStorageKind::I64
+                        GcStorageKind::I8
+                        | GcStorageKind::I16
+                        | GcStorageKind::I32
+                        | GcStorageKind::I64
                         | GcStorageKind::GcRef
                         | GcStorageKind::ExternRef
                         | GcStorageKind::OtherRef => {
-                            let vr = self.gp_read(ev, SCRATCH_GP1);
-                            self.asm.mov_mr(true, dst, vr);
+                            let vr = if matches!(
+                                self.loc(ev),
+                                Loc::Remat(RematConst::I32(0) | RematConst::I64(0))
+                            ) {
+                                if !zero_in_sgp1 {
+                                    self.asm.xor_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                                    zero_in_sgp1 = true;
+                                }
+                                SCRATCH_GP1
+                            } else {
+                                let vr = self.gp_read(ev, SCRATCH_GP1);
+                                if vr == SCRATCH_GP1 {
+                                    zero_in_sgp1 = false;
+                                }
+                                vr
+                            };
+                            match elem {
+                                GcStorageKind::I8 => self.asm.mov_mr8(dst, vr),
+                                GcStorageKind::I16 => self.asm.mov_mr16(dst, vr),
+                                GcStorageKind::I32 => self.asm.mov_mr(false, dst, vr),
+                                _ => self.asm.mov_mr(true, dst, vr),
+                            }
                         }
                         GcStorageKind::F32 => {
                             let fx = self.fp_read(ev, SCRATCH_FP1);
@@ -10463,6 +10568,10 @@ impl<'a> Lower<'a> {
                     self.asm.mov_rr(true, d, SCRATCH_GP2);
                 }
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
+                if matches!(self.loc(r), Loc::Spill(_)) {
+                    self.sgp2_val = Some((r, self.asm.code.len()));
+                }
             }
             Op::ArrayNewData { ty, data, src, len } => {
                 let r = res.unwrap();
@@ -10536,6 +10645,7 @@ impl<'a> Lower<'a> {
                 self.asm
                     .mov_rm(true, d, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
             }
             Op::ArrayNewElem { ty, elem, src, len } => {
                 let r = res.unwrap();
@@ -10606,10 +10716,10 @@ impl<'a> Lower<'a> {
                 self.asm
                     .mov_rm(true, d, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
                 self.gp_commit(r, d);
+                self.mark_known_nonnull(r);
             }
             Op::ArrayGet { arr, idx, ty, kind } => {
                 let r = res.unwrap();
-                let trap_ci = self.trap_ci_lbl();
                 let trap_oob = self.trap_oob_lbl();
                 let gt = self.module.gc_type(ty);
                 let elem_sz = match gt.composite {
@@ -10617,8 +10727,12 @@ impl<'a> Lower<'a> {
                     _ => return Err("x64: ArrayGet on non-array type".into()),
                 };
                 let ar = self.gp_read(arr, SCRATCH_GP2);
-                self.asm.test_rr(true, ar, ar);
-                self.asm.jcc(Cond::E, trap_ci);
+                if !self.is_known_nonnull(arr) {
+                    let trap_ci = self.trap_ci_lbl();
+                    self.asm.test_rr(true, ar, ar);
+                    self.asm.jcc(Cond::E, trap_ci);
+                    self.mark_known_nonnull(arr);
+                }
                 let ir = self.gp_read(idx, SCRATCH_GP1);
                 self.asm.cmp_rm(false, ir, Mem::base_disp(ar, 4));
                 self.asm.jcc(Cond::Ae, trap_oob);
@@ -10677,9 +10791,11 @@ impl<'a> Lower<'a> {
                         self.fp_commit(r, d);
                     }
                 }
+                if ar == SCRATCH_GP2 {
+                    self.sgp2_val = Some((arr, self.asm.code.len()));
+                }
             }
             Op::ArraySet { arr, idx, val, ty } => {
-                let trap_ci = self.trap_ci_lbl();
                 let trap_oob = self.trap_oob_lbl();
                 let gt = self.module.gc_type(ty);
                 let elem = match gt.composite {
@@ -10688,8 +10804,12 @@ impl<'a> Lower<'a> {
                 };
                 let elem_sz = elem.byte_size();
                 let ar = self.gp_read(arr, SCRATCH_GP2);
-                self.asm.test_rr(true, ar, ar);
-                self.asm.jcc(Cond::E, trap_ci);
+                if !self.is_known_nonnull(arr) {
+                    let trap_ci = self.trap_ci_lbl();
+                    self.asm.test_rr(true, ar, ar);
+                    self.asm.jcc(Cond::E, trap_ci);
+                    self.mark_known_nonnull(arr);
+                }
                 let ir = self.gp_read(idx, SCRATCH_GP1);
                 self.asm.cmp_rm(false, ir, Mem::base_disp(ar, 4));
                 self.asm.jcc(Cond::Ae, trap_oob);
@@ -10743,13 +10863,19 @@ impl<'a> Lower<'a> {
             }
             Op::ArrayLen(arr) => {
                 let r = res.unwrap();
-                let trap = self.trap_ci_lbl();
                 let ar = self.gp_read(arr, SCRATCH_GP2);
-                self.asm.test_rr(true, ar, ar);
-                self.asm.jcc(Cond::E, trap);
+                if !self.is_known_nonnull(arr) {
+                    let trap = self.trap_ci_lbl();
+                    self.asm.test_rr(true, ar, ar);
+                    self.asm.jcc(Cond::E, trap);
+                    self.mark_known_nonnull(arr);
+                }
                 let d = self.gp_write_reg(r);
                 self.asm.mov_rm(false, d, Mem::base_disp(ar, 4));
                 self.gp_commit(r, d);
+                if ar == SCRATCH_GP2 {
+                    self.sgp2_val = Some((arr, self.asm.code.len()));
+                }
             }
             Op::ArrayFill {
                 ty,
@@ -10923,10 +11049,13 @@ impl<'a> Lower<'a> {
                 let r = res.unwrap();
                 let trap = self.trap_ci_lbl();
                 let lbl_ok = self.asm.new_label();
+                let was_nonnull = self.is_known_nonnull(val);
                 match (self.loc(val), self.loc(r)) {
                     (Loc::Gp(g), _) => {
-                        self.asm.test_rr(true, g, g);
-                        self.asm.jcc(Cond::E, if nullable { lbl_ok } else { trap });
+                        if !was_nonnull {
+                            self.asm.test_rr(true, g, g);
+                            self.asm.jcc(Cond::E, if nullable { lbl_ok } else { trap });
+                        }
                         self.emit_gc_nonnull_matches_target(g, heap, trap)?;
                         self.asm.bind(lbl_ok);
                         let d = self.gp_write_reg(r);
@@ -10940,16 +11069,20 @@ impl<'a> Lower<'a> {
                         if vr != dg {
                             self.asm.mov_rr(true, dg, vr);
                         }
-                        self.asm.test_rr(true, dg, dg);
-                        self.asm.jcc(Cond::E, if nullable { lbl_ok } else { trap });
+                        if !was_nonnull {
+                            self.asm.test_rr(true, dg, dg);
+                            self.asm.jcc(Cond::E, if nullable { lbl_ok } else { trap });
+                        }
                         self.emit_gc_nonnull_matches_target(dg, heap, trap)?;
                         self.asm.bind(lbl_ok);
                         self.gp_commit(r, dg);
                     }
                     _ => {
                         let vr = self.gp_read(val, SCRATCH_GP2);
-                        self.asm.test_rr(true, vr, vr);
-                        self.asm.jcc(Cond::E, if nullable { lbl_ok } else { trap });
+                        if !was_nonnull {
+                            self.asm.test_rr(true, vr, vr);
+                            self.asm.jcc(Cond::E, if nullable { lbl_ok } else { trap });
+                        }
                         self.emit_gc_nonnull_matches_target(vr, heap, trap)?;
                         self.asm.bind(lbl_ok);
                         if self.loc(val) != self.loc(r) {
@@ -10957,6 +11090,10 @@ impl<'a> Lower<'a> {
                             self.gp_commit(r, vr2);
                         }
                     }
+                }
+                if !nullable || was_nonnull {
+                    self.mark_known_nonnull(val);
+                    self.mark_known_nonnull(r);
                 }
             }
             // ---- Wasm Threads / Atomics (`0xfe00..=0xfe4e`) ----
@@ -12828,10 +12965,27 @@ pub fn lower_ir_to_x64_with_budget(
         edge_tramps: Vec::new(),
         edge_tramp_cache: HashMap::new(),
         wide_slow_tramps: Vec::new(),
+        gc_alloc_stubs: Vec::new(),
+        global_nonnull: Vec::new(),
+        known_nonnull: if ir.uses_gc {
+            vec![false; ir.val_tys.len()]
+        } else {
+            Vec::new()
+        },
+        nonnull_trail: Vec::new(),
+        sgp2_val: None,
         fp_nz_consts: None,
         val_upper32_zero: None,
         live_flags: None,
         spill_cache: SpillRegCache::default(),
+    };
+
+    let bb_nonnull_in = if ir.uses_gc {
+        let (gnn, bnn) = compute_gc_nonnull_info(ir, module, alloc);
+        l.global_nonnull = gnn;
+        bnn
+    } else {
+        Vec::new()
     };
 
     // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----
@@ -12990,6 +13144,13 @@ pub fn lower_ir_to_x64_with_budget(
         l.cur_bb = bid;
         l.live_flags = None;
         l.spill_cache.clear();
+        l.sgp2_val = None;
+        l.clear_known_nonnull();
+        if let Some(in_nn) = bb_nonnull_in.get(bid as usize) {
+            for &vid in in_nn {
+                l.mark_known_nonnull(Val(vid));
+            }
+        }
         let next_bb = alloc.block_order.get(oi + 1).copied();
         let mut term_fused = false;
         let mut ii = 0usize;
@@ -13012,6 +13173,45 @@ pub fn lower_ir_to_x64_with_budget(
                         ));
                     }
                     continue;
+                }
+            }
+            if !use_cnt.is_empty()
+                && ii + 1 == bb.insts.len()
+                && let Some(ev) = inst.res
+                && use_cnt[ev.0 as usize] == 1
+                && let Term::BranchIf {
+                    cond,
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                } = bb.term
+                && cond == ev
+            {
+                let fused = match inst.op {
+                    Op::I32Eqz(a) => Some((CmpBranchKind::I32Imm(CmpOp::Eq, 0), a, a)),
+                    Op::I64Eqz(a) => Some((CmpBranchKind::I64Imm(CmpOp::Eq, 0), a, a)),
+                    Op::RefEq(a, b) => Some((CmpBranchKind::I64(CmpOp::Eq), a, b)),
+                    _ => None,
+                };
+                if let Some((kind, a, b)) = fused {
+                    l.cur_inst = u32::MAX;
+                    l.emit_term(
+                        Term::CmpBranch {
+                            kind,
+                            a,
+                            b,
+                            then_bb,
+                            then_args,
+                            else_bb,
+                            else_args,
+                        },
+                        next_bb,
+                        budget,
+                        &mut charged_rodata,
+                    )?;
+                    term_fused = true;
+                    break;
                 }
             }
             if !use_cnt.is_empty()
@@ -13150,6 +13350,98 @@ pub fn lower_ir_to_x64_with_budget(
         check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     }
 
+    // ---- Cold out-of-line `HELPER_GC_COLLECT` slow-path stubs ----
+    let gc_stubs = std::mem::take(&mut l.gc_alloc_stubs);
+    if !gc_stubs.is_empty() {
+        let gc_off = l
+            .layout
+            .gc
+            .as_ref()
+            .ok_or("x64: cold GC alloc stub without GcCtxLayout")?
+            .gc_state_off;
+        let trap_alloc = l.trap_alloc_lbl();
+        for (si, stub) in gc_stubs.into_iter().enumerate() {
+            if let Some(b) = budget
+                && (si & 63) == 0
+            {
+                b.check_deadline()?;
+            }
+            l.asm.bind(stub.slow_lbl);
+            l.cur_bb = stub.bb;
+            l.cur_inst = stub.inst;
+            match stub.kind {
+                ColdGcAllocKind::FixedStore(sz_i32) => {
+                    l.asm.mov_ri64(SCRATCH_GP2, sz_i32 as u64);
+                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
+                    l.record_gc_safepoint(stub.inst)?;
+                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    l.asm.jcc(Cond::Ne, trap_alloc);
+                    l.asm
+                        .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
+                    l.asm.mov_rm(
+                        true,
+                        SCRATCH_GP2,
+                        Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_PTR),
+                    );
+                    l.asm.add_ri(true, SCRATCH_GP2, sz_i32);
+                    l.asm.jmp(stub.ret_lbl);
+                }
+                ColdGcAllocKind::FixedStandalone(size_bytes) => {
+                    l.asm.mov_ri64(SCRATCH_GP2, u64::from(size_bytes));
+                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
+                    l.record_gc_safepoint(stub.inst)?;
+                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    l.asm.jcc(Cond::Ne, trap_alloc);
+                    l.asm.mov_rm(
+                        true,
+                        SCRATCH_GP2,
+                        Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_PTR),
+                    );
+                    if let Ok(sz_i32) = i32::try_from(size_bytes) {
+                        l.asm
+                            .lea(true, SCRATCH_GP1, Mem::base_disp(SCRATCH_GP2, sz_i32));
+                    } else {
+                        l.asm.mov_ri64(SCRATCH_GP1, u64::from(size_bytes));
+                        l.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    }
+                    l.asm.jmp(stub.ret_lbl);
+                }
+                ColdGcAllocKind::DynStore => {
+                    l.asm
+                        .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
+                    l.record_gc_safepoint(stub.inst)?;
+                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    l.asm.jcc(Cond::Ne, trap_alloc);
+                    l.asm
+                        .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
+                    l.asm.mov_rm(
+                        true,
+                        SCRATCH_GP2,
+                        Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_ALLOC_PTR),
+                    );
+                    l.asm
+                        .add_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+                    l.asm.jmp(stub.ret_lbl);
+                }
+                ColdGcAllocKind::DynStandalone => {
+                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
+                    l.record_gc_safepoint(stub.inst)?;
+                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    l.asm.jcc(Cond::Ne, trap_alloc);
+                    l.asm.mov_rm(
+                        true,
+                        SCRATCH_GP1,
+                        Mem::base_disp(Gp::R15, gc_off + gc_rt::GC_OFF_ALLOC_PTR),
+                    );
+                    l.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    l.asm.jmp(stub.ret_lbl);
+                }
+            }
+            check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
+        }
+    }
+
     // ---- Shared Cold Trap Stubs ----
     let has_any_trap = l.trap_oob.is_some()
         || l.trap_table_oob.is_some()
@@ -13279,4 +13571,306 @@ pub(crate) fn bounds_check_covered_by_subsequent_mem_op(
         }
     }
     false
+}
+
+/// Computes static non-nullable Wasm-GC SSA values and sound forward RPO cross-block
+/// non-null facts (`bb_nonnull_in[bid]`) to eliminate redundant `test r, r; je trap`
+/// checks across `br_on_null`, `br_on_non_null`, `ref.is_null`, and dominating dereferences.
+fn compute_gc_nonnull_info(
+    ir: &IrFunc,
+    module: &X64Module,
+    alloc: &AllocResult,
+) -> (Vec<bool>, Vec<Vec<u32>>) {
+    const MAX_TRACKED_NN: usize = 32;
+    let n_vals = ir.val_tys.len();
+    let n_blocks = ir.blocks.len();
+    let mut global_nn = vec![false; n_vals];
+
+    let is_nonnull_vt =
+        |vt: wtime_types::ValType| matches!(vt, wtime_types::ValType::Ref(rt) if !rt.nullable);
+
+    if let Some(fty) = module.func_type(ir.func_index) {
+        for (&pv, &vt) in ir.params.iter().zip(&fty.params) {
+            if is_nonnull_vt(vt) {
+                global_nn[pv.0 as usize] = true;
+            }
+        }
+    }
+
+    for &bid in &alloc.block_order {
+        let bb = &ir.blocks[bid as usize];
+        for inst in &bb.insts {
+            let Some(res) = inst.res else {
+                match inst.op {
+                    Op::Call { func, rets, .. } => {
+                        if let Some(fty) = module.func_type(func as usize) {
+                            for (&rv, &vt) in ir.pool_slice(rets).iter().zip(&fty.results) {
+                                if is_nonnull_vt(vt) {
+                                    global_nn[rv.0 as usize] = true;
+                                }
+                            }
+                        }
+                    }
+                    Op::CallIndirect { ci_id, rets, .. } => {
+                        if let Some(ci) = module.ci_sigs.get(ci_id as usize)
+                            && let Some(fty) = module.module_types.get(ci.type_idx as usize)
+                        {
+                            for (&rv, &vt) in ir.pool_slice(rets).iter().zip(&fty.results) {
+                                if is_nonnull_vt(vt) {
+                                    global_nn[rv.0 as usize] = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            };
+            let nn = match inst.op {
+                Op::GcConstI31(_)
+                | Op::ExternConstI31(_)
+                | Op::RefI31(_)
+                | Op::StructNew { .. }
+                | Op::StructNewDefault(_)
+                | Op::ArrayNew { .. }
+                | Op::ArrayNewDefault { .. }
+                | Op::ArrayNewFixed { .. }
+                | Op::ArrayNewData { .. }
+                | Op::ArrayNewElem { .. }
+                | Op::RefCast {
+                    nullable: false, ..
+                } => true,
+                Op::StructGet { ty, field, .. } => {
+                    matches!(
+                        &module.gc_type(ty).composite,
+                        GcCompositeInfo::Struct { fields, .. }
+                            if fields.get(field as usize).is_some_and(|f| f.non_null)
+                    )
+                }
+                Op::ArrayGet { ty, .. } => {
+                    matches!(
+                        module.gc_type(ty).composite,
+                        GcCompositeInfo::Array {
+                            elem_non_null: true,
+                            ..
+                        }
+                    )
+                }
+                Op::GlobalGet(g) => module
+                    .globals
+                    .get(g as usize)
+                    .is_some_and(|&(vt, _)| is_nonnull_vt(vt)),
+                _ => false,
+            };
+            if nn {
+                global_nn[res.0 as usize] = true;
+            }
+        }
+        match bb.term {
+            Term::CallCatch { func, ok_bb, .. } => {
+                if let Some(fty) = module.func_type(func as usize) {
+                    for (&pv, &vt) in ir.blocks[ok_bb.0 as usize].params.iter().zip(&fty.results) {
+                        if is_nonnull_vt(vt) {
+                            global_nn[pv.0 as usize] = true;
+                        }
+                    }
+                }
+            }
+            Term::CallIndirectCatch { ci_id, ok_bb, .. } => {
+                if let Some(ci) = module.ci_sigs.get(ci_id as usize)
+                    && let Some(fty) = module.module_types.get(ci.type_idx as usize)
+                {
+                    for (&pv, &vt) in ir.blocks[ok_bb.0 as usize].params.iter().zip(&fty.results) {
+                        if is_nonnull_vt(vt) {
+                            global_nn[pv.0 as usize] = true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut pred_count = vec![0u32; n_blocks];
+    for &bid in &alloc.block_order {
+        let bb = &ir.blocks[bid as usize];
+        match bb.term {
+            Term::Jump { target, .. } => pred_count[target.0 as usize] += 1,
+            Term::BranchIf {
+                then_bb, else_bb, ..
+            }
+            | Term::CmpBranch {
+                then_bb, else_bb, ..
+            } => {
+                pred_count[then_bb.0 as usize] += 1;
+                pred_count[else_bb.0 as usize] += 1;
+            }
+            Term::BrTable { table_idx, .. } => {
+                let bt = &ir.br_tables[table_idx as usize];
+                pred_count[bt.default.0.0 as usize] += 1;
+                for &(tbb, _) in &bt.targets {
+                    pred_count[tbb.0 as usize] += 1;
+                }
+            }
+            Term::CallCatch {
+                ok_bb, catch_bb, ..
+            }
+            | Term::CallIndirectCatch {
+                ok_bb, catch_bb, ..
+            } => {
+                pred_count[ok_bb.0 as usize] += 1;
+                pred_count[catch_bb.0 as usize] += 1;
+            }
+            Term::Return { .. }
+            | Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::ThrowActive
+            | Term::Unreachable => {}
+        }
+    }
+
+    let is_nn = |set: &[u32], gnn: &[bool], v: Val| -> bool {
+        let idx = v.0 as usize;
+        gnn.get(idx).copied().unwrap_or(false) || set.binary_search(&v.0).is_ok()
+    };
+    let insert_nn = |set: &mut Vec<u32>, gnn: &[bool], v: Val| {
+        if gnn.get(v.0 as usize).copied().unwrap_or(false) || set.len() >= MAX_TRACKED_NN {
+            return;
+        }
+        if let Err(pos) = set.binary_search(&v.0) {
+            set.insert(pos, v.0);
+        }
+    };
+
+    let mut pred_seen = vec![0u32; n_blocks];
+    let mut bb_in: Vec<Option<Vec<u32>>> = vec![None; n_blocks];
+    let mut bb_entry_out = vec![Vec::new(); n_blocks];
+
+    for &bid in &alloc.block_order {
+        let mut cur = if pred_count[bid as usize] > 0
+            && pred_seen[bid as usize] == pred_count[bid as usize]
+        {
+            bb_in[bid as usize].take().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        bb_entry_out[bid as usize] = cur.clone();
+
+        let bb = &ir.blocks[bid as usize];
+        for inst in &bb.insts {
+            match inst.op {
+                Op::StructGet { obj, .. } | Op::StructSet { obj, .. } => {
+                    insert_nn(&mut cur, &global_nn, obj);
+                }
+                Op::ArrayGet { arr, .. } | Op::ArraySet { arr, .. } | Op::ArrayLen(arr) => {
+                    insert_nn(&mut cur, &global_nn, arr);
+                }
+                Op::I31GetS(v) | Op::I31GetU(v) => {
+                    insert_nn(&mut cur, &global_nn, v);
+                }
+                Op::RefCast {
+                    val,
+                    nullable: false,
+                    ..
+                } => {
+                    insert_nn(&mut cur, &global_nn, val);
+                }
+                Op::RefCast {
+                    val,
+                    nullable: true,
+                    ..
+                } => {
+                    if is_nn(&cur, &global_nn, val)
+                        && let Some(r) = inst.res
+                    {
+                        insert_nn(&mut cur, &global_nn, r);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut contribute = |target: u32, args: ValRange, extra: Option<Val>, base: &[u32]| {
+            pred_seen[target as usize] += 1;
+            let mut edge_set = base.to_vec();
+            if let Some(ev) = extra {
+                insert_nn(&mut edge_set, &global_nn, ev);
+            }
+            if args.len > 0 {
+                for (&param, &arg) in ir.blocks[target as usize]
+                    .params
+                    .iter()
+                    .zip(ir.pool_slice(args))
+                {
+                    if is_nn(&edge_set, &global_nn, arg) {
+                        insert_nn(&mut edge_set, &global_nn, param);
+                    }
+                }
+            }
+            match &mut bb_in[target as usize] {
+                None => bb_in[target as usize] = Some(edge_set),
+                Some(existing) => {
+                    existing.retain(|v| edge_set.binary_search(v).is_ok());
+                }
+            }
+        };
+
+        match bb.term {
+            Term::Jump { target, args } => contribute(target.0, args, None, &cur),
+            Term::BranchIf {
+                cond,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } => {
+                let else_extra = bb.insts.last().and_then(|last| match last.op {
+                    Op::I64Eqz(a) if last.res == Some(cond) => Some(a),
+                    _ => None,
+                });
+                contribute(then_bb.0, then_args, None, &cur);
+                contribute(else_bb.0, else_args, else_extra, &cur);
+            }
+            Term::CmpBranch {
+                kind,
+                a,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                let (then_extra, else_extra) = match kind {
+                    CmpBranchKind::I64Imm(CmpOp::Eq, 0) => (None, Some(a)),
+                    CmpBranchKind::I64Imm(CmpOp::Ne, 0) => (Some(a), None),
+                    _ => (None, None),
+                };
+                contribute(then_bb.0, then_args, then_extra, &cur);
+                contribute(else_bb.0, else_args, else_extra, &cur);
+            }
+            Term::BrTable { table_idx, .. } => {
+                let bt = &ir.br_tables[table_idx as usize];
+                contribute(bt.default.0.0, bt.default.1, None, &cur);
+                for &(tbb, targs) in &bt.targets {
+                    contribute(tbb.0, targs, None, &cur);
+                }
+            }
+            Term::CallCatch {
+                ok_bb, catch_bb, ..
+            }
+            | Term::CallIndirectCatch {
+                ok_bb, catch_bb, ..
+            } => {
+                contribute(ok_bb.0, ValRange::EMPTY, None, &cur);
+                contribute(catch_bb.0, ValRange::EMPTY, None, &[]);
+            }
+            Term::Return { .. }
+            | Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::ThrowActive
+            | Term::Unreachable => {}
+        }
+    }
+
+    (global_nn, bb_entry_out)
 }

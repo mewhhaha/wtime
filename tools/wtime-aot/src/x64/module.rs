@@ -355,6 +355,7 @@ pub struct GcStructField {
     pub offset: u32,
     pub storage: GcStorageKind,
     pub mutable: bool,
+    pub non_null: bool,
 }
 
 /// Canonical composite payload of a `GcCanonType`.
@@ -373,6 +374,7 @@ pub enum GcCompositeInfo {
     Array {
         elem: GcStorageKind,
         mutable: bool,
+        elem_non_null: bool,
     },
 }
 
@@ -1948,6 +1950,10 @@ pub fn admit_x64_module_for_target_with_summaries(
                                 offset: off,
                                 storage: sk,
                                 mutable: f.mutable,
+                                non_null: matches!(
+                                    f.storage,
+                                    StorageType::Val(ValType::Ref(rt)) if !rt.nullable
+                                ),
                             });
                             off = off
                                 .checked_add(sk.byte_size())
@@ -1967,6 +1973,10 @@ pub fn admit_x64_module_for_target_with_summaries(
                     CompositeType::Array(at) => GcCompositeInfo::Array {
                         elem: storage_to_gc_kind(at.field.storage, &type_kinds)?,
                         mutable: at.field.mutable,
+                        elem_non_null: matches!(
+                            at.field.storage,
+                            StorageType::Val(ValType::Ref(rt)) if !rt.nullable
+                        ),
                     },
                     CompositeType::Cont(_) => unreachable!(),
                 };

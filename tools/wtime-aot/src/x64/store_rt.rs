@@ -2173,6 +2173,35 @@ fn emit_store_init_instance(
     a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R10, 8));
 
     // 1. Initialize defined non-folded scalar / FuncRef / V128 globals (`gi >= imported_globals.len()`).
+    // Coalesce contiguous runs of zero-initialized 8-byte globals (`RefNull` / `I64(0)` / `F64(0)`)
+    // into compact `rep stosq` sequences instead of emitting tens of KiB of unrolled zero stores.
+    let mut zero_qword_offs: Vec<i32> = Vec::new();
+    let flush_zero_qwords = |a: &mut Asm, offs: &mut Vec<i32>| {
+        if offs.is_empty() {
+            return;
+        }
+        a.xor_rr(false, Gp::Rax, Gp::Rax);
+        let mut i = 0usize;
+        while i < offs.len() {
+            let start = offs[i];
+            let mut run = 1usize;
+            while i + run < offs.len() && offs[i + run] == start + (run as i32) * 8 {
+                run += 1;
+            }
+            if run >= 4 {
+                a.lea(true, Gp::Rdi, Mem::base_disp(Gp::R15, start));
+                a.mov_ri32(Gp::Rcx, run as u32);
+                a.cld();
+                a.rep_stosq();
+            } else {
+                for k in 0..run {
+                    a.mov_mr(true, Mem::base_disp(Gp::R15, offs[i + k]), Gp::Rax);
+                }
+            }
+            i += run;
+        }
+        offs.clear();
+    };
     for (gi, &init) in module
         .global_inits
         .iter()
@@ -2183,6 +2212,14 @@ fn emit_store_init_instance(
             continue;
         }
         let off = layout.global_offs[gi];
+        match init {
+            X64ConstVal::RefNull | X64ConstVal::I64(0) | X64ConstVal::F64(0) => {
+                zero_qword_offs.push(off);
+                continue;
+            }
+            _ => {}
+        }
+        flush_zero_qwords(&mut a, &mut zero_qword_offs);
         match init {
             X64ConstVal::I32(v) => {
                 a.mov_mi32(false, Mem::base_disp(Gp::R15, off), v);
@@ -2198,10 +2235,7 @@ fn emit_store_init_instance(
                 a.mov_ri64(Gp::Rax, bits);
                 a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
             }
-            X64ConstVal::RefNull => {
-                a.xor_rr(false, Gp::Rax, Gp::Rax);
-                a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
-            }
+            X64ConstVal::RefNull => unreachable!(),
             X64ConstVal::FuncRef(f) => {
                 a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_STORE_FUNC_REFS));
                 a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rax, (f as i32) * 8));
@@ -2218,6 +2252,7 @@ fn emit_store_init_instance(
             X64ConstVal::V128(_) | X64ConstVal::RuntimeGc => {}
         }
     }
+    flush_zero_qwords(&mut a, &mut zero_qword_offs);
     for &(gi, ro_off) in &tables.v128_global_inits {
         if gi >= module.imported_globals.len() && module.global_consts[gi].is_none() {
             let off = layout.global_offs[gi];

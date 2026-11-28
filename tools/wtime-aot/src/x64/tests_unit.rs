@@ -10714,59 +10714,59 @@ fn x64_wave_b_mul_wide_widen_reduce_and_spill_cache_parity() {
         "expected both runtime-mask and const-mask VecReduceKind::U32XorZextSum in f1 IR (got {xor_zext_cnt})"
     );
 
-    // 2. Reference Rust expectations (100% independent of compiler):
-    let expected_mul = |cid: usize| -> u32 {
-        let (a, b) = pairs[cid];
-        let p0 = u128::from(a) * u128::from(b);
-        let lo0 = p0 as u64;
-        let hi0 = (p0 >> 64) as u64;
-        let sum = lo0.wrapping_add(b);
-        let carry = u64::from(sum < lo0);
-        let mut acc_lo = sum;
-        let mut acc_hi = hi0.wrapping_add(carry);
-        let p1 = u128::from(a) * u128::from(a);
-        acc_lo ^= p1 as u64;
-        acc_hi ^= (p1 >> 64) as u64;
-        let p2 = u128::from(a) * 10u128;
-        acc_lo = acc_lo.wrapping_add(p2 as u64);
-        acc_hi = acc_hi.wrapping_add((p2 >> 64) as u64);
-        let p3 = u128::from(a) * 0x1234_5678_9abc_def1u128;
-        acc_lo ^= p3 as u64;
-        acc_hi ^= (p3 >> 64) as u64;
-        (acc_lo ^ (acc_lo >> 32) ^ acc_hi.rotate_left(7) ^ (acc_hi >> 29)) as u32
-    };
-    let expected_widen = |n: u32| -> u32 {
-        let mask = n.wrapping_mul(0x9e37_79b1) | 0x8000_0001;
-        let mut s1 = 17u64;
-        let mut s2 = 29u64;
-        let mut s3 = 41u64;
-        for i in 0..n {
-            let v = i.wrapping_mul(0x7f4a_7c15) ^ 0x8000_0005;
-            s1 = s1.wrapping_add(u64::from(v));
-            s2 = s2.wrapping_add(u64::from(v ^ mask));
-            s3 = s3.wrapping_add(u64::from(v ^ 0x5a5a_a5a5));
-        }
-        let f = s1 ^ s2.rotate_left(3) ^ s3.rotate_left(11);
-        (f ^ (f >> 32)) as u32
-    };
-    let expected_spill = |x: u32| -> u32 {
-        let mut loc = [0u32; 19];
-        for k in 1u32..=18 {
-            loc[k as usize] = x.wrapping_mul(k * 2 + 1) ^ (k * 17);
-        }
-        let mut acc = loc[1];
-        for k in 2usize..=18 {
-            acc = (acc.wrapping_mul(7).wrapping_add(loc[k]) ^ (loc[k] % 287))
-                .wrapping_add(u32::from(loc[k] < loc[k - 1]));
-        }
-        acc
-    };
-
-    // 3. Execute natively across ALL THREE x64 ISA tiers (SSE2 v2, AVX2 v3, AVX-512 v4)!
+    // 2. Execute natively across ALL THREE x64 ISA tiers (SSE2 v2, AVX2 v3, AVX-512 v4)!
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if let Some(driver) = super::tests_oracle::get_oracle_driver() {
         use std::io::Write as _;
         use std::process::{Command, Stdio};
+
+        // Reference Rust expectations (100% independent of compiler):
+        let expected_mul = |cid: usize| -> u32 {
+            let (a, b) = pairs[cid];
+            let p0 = u128::from(a) * u128::from(b);
+            let lo0 = p0 as u64;
+            let hi0 = (p0 >> 64) as u64;
+            let sum = lo0.wrapping_add(b);
+            let carry = u64::from(sum < lo0);
+            let mut acc_lo = sum;
+            let mut acc_hi = hi0.wrapping_add(carry);
+            let p1 = u128::from(a) * u128::from(a);
+            acc_lo ^= p1 as u64;
+            acc_hi ^= (p1 >> 64) as u64;
+            let p2 = u128::from(a) * 10u128;
+            acc_lo = acc_lo.wrapping_add(p2 as u64);
+            acc_hi = acc_hi.wrapping_add((p2 >> 64) as u64);
+            let p3 = u128::from(a) * 0x1234_5678_9abc_def1u128;
+            acc_lo ^= p3 as u64;
+            acc_hi ^= (p3 >> 64) as u64;
+            (acc_lo ^ (acc_lo >> 32) ^ acc_hi.rotate_left(7) ^ (acc_hi >> 29)) as u32
+        };
+        let expected_widen = |n: u32| -> u32 {
+            let mask = n.wrapping_mul(0x9e37_79b1) | 0x8000_0001;
+            let mut s1 = 17u64;
+            let mut s2 = 29u64;
+            let mut s3 = 41u64;
+            for i in 0..n {
+                let v = i.wrapping_mul(0x7f4a_7c15) ^ 0x8000_0005;
+                s1 = s1.wrapping_add(u64::from(v));
+                s2 = s2.wrapping_add(u64::from(v ^ mask));
+                s3 = s3.wrapping_add(u64::from(v ^ 0x5a5a_a5a5));
+            }
+            let f = s1 ^ s2.rotate_left(3) ^ s3.rotate_left(11);
+            (f ^ (f >> 32)) as u32
+        };
+        let expected_spill = |x: u32| -> u32 {
+            let mut loc = [0u32; 19];
+            for k in 1u32..=18 {
+                loc[k as usize] = x.wrapping_mul(k * 2 + 1) ^ (k * 17);
+            }
+            let mut acc = loc[1];
+            for k in 2usize..=18 {
+                acc = (acc.wrapping_mul(7).wrapping_add(loc[k]) ^ (loc[k] % 287))
+                    .wrapping_add(u32::from(loc[k] < loc[k - 1]));
+            }
+            acc
+        };
 
         let root = crate::build::create_fresh_test_root("wtime-aot-wave-b");
         let mut configs = vec![

@@ -2,6 +2,49 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.13] - 2026-11-28
+
+`wtime-aot` GC codegen & image-size optimizations plus `wtime-aot-host`
+throughput, zero-copy mmap, and Wasmtime-parity release. Core crates
+(`wtime-types`, `wtime-decode`, `wtime-validate`, `wtime-runtime`) and
+`wtime-cli` remain `#![forbid(unsafe_code)]` with zero external production
+dependencies, and `tools/wtime-aot` remains `#![forbid(unsafe_code)]` with zero
+external production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **GC safepoint table deduplication (`x64` & `aarch64`)**:
+  - Prefix-sharing sorted safepoint slot pool deduplication
+    (`build_deduped_safepoint_slot_pool`), shrinking `.rodata` safepoint tables
+    on large Wasm-GC images with zero ABI change.
+- **x64 Wasm-GC codegen & `.text` shrinking**:
+  - Moved slow `HELPER_GC_COLLECT` retry paths out-of-line into cold
+    function-tail stubs (`ColdGcAllocStub`) so hot bump-allocation checks stay
+    predicted fallthroughs.
+  - Added static + RPO cross-block non-null analysis (`compute_gc_nonnull_info`)
+    covering non-nullable params, globals, struct fields, array elements, call
+    results, `br_on_null`/`br_on_non_null`, `i64.eqz` branch refinements, and
+    dominating dereferences, plus zero-gap `sgp2_val` caching and fused
+    single-use `(I32Eqz | I64Eqz | RefEq) + BranchIf` compare-branches.
+  - Added 32-bit/narrow GC ops to `val_upper32_zero`, coalesced `>= 4`
+    contiguous zero globals in `emit_store_init_instance` into `rep stosq`,
+    dropped redundant `or $0` on struct headers, and reused zeroed scratch
+    registers in `struct.new`/`array.new_fixed`.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- **Lock-free GC/type hot paths, warm semi-spaces, zero-copy mmap, and bulk UTF-16**:
+  - Added lock-free canonical type/GC access, warm semi-space reuse across
+    minor collections, zero-copy `WTMS0002` `mmap` deserialization, and bulk
+    UTF-16 `ArrayRef` reads/writes.
+- **Wasmtime API parity & idle RSS reclamation**:
+  - Decoupled `OptLevel` from `Engine::precompile_compatibility_hash()` so
+    `OptLevel::Speed` / `enable_compiler(false)` engines deserialize
+    `OptLevel::SpeedAndSize` precompiled modules.
+  - Fixed `Module::image_range()` to report the actual mapped `SoMapping::Mmap`
+    `base .. base + image_len` range.
+  - Added `Store::reclaim_inactive_gc_space(&mut self)` (`madvise(MADV_DONTNEED)`
+    on the inactive GC semi-space) so embedders can reclaim physical RSS pages
+    from idle isolates without disturbing live objects.
+
 ## [0.1.12] - 2026-11-27
 
 Full AArch64 `StoreCdylib`, Wasm GC, Wasm Threads, 8 GiB GC semi-space, and

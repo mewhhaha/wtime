@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::error::{Error, PoolConcurrencyLimitError, Result};
-use crate::types::CanonicalTypeRegistry;
+use crate::types::{CanonTypeInfo, CanonicalTypeRegistry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -651,15 +651,31 @@ unsafe impl Sync for RegisteredCodeRange {}
 pub(crate) struct EngineInner {
     pub(crate) id: u64,
     pub(crate) config: Config,
-    pub(crate) types: Mutex<CanonicalTypeRegistry>,
+    pub(crate) types: RwLock<CanonicalTypeRegistry>,
+    /// Lock-free-to-read per-Store snapshot of `CanonicalTypeRegistry::infos` updated on type writes.
+    pub(crate) types_snapshot: RwLock<Arc<[CanonTypeInfo]>>,
+    pub(crate) types_version: AtomicU64,
     /// Sorted by `code_start` for O(log M) binary search during GC stack walking.
-    pub(crate) code_ranges: Mutex<Vec<RegisteredCodeRange>>,
+    pub(crate) code_ranges: RwLock<Vec<RegisteredCodeRange>>,
+    pub(crate) code_ranges_snapshot: RwLock<Arc<[RegisteredCodeRange]>>,
+    pub(crate) code_ranges_version: AtomicU64,
     /// Active concurrent Stores when using `InstanceAllocationStrategy::Pooling`.
     pub(crate) active_stores: AtomicUsize,
     /// Optional pool concurrency cap (`None` for OnDemand).
     pub(crate) max_pooled_stores: Option<usize>,
     /// Cached compiled `.so` modules keyed by blake/fnv/sha hash when needed.
     pub(crate) _extra: Mutex<HashMap<u64, ()>>,
+}
+
+impl EngineInner {
+    pub(crate) fn publish_types_snapshot(&self, reg: &CanonicalTypeRegistry) {
+        let snap: Arc<[CanonTypeInfo]> = Arc::from(reg.infos.as_slice());
+        *self
+            .types_snapshot
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = snap;
+        self.types_version.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl std::fmt::Debug for EngineInner {
@@ -705,8 +721,12 @@ impl Engine {
             inner: Arc::new(EngineInner {
                 id,
                 config: config.clone(),
-                types: Mutex::new(CanonicalTypeRegistry::new()),
-                code_ranges: Mutex::new(Vec::new()),
+                types: RwLock::new(CanonicalTypeRegistry::new()),
+                types_snapshot: RwLock::new(Arc::from([])),
+                types_version: AtomicU64::new(0),
+                code_ranges: RwLock::new(Vec::new()),
+                code_ranges_snapshot: RwLock::new(Arc::from([])),
+                code_ranges_version: AtomicU64::new(0),
                 active_stores: AtomicUsize::new(0),
                 max_pooled_stores,
                 _extra: Mutex::new(HashMap::new()),
@@ -789,7 +809,11 @@ impl Engine {
         }
     }
 
-    /// Deterministic hash covering target ABI, optimization level, features, and module version.
+    /// Deterministic hash covering target ABI, runtime features, and module version.
+    ///
+    /// Optimization level (`cranelift_opt_level`) affects only compilation, not the runtime ABI
+    /// of deserialized modules, so engines with different optimization levels (or with compilation
+    /// disabled) remain compatible with precompiled artifacts.
     pub fn precompile_compatibility_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         // Stable FNV-1a 64-bit hash so identical configs across processes produce the exact same key.
@@ -809,7 +833,6 @@ impl Engine {
         std::env::consts::ARCH.as_bytes().hash(&mut h);
         wtime_aot::x64::store_rt::STORE_ABI_VERSION.hash(&mut h);
         let c = &self.inner.config;
-        (c.opt_level as u8).hash(&mut h);
         c.collector.map(|v| v as u8).hash(&mut h);
         c.gc_support.hash(&mut h);
         c.wasm_reference_types.hash(&mut h);
@@ -884,10 +907,19 @@ impl Engine {
         let mut ranges = self
             .inner
             .code_ranges
-            .lock()
+            .write()
             .unwrap_or_else(|e| e.into_inner());
         let pos = ranges.partition_point(|r| r.code_start < range.code_start);
         ranges.insert(pos, range);
+        let snap: Arc<[RegisteredCodeRange]> = Arc::from(ranges.as_slice());
+        *self
+            .inner
+            .code_ranges_snapshot
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = snap;
+        self.inner
+            .code_ranges_version
+            .fetch_add(1, Ordering::Release);
         crate::signal::register_global_code_range(range.code_start, range.code_end);
     }
 
@@ -895,7 +927,7 @@ impl Engine {
         let mut ranges = self
             .inner
             .code_ranges
-            .lock()
+            .write()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = ranges
             .iter()
@@ -903,6 +935,15 @@ impl Engine {
         {
             ranges.remove(pos);
         }
+        let snap: Arc<[RegisteredCodeRange]> = Arc::from(ranges.as_slice());
+        *self
+            .inner
+            .code_ranges_snapshot
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = snap;
+        self.inner
+            .code_ranges_version
+            .fetch_add(1, Ordering::Release);
         crate::signal::unregister_global_code_range(code_start, code_end);
     }
 }

@@ -402,7 +402,7 @@ impl Func {
             .sum();
         let mut rets_buf = vec![0u64; ret_words.max(1)];
 
-        invoke_store_func_raw(inner, fr, &ft, &args_buf, &mut rets_buf)?;
+        invoke_store_func_raw(inner, fr, None, &args_buf, &mut rets_buf)?;
 
         // Unpack flat u64 results buffer.
         let mut cursor = 0usize;
@@ -426,12 +426,19 @@ impl Func {
         if inner.id != self.store_id {
             return Err(Error::msg("Func::typed called on wrong Store"));
         }
-        let ft = self.ty(store);
+        let fr = unsafe { *self.func_ref_ptr };
+        let ft = FuncType::from_canon(Arc::clone(&inner.engine.inner), fr.canon_type_id);
         let (wparams, wresults) = ft.wasm_params_results();
         Params::check_types(&wparams)?;
         Results::check_types(&wresults)?;
+        let tramp = if fr.host_func_id == u32::MAX {
+            inner.find_export_tramp_for_func_type(&ft)
+        } else {
+            None
+        };
         Ok(TypedFunc {
             func: *self,
+            tramp,
             _marker: PhantomData,
         })
     }
@@ -440,6 +447,7 @@ impl Func {
 /// Statically typed function handle (`TypedFunc<Params, Results>`).
 pub struct TypedFunc<Params, Results> {
     func: Func,
+    tramp: Option<WtStoreExportTrampFn>,
     _marker: PhantomData<fn(Params) -> Results>,
 }
 
@@ -461,12 +469,11 @@ impl<Params: WasmParams, Results: WasmResults> TypedFunc<Params, Results> {
             return Err(Error::msg("TypedFunc::call called on wrong Store"));
         }
         let fr = unsafe { *self.func.func_ref_ptr };
-        let ft = FuncType::from_canon(Arc::clone(&inner.engine.inner), fr.canon_type_id);
         let mut args_buf = [0u64; 24];
         let mut rets_buf = [0u64; 24];
         let mut argc = 0usize;
         params.write_flat(inner, &mut args_buf, &mut argc)?;
-        invoke_store_func_raw(inner, fr, &ft, &args_buf[..argc], &mut rets_buf)?;
+        invoke_store_func_raw(inner, fr, self.tramp, &args_buf[..argc], &mut rets_buf)?;
         let mut rc = 0usize;
         Results::read_flat(inner, &rets_buf, &mut rc)
     }
@@ -476,7 +483,7 @@ impl<Params: WasmParams, Results: WasmResults> TypedFunc<Params, Results> {
 fn invoke_store_func_raw(
     inner: &mut StoreInner,
     fr: StoreFuncRef,
-    ft: &FuncType,
+    cached_tramp: Option<WtStoreExportTrampFn>,
     args_buf: &[u64],
     rets_buf: &mut [u64],
 ) -> Result<()> {
@@ -502,9 +509,15 @@ fn invoke_store_func_raw(
 
     inner.consume_entry_fuel()?;
 
-    let tramp: WtStoreExportTrampFn = inner
-        .find_export_tramp_for_func_type(ft)
-        .ok_or_else(|| Error::msg("no export-entry trampoline for function signature"))?;
+    let tramp: WtStoreExportTrampFn = match cached_tramp {
+        Some(t) => t,
+        None => {
+            let ft = FuncType::from_canon(Arc::clone(&inner.engine.inner), fr.canon_type_id);
+            inner
+                .find_export_tramp_for_func_type(&ft)
+                .ok_or_else(|| Error::msg("no export-entry trampoline for function signature"))?
+        }
+    };
 
     inner.sync_type_descs();
     inner.stamp_stack_floors();
@@ -696,11 +709,19 @@ impl<T> Caller<'_, T> {
     }
 
     pub fn gc(&mut self, _why: Option<&str>) -> Result<()> {
-        unsafe { crate::gc::collect_store_gc(self.inner, 0, 0).map_err(Error::from) }
+        unsafe { crate::gc::collect_store_gc(self.inner, 0, 0, true).map_err(Error::from) }
     }
 
     pub fn gc_heap_capacity(&self) -> usize {
         self.inner.gc.from_cap
+    }
+
+    pub fn gc_count(&self) -> u64 {
+        self.inner.state.gc_count
+    }
+
+    pub fn gc_weak_retire_count(&self) -> u64 {
+        self.inner.gc.weak_retire_count
     }
 
     pub fn throw<R>(&mut self, exn: Rooted<ExnRef>) -> Result<R> {
@@ -837,7 +858,7 @@ impl Instance {
                             .engine
                             .inner
                             .types
-                            .lock()
+                            .read()
                             .unwrap_or_else(|e| e.into_inner());
                         if !reg.is_subtype(fr.canon_type_id, expected_gcid) {
                             return Err(Error::msg(format!(
@@ -913,20 +934,8 @@ impl Instance {
             }
         }
 
-        // 2. Allocate instance `Ctx` buffer (zeroed, 16-byte aligned via Vec<u128> -> Box<[u8]>?
-        //    Use `alloc_zeroed` or `Vec<u8>`? Wait: `Box<[u8]>` might only be 1-byte aligned!
-        //    Use over-allocated or 16-byte aligned `Ctx`! Wait: `Vec<u128>` guarantees 16B alignment
-        //    and converts cleanly, OR `alloc_zeroed`? Actually `Box<[u128]>` is 16B-aligned!)
+        // 2. Allocate 16-byte aligned zeroed instance `Ctx` buffer.
         let ctx_bytes = (meta.ctx_total_bytes as usize).max(CTX_HEADER_BYTES);
-        let ctx_words = ctx_bytes.div_ceil(16);
-        let mut ctx_aligned: Vec<u128> = vec![0u128; ctx_words];
-        let ctx_raw_ptr = ctx_aligned.as_mut_ptr().cast::<u8>();
-        // Keep ownership as `Box<[u8]>`? No — `Box<[u128]>` would keep 16B alignment on drop!
-        // Let's convert cleanly: wait, `InstanceData::ctx_buf` is `Box<[u8]>` so let's allocate
-        // exact size via `Vec<u8>`? On glibc x86_64 malloc, any allocation >= 16 bytes is 16-byte aligned,
-        // and `ctx_bytes >= 256`! Assert `(ptr as usize) & 15 == 0` to be 100% certain!
-        drop(ctx_aligned);
-        let _ = ctx_raw_ptr;
         let mut ctx_buf: Box<[u8]> = vec![0u8; ctx_bytes].into_boxed_slice();
         assert_eq!(
             (ctx_buf.as_ptr() as usize) & 15,
@@ -1944,7 +1953,7 @@ fn is_wasm_val_traced(inner: &StoreInner, vt: wtime_types::ValType) -> bool {
                     .engine
                     .inner
                     .types
-                    .lock()
+                    .read()
                     .unwrap_or_else(|e| e.into_inner());
                 !matches!(
                     reg.infos[idx.0 as usize].composite,

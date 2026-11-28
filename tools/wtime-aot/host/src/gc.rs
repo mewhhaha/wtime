@@ -20,9 +20,7 @@ use crate::config::RegisteredCodeRange;
 use crate::error::{Error, GcHeapOutOfMemory, Result, Trap};
 use crate::signal::InterruptHandle;
 use crate::store::{AsContext, AsContextMut, StoreInner};
-use crate::types::{
-    ArrayType, CanonComposite, CanonicalTypeRegistry, ExnType, StructType, ValType,
-};
+use crate::types::{ArrayType, CanonComposite, CanonTypeInfo, ExnType, StructType, ValType};
 
 /// Each semi-space reserves 8 GiB of virtual address space inside a single contiguous 16 GiB arena:
 /// - Space A: `[arena_base + 64, arena_base + 8 GiB)`
@@ -211,10 +209,21 @@ pub(crate) struct GcHeap {
     pub(crate) arena_base: usize,
     /// Which half is currently active (`false` = Space A @ +0, `true` = Space B @ +8 GiB).
     pub(crate) active_is_b: bool,
+    /// Initial committed bytes of a semi-space (floor when shrinking back after bursts).
+    pub(crate) init_cap: usize,
     /// Committed bytes of the active semi-space (aligned to 4 KiB).
     pub(crate) from_cap: usize,
     /// Hard cap per semi-space (bounded by `StoreLimits` & `SEMI_SPACE_RESERVE_BYTES - 4096`).
     pub(crate) heap_cap: usize,
+    /// Currently committed RW prefix bytes (4 KiB-aligned) of Space A and Space B.
+    /// Steady-state bump-alloc GCs keep both semi-spaces warm up to `init_cap` to eliminate
+    /// per-GC `mprotect` / `MADV_DONTNEED` kernel `mmap_lock` and cross-core TLB shootdowns.
+    pub(crate) space_a_commit: usize,
+    pub(crate) space_b_commit: usize,
+    /// High-water byte offset (4 KiB-aligned, relative to space start) that may hold non-zero
+    /// bytes from prior cycles. Pages strictly at or beyond this watermark are guaranteed OS-zeroed.
+    pub(crate) space_a_dirty: usize,
+    pub(crate) space_b_dirty: usize,
     /// Active interrupt handle to keep GC heap region registered for `mprotect`.
     pub(crate) interrupt: InterruptHandle,
     /// Generational host root table (`Rooted` & `OwnedRooted`).
@@ -225,6 +234,8 @@ pub(crate) struct GcHeap {
     /// Generational `WeakAnyRef` table.
     pub(crate) weak_refs: Vec<WeakRefEntry>,
     pub(crate) weak_refs_free: Vec<u32>,
+    /// Incremented whenever GC retires at least one `WeakAnyRef`.
+    pub(crate) weak_retire_count: u64,
     /// Generational `GcEphemeron` table.
     pub(crate) ephemerons: Vec<EphemeronEntry>,
     pub(crate) ephemerons_free: Vec<u32>,
@@ -294,14 +305,20 @@ impl GcHeap {
         Ok(Self {
             arena_base,
             active_is_b: false,
+            init_cap,
             from_cap: init_cap,
             heap_cap,
+            space_a_commit: commit_len,
+            space_b_commit: 0,
+            space_a_dirty: 0,
+            space_b_dirty: 0,
             interrupt,
             host_roots: Vec::new(),
             host_roots_free: Vec::new(),
             scope_stack: Vec::new(),
             weak_refs: Vec::new(),
             weak_refs_free: Vec::new(),
+            weak_retire_count: 0,
             ephemerons: Vec::new(),
             ephemerons_free: Vec::new(),
             weak_tables: HashSet::new(),
@@ -320,6 +337,65 @@ impl GcHeap {
     #[inline]
     pub(crate) fn space_b_start(&self) -> usize {
         self.arena_base + SEMI_SPACE_RESERVE_BYTES
+    }
+
+    #[inline]
+    pub(crate) fn active_space_start(&self) -> usize {
+        if self.active_is_b {
+            self.space_b_start()
+        } else {
+            self.space_a_start()
+        }
+    }
+
+    #[inline]
+    pub(crate) fn active_dirty(&self) -> usize {
+        if self.active_is_b {
+            self.space_b_dirty
+        } else {
+            self.space_a_dirty
+        }
+    }
+
+    #[inline]
+    fn space_commit_mut(&mut self, is_b: bool) -> &mut usize {
+        if is_b {
+            &mut self.space_b_commit
+        } else {
+            &mut self.space_a_commit
+        }
+    }
+
+    #[inline]
+    fn space_dirty_mut(&mut self, is_b: bool) -> &mut usize {
+        if is_b {
+            &mut self.space_b_dirty
+        } else {
+            &mut self.space_a_dirty
+        }
+    }
+
+    /// Releases physical pages of the currently inactive GC semi-space back to the OS
+    /// (`MADV_DONTNEED` + `PROT_NONE`), leaving the active semi-space and all live objects untouched.
+    /// Safe and O(1) no-op when the inactive semi-space is already released.
+    pub(crate) fn reclaim_inactive_space(&mut self) {
+        let inactive_is_b = !self.active_is_b;
+        let commit = *self.space_commit_mut(inactive_is_b);
+        if commit == 0 {
+            return;
+        }
+        let page_start = if inactive_is_b {
+            self.space_b_start()
+        } else {
+            self.space_a_start()
+        };
+        self.interrupt.remove_region(page_start);
+        unsafe {
+            let _ = libc::madvise(page_start as *mut libc::c_void, commit, libc::MADV_DONTNEED);
+            let _ = libc::mprotect(page_start as *mut libc::c_void, commit, libc::PROT_NONE);
+        }
+        *self.space_commit_mut(inactive_is_b) = 0;
+        *self.space_dirty_mut(inactive_is_b) = 0;
     }
 
     #[inline]
@@ -464,70 +540,67 @@ impl GcHeap {
 /// Performs a full stop-the-world Cheney copying collection for `store`, ensuring at least
 /// `req_bytes` of free bump-allocation space (growing the semi-space up to `heap_cap` if needed).
 ///
+/// When `reclaim_old` is `true` (explicit host `Store::gc()`), the entire evacuated old semi-space
+/// is immediately returned to Linux (`MADV_DONTNEED` + `PROT_NONE`) so idle isolates hold minimal
+/// RSS. When `reclaim_old` is `false` (automatic bump-alloc GC during active execution), the old
+/// semi-space stays committed RW up to `init_cap` (reclaiming only any burst tail above `init_cap`)
+/// so steady-state Cheney flips execute with zero `mprotect` / `madvise` kernel VM locks or
+/// cross-core TLB shootdowns.
+///
 /// Returns `Ok(())` on success, or `Err(GcHeapOutOfMemory)` if `live_bytes + req_bytes > heap_cap`.
 pub(crate) unsafe fn collect_store_gc(
     store: &mut StoreInner,
     req_bytes: u64,
     gc_call_ret_rsp: u64,
+    reclaim_old: bool,
 ) -> std::result::Result<(), GcHeapOutOfMemory<()>> {
     // Free any `OwnedRooted<T>` handles dropped since the last GC before tracing roots.
     store.drain_dropped_owned_roots();
 
-    // Ensure GC arena pages are writable before copying (in case an interrupt fired concurrently).
+    // Ensure GC arena pages are writable before copying (O(1) atomic fast-path when un-interrupted).
     store.interrupt.restore_all_rw();
 
+    let old_is_b = store.gc.active_is_b;
+    let to_is_b = !old_is_b;
     let from_base = store.state.gc_from_base;
     let from_cap = store.state.gc_from_cap;
+    let old_alloc_ptr = store.state.gc_alloc_ptr;
     let heap_cap = store.gc.heap_cap as u64;
-    let prev_live_upper = store
-        .state
-        .gc_alloc_ptr
-        .saturating_sub(from_base)
-        .min(from_cap);
 
-    // Choose target semi-space size: large enough for worst-case live bytes + `req_bytes`,
-    // capped at `heap_cap`. (Start with current `from_cap` unless `req_bytes` alone needs more;
-    // if live + req still overflows after first sizing we grow before committing.)
-    let mut target_cap = (from_cap as usize).max(64 * 1024);
-    let min_needed = (prev_live_upper as usize)
-        .saturating_add(req_bytes as usize)
-        .saturating_add(4096);
-    while target_cap < min_needed && target_cap < (heap_cap as usize) {
-        target_cap = target_cap.saturating_mul(2).min(heap_cap as usize);
-    }
-    target_cap = ((target_cap + 4095) & !4095).min(heap_cap as usize);
+    // Size `to_space` to `from_cap` during copying: surviving live bytes are strictly bounded
+    // by `from_cap`, so we never prematurely double the semi-space based on pre-collection
+    // garbage! Growth (or shrinking after a burst) is decided in step 7 using exact
+    // post-collection `live_bytes + req_bytes`.
+    let copy_cap = ((from_cap as usize).max(64 * 1024) + 4095) & !4095;
+    let target_cap = copy_cap.min(heap_cap as usize);
 
-    let to_space_page_start = if store.gc.active_is_b {
-        store.gc.space_a_start()
-    } else {
+    let to_space_page_start = if to_is_b {
         store.gc.space_b_start()
+    } else {
+        store.gc.space_a_start()
     };
     let to_base = (to_space_page_start + SPACE_START_PAD) as u64;
-    let to_commit_len = (SPACE_START_PAD + target_cap + 4095) & !4095;
-    let rc = unsafe {
-        libc::mprotect(
-            to_space_page_start as *mut libc::c_void,
-            to_commit_len,
-            libc::PROT_READ | libc::PROT_WRITE,
-        )
-    };
-    if rc != 0 {
-        return Err(GcHeapOutOfMemory::new((), req_bytes));
+    let to_commit_needed = (SPACE_START_PAD + target_cap + 4095) & !4095;
+    let prev_to_commit = *store.gc.space_commit_mut(to_is_b);
+    if to_commit_needed > prev_to_commit {
+        let delta_ptr = (to_space_page_start + prev_to_commit) as *mut libc::c_void;
+        let delta_len = to_commit_needed - prev_to_commit;
+        let rc =
+            unsafe { libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE) };
+        if rc != 0 {
+            return Err(GcHeapOutOfMemory::new((), req_bytes));
+        }
+        *store.gc.space_commit_mut(to_is_b) = to_commit_needed;
+        store
+            .interrupt
+            .set_region(to_space_page_start, to_commit_needed);
     }
 
-    let reg = store
-        .engine
-        .inner
-        .types
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let code_ranges: Vec<RegisteredCodeRange> = store
-        .engine
-        .inner
-        .code_ranges
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    // Lock-free per-Store snapshots so concurrent Stores across CPU cores never stall each other
+    // during stop-the-world Cheney collections.
+    store.sync_type_descs();
+    let types_snap = Arc::clone(&store.types_snapshot);
+    let code_ranges = store.sync_code_ranges();
 
     let mut extern_live = vec![false; store.gc.extern_arena.len()];
     let old_weak_tables = std::mem::take(&mut store.gc.weak_tables);
@@ -535,7 +608,7 @@ pub(crate) unsafe fn collect_store_gc(
     let mut live_weak_table_set: HashSet<u64> = HashSet::new();
 
     struct Collector<'a> {
-        reg: &'a CanonicalTypeRegistry,
+        infos: &'a [CanonTypeInfo],
         from_base: u64,
         from_cap: u64,
         to_alloc: u64,
@@ -588,7 +661,7 @@ pub(crate) unsafe fn collect_store_gc(
             let obj_bytes: u64 = match kind {
                 GC_HDR_KIND_STRUCT => {
                     let cid = (hdr as u32) >> 3;
-                    match &self.reg.infos[cid as usize].composite {
+                    match &self.infos[cid as usize].composite {
                         CanonComposite::Struct { total_bytes, .. } => u64::from(*total_bytes),
                         _ => unreachable!("GC struct header has non-struct canon_id {cid}"),
                     }
@@ -596,7 +669,7 @@ pub(crate) unsafe fn collect_store_gc(
                 GC_HDR_KIND_ARRAY => {
                     let cid = (hdr as u32) >> 3;
                     let len = unsafe { *((old_ptr + 4) as *const u32) } as u64;
-                    let elem_sz = match &self.reg.infos[cid as usize].composite {
+                    let elem_sz = match &self.infos[cid as usize].composite {
                         CanonComposite::Array { elem, .. } => u64::from(elem.byte_size()),
                         _ => unreachable!("GC array header has non-array canon_id {cid}"),
                     };
@@ -621,7 +694,10 @@ pub(crate) unsafe fn collect_store_gc(
                 // Install forwarding pointer in old header (`bit 0 = 1`).
                 *(old_ptr as *mut u64) = new_ptr | 1;
             }
-            if kind == GC_HDR_KIND_ARRAY && self.old_weak_tables.contains(&old_ptr) {
+            if kind == GC_HDR_KIND_ARRAY
+                && !self.old_weak_tables.is_empty()
+                && self.old_weak_tables.contains(&old_ptr)
+            {
                 self.live_weak_tables.push(new_ptr);
                 self.live_weak_table_set.insert(new_ptr);
             }
@@ -652,7 +728,7 @@ pub(crate) unsafe fn collect_store_gc(
                     GC_HDR_KIND_STRUCT => {
                         let cid = (hdr as u32) >> 3;
                         let (total_bytes, gc_offs, ext_offs) =
-                            match &self.reg.infos[cid as usize].composite {
+                            match &self.infos[cid as usize].composite {
                                 CanonComposite::Struct {
                                     total_bytes,
                                     gc_ref_offs,
@@ -672,15 +748,16 @@ pub(crate) unsafe fn collect_store_gc(
                     GC_HDR_KIND_ARRAY => {
                         let cid = (hdr as u32) >> 3;
                         let len = unsafe { *((obj + 4) as *const u32) } as u64;
-                        let elem = match &self.reg.infos[cid as usize].composite {
+                        let elem = match &self.infos[cid as usize].composite {
                             CanonComposite::Array { elem, .. } => *elem,
                             _ => unreachable!(),
                         };
                         let obj_bytes = ((8u64 + len * u64::from(elem.byte_size())) + 7) & !7;
                         // Registered WeakMap reference arrays are NOT strongly traced during BFS;
                         // their `(key, value)` pairs are resolved in the ephemeron fixed-point loop!
-                        if !self.live_weak_table_set.contains(&obj)
-                            && matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef)
+                        if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef)
+                            && (self.live_weak_table_set.is_empty()
+                                || !self.live_weak_table_set.contains(&obj))
                         {
                             for i in 0..len {
                                 unsafe { self.trace_slot((obj + 8 + i * 8) as *mut u64) };
@@ -727,7 +804,7 @@ pub(crate) unsafe fn collect_store_gc(
     }
 
     let mut col = Collector {
-        reg: &reg,
+        infos: &types_snap,
         from_base,
         from_cap,
         to_alloc: to_base,
@@ -906,22 +983,23 @@ pub(crate) unsafe fn collect_store_gc(
 
     // ---- 4. Finalize weak tables, ephemerons, weak refs, and check OOM ----
     if col.oom {
-        // Rare path: `to_space` ran out of room mid-collection (only possible if `target_cap == heap_cap`
-        // and live bytes > `heap_cap`, which can't happen because `from_space <= heap_cap`).
-        // Restore old space headers if needed? Since `from_space` was mutated with forwarding pointers
-        // only when `to_alloc + obj_bytes <= to_limit`, wait — `from_space` is bounded by `heap_cap`,
-        // so `live_bytes <= prev_live_upper <= target_cap` ALWAYS holds when `target_cap >= prev_live_upper`!
-        unsafe {
-            let _ = libc::madvise(
-                to_space_page_start as *mut libc::c_void,
-                to_commit_len,
-                libc::MADV_DONTNEED,
-            );
-            let _ = libc::mprotect(
-                to_space_page_start as *mut libc::c_void,
-                to_commit_len,
-                libc::PROT_NONE,
-            );
+        let cur_to_commit = *store.gc.space_commit_mut(to_is_b);
+        if cur_to_commit > 0 {
+            store.interrupt.remove_region(to_space_page_start);
+            unsafe {
+                let _ = libc::madvise(
+                    to_space_page_start as *mut libc::c_void,
+                    cur_to_commit,
+                    libc::MADV_DONTNEED,
+                );
+                let _ = libc::mprotect(
+                    to_space_page_start as *mut libc::c_void,
+                    cur_to_commit,
+                    libc::PROT_NONE,
+                );
+            }
+            *store.gc.space_commit_mut(to_is_b) = 0;
+            *store.gc.space_dirty_mut(to_is_b) = 0;
         }
         return Err(GcHeapOutOfMemory::new((), req_bytes));
     }
@@ -962,6 +1040,7 @@ pub(crate) unsafe fn collect_store_gc(
     }
 
     // Update or retire `WeakAnyRef` entries.
+    let mut retired_any_weak = false;
     for (idx, w) in store.gc.weak_refs.iter_mut().enumerate() {
         if !w.live {
             continue;
@@ -976,13 +1055,17 @@ pub(crate) unsafe fn collect_store_gc(
             w.owner = 0;
             w.target = 0;
             store.gc.weak_refs_free.push(idx as u32);
+            retired_any_weak = true;
         }
+    }
+    if retired_any_weak {
+        store.gc.weak_retire_count = store.gc.weak_retire_count.wrapping_add(1);
     }
 
     let final_alloc = col.to_alloc;
     let final_limit = col.to_limit;
     let _ = col;
-    drop(reg);
+    drop(types_snap);
 
     store.gc.weak_tables = live_weak_table_set;
 
@@ -1001,28 +1084,47 @@ pub(crate) unsafe fn collect_store_gc(
         }
     }
 
-    // ---- 6. Flip semi-spaces & return old physical pages to Linux ----
-    let old_space_page_start = if store.gc.active_is_b {
+    // ---- 6. Flip semi-spaces & return excess / reclaimed old pages to Linux ----
+    let old_space_page_start = if old_is_b {
         store.gc.space_b_start()
     } else {
         store.gc.space_a_start()
     };
-    let old_commit_len = (SPACE_START_PAD + store.gc.from_cap + 4095) & !4095;
-    store.interrupt.remove_region(old_space_page_start);
-    unsafe {
-        let _ = libc::madvise(
-            old_space_page_start as *mut libc::c_void,
-            old_commit_len,
-            libc::MADV_DONTNEED,
-        );
-        let _ = libc::mprotect(
-            old_space_page_start as *mut libc::c_void,
-            old_commit_len,
-            libc::PROT_NONE,
-        );
+    let old_commit = *store.gc.space_commit_mut(old_is_b);
+    let old_used_pages =
+        ((old_alloc_ptr.saturating_sub(old_space_page_start as u64) as usize + 4095) & !4095)
+            .min(old_commit);
+    {
+        let old_dirty = store.gc.space_dirty_mut(old_is_b);
+        *old_dirty = (*old_dirty).max(old_used_pages).min(old_commit);
+    }
+    let warm_commit = (SPACE_START_PAD + store.gc.init_cap.min(store.gc.heap_cap) + 4095) & !4095;
+    let keep_old_commit = if reclaim_old {
+        0
+    } else {
+        warm_commit.min(old_commit)
+    };
+    if old_commit > keep_old_commit {
+        if keep_old_commit == 0 {
+            store.interrupt.remove_region(old_space_page_start);
+        }
+        let tail_ptr = (old_space_page_start + keep_old_commit) as *mut libc::c_void;
+        let tail_len = old_commit - keep_old_commit;
+        unsafe {
+            let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
+            let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
+        }
+        *store.gc.space_commit_mut(old_is_b) = keep_old_commit;
+        let old_dirty = store.gc.space_dirty_mut(old_is_b);
+        *old_dirty = (*old_dirty).min(keep_old_commit);
+        if keep_old_commit > 0 {
+            store
+                .interrupt
+                .set_region(old_space_page_start, keep_old_commit);
+        }
     }
 
-    store.gc.active_is_b = !store.gc.active_is_b;
+    store.gc.active_is_b = to_is_b;
     store.gc.from_cap = target_cap;
     store.state.gc_from_base = to_base;
     store.state.gc_from_cap = target_cap as u64;
@@ -1031,42 +1133,83 @@ pub(crate) unsafe fn collect_store_gc(
     store.state.gc_alloc_ptr = final_alloc;
     store.state.gc_alloc_limit = final_limit;
     store.state.gc_count = store.state.gc_count.wrapping_add(1);
-    store
-        .interrupt
-        .set_region(to_space_page_start, to_commit_len);
 
     // Drop swept `ExternRef` payloads AFTER Store GC state is completely consistent!
     drop(dropped_payloads);
 
-    // ---- 7. Check whether the requested allocation now fits (growing committed prefix if under cap) ----
-    if store.state.gc_alloc_ptr.saturating_add(req_bytes) > store.state.gc_alloc_limit {
-        let live_bytes = store.state.gc_alloc_ptr - store.state.gc_from_base;
-        let needed_total = live_bytes.saturating_add(req_bytes);
-        if needed_total > heap_cap {
-            return Err(GcHeapOutOfMemory::new((), req_bytes));
+    // ---- 7. Resize semi-space from actual post-GC live bytes (grow if >50% full or req_bytes
+    //         doesn't fit; shrink back toward `init_cap` after transient allocation bursts) ----
+    let live_bytes = store.state.gc_alloc_ptr - store.state.gc_from_base;
+    let needed_total = live_bytes.saturating_add(req_bytes);
+    if needed_total > heap_cap {
+        return Err(GcHeapOutOfMemory::new((), req_bytes));
+    }
+    let cur_cap = store.gc.from_cap;
+    let live_usize = live_bytes as usize;
+    let needed_usize = needed_total as usize;
+    let heap_cap_usize = heap_cap as usize;
+    if needed_total > (cur_cap as u64)
+        || (live_usize.saturating_mul(2) >= cur_cap && cur_cap < heap_cap_usize)
+    {
+        let goal = needed_usize.max(live_usize.saturating_mul(2));
+        let mut grown_cap = cur_cap.max(64 * 1024);
+        while grown_cap < goal && grown_cap < heap_cap_usize {
+            grown_cap = grown_cap.saturating_mul(2).min(heap_cap_usize);
         }
-        let mut grown_cap = store.gc.from_cap;
-        while (grown_cap as u64) < needed_total {
-            grown_cap = grown_cap.saturating_mul(2).min(heap_cap as usize);
+        grown_cap = ((grown_cap + 4095) & !4095).min(heap_cap_usize);
+        if grown_cap > cur_cap {
+            let grown_commit = (SPACE_START_PAD + grown_cap + 4095) & !4095;
+            let cur_to_commit = *store.gc.space_commit_mut(to_is_b);
+            if grown_commit > cur_to_commit {
+                let delta_ptr = (to_space_page_start + cur_to_commit) as *mut libc::c_void;
+                let delta_len = grown_commit - cur_to_commit;
+                let rc = unsafe {
+                    libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE)
+                };
+                if rc != 0 {
+                    return Err(GcHeapOutOfMemory::new((), req_bytes));
+                }
+                *store.gc.space_commit_mut(to_is_b) = grown_commit;
+                store
+                    .interrupt
+                    .set_region(to_space_page_start, grown_commit);
+            }
+            store.gc.from_cap = grown_cap;
+            store.state.gc_from_cap = grown_cap as u64;
+            store.state.gc_alloc_limit = store.state.gc_from_base + grown_cap as u64;
         }
-        grown_cap = ((grown_cap + 4095) & !4095).min(heap_cap as usize);
-        let grown_commit = (SPACE_START_PAD + grown_cap + 4095) & !4095;
-        let rc = unsafe {
-            libc::mprotect(
-                to_space_page_start as *mut libc::c_void,
-                grown_commit,
-                libc::PROT_READ | libc::PROT_WRITE,
-            )
-        };
-        if rc != 0 {
-            return Err(GcHeapOutOfMemory::new((), req_bytes));
+    } else if cur_cap > store.gc.init_cap
+        && live_usize.saturating_mul(4) < cur_cap
+        && needed_usize <= cur_cap / 2
+    {
+        let shrunk_cap = ((live_usize
+            .saturating_mul(2)
+            .max(needed_usize)
+            .max(store.gc.init_cap)
+            + 4095)
+            & !4095)
+            .min(cur_cap);
+        if shrunk_cap < cur_cap {
+            let shrunk_commit = (SPACE_START_PAD + shrunk_cap + 4095) & !4095;
+            let cur_to_commit = *store.gc.space_commit_mut(to_is_b);
+            if shrunk_commit < cur_to_commit {
+                let tail_ptr = (to_space_page_start + shrunk_commit) as *mut libc::c_void;
+                let tail_len = cur_to_commit - shrunk_commit;
+                unsafe {
+                    let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
+                    let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
+                }
+                *store.gc.space_commit_mut(to_is_b) = shrunk_commit;
+                let to_dirty = store.gc.space_dirty_mut(to_is_b);
+                *to_dirty = (*to_dirty).min(shrunk_commit);
+                store
+                    .interrupt
+                    .set_region(to_space_page_start, shrunk_commit);
+            }
+            store.gc.from_cap = shrunk_cap;
+            store.state.gc_from_cap = shrunk_cap as u64;
+            store.state.gc_alloc_limit = store.state.gc_from_base + shrunk_cap as u64;
         }
-        store.gc.from_cap = grown_cap;
-        store.state.gc_from_cap = grown_cap as u64;
-        store.state.gc_alloc_limit = store.state.gc_from_base + grown_cap as u64;
-        store
-            .interrupt
-            .set_region(to_space_page_start, grown_commit);
     }
 
     Ok(())
@@ -1116,7 +1259,7 @@ pub(crate) unsafe fn gc_bump_alloc(
 ) -> std::result::Result<u64, GcHeapOutOfMemory<()>> {
     debug_assert!((size_bytes & 7) == 0 && size_bytes >= 8);
     if store.state.gc_alloc_ptr.saturating_add(size_bytes) > store.state.gc_alloc_limit {
-        unsafe { collect_store_gc(store, size_bytes, 0)? };
+        unsafe { collect_store_gc(store, size_bytes, 0, false)? };
     }
     let ptr = store.state.gc_alloc_ptr;
     store.state.gc_alloc_ptr = ptr + size_bytes;
@@ -1460,13 +1603,8 @@ impl Rooted<StructRef> {
         let hdr = unsafe { *(word as *const u64) };
         let cid = (hdr as u32) >> 3;
         let (offset, storage) = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let CanonComposite::Struct { fields, .. } = &reg.infos[cid as usize].composite else {
+            let CanonComposite::Struct { fields, .. } = &inner.ensure_type_info(cid).composite
+            else {
                 return Err(Error::msg("GC object is not a struct"));
             };
             let f = fields
@@ -1486,13 +1624,8 @@ impl Rooted<StructRef> {
         let hdr = unsafe { *(word as *const u64) };
         let cid = (hdr as u32) >> 3;
         let (offset, storage, mutable) = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let CanonComposite::Struct { fields, .. } = &reg.infos[cid as usize].composite else {
+            let CanonComposite::Struct { fields, .. } = &inner.ensure_type_info(cid).composite
+            else {
                 return Err(Error::msg("GC object is not a struct"));
             };
             let f = fields
@@ -1542,10 +1675,20 @@ impl Rooted<ArrayRef> {
     }
 
     pub fn elems(&self, mut store: impl AsContextMut) -> Result<std::vec::IntoIter<Val>> {
-        let len = self.len(&store)?;
+        let inner = store.as_store_inner_mut();
+        let word = self.read_abi_word(inner)?;
+        let len = unsafe { *((word + 4) as *const u32) };
+        let hdr = unsafe { *(word as *const u64) };
+        let cid = (hdr as u32) >> 3;
+        let CanonComposite::Array { elem, .. } = &inner.ensure_type_info(cid).composite else {
+            return Err(Error::msg("GC object is not an array"));
+        };
+        let elem = *elem;
+        let elem_sz = u64::from(elem.byte_size());
         let mut out = Vec::with_capacity(len as usize);
         for i in 0..len {
-            out.push(self.get(&mut store, i)?);
+            let off = 8u64 + u64::from(i) * elem_sz;
+            out.push(unsafe { read_gc_storage(inner, (word + off) as *const u8, elem)? });
         }
         Ok(out.into_iter())
     }
@@ -1569,18 +1712,10 @@ impl Rooted<ArrayRef> {
         }
         let hdr = unsafe { *(word as *const u64) };
         let cid = (hdr as u32) >> 3;
-        let elem = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let CanonComposite::Array { elem, .. } = &reg.infos[cid as usize].composite else {
-                return Err(Error::msg("GC object is not an array"));
-            };
-            *elem
+        let CanonComposite::Array { elem, .. } = &inner.ensure_type_info(cid).composite else {
+            return Err(Error::msg("GC object is not an array"));
         };
+        let elem = *elem;
         let off = 8u64 + u64::from(index) * u64::from(elem.byte_size());
         unsafe { read_gc_storage(inner, (word + off) as *const u8, elem) }
     }
@@ -1594,19 +1729,11 @@ impl Rooted<ArrayRef> {
         }
         let hdr = unsafe { *(word as *const u64) };
         let cid = (hdr as u32) >> 3;
-        let (elem, mutable) = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let CanonComposite::Array { elem, mutable, .. } = &reg.infos[cid as usize].composite
-            else {
-                return Err(Error::msg("GC object is not an array"));
-            };
-            (*elem, *mutable)
+        let CanonComposite::Array { elem, mutable, .. } = &inner.ensure_type_info(cid).composite
+        else {
+            return Err(Error::msg("GC object is not an array"));
         };
+        let (elem, mutable) = (*elem, *mutable);
         if !mutable {
             return Err(Error::msg("cannot mutate immutable array element"));
         }
@@ -1625,21 +1752,13 @@ impl Rooted<ArrayRef> {
         let word = self.read_abi_word(inner)?;
         let hdr = unsafe { *(word as *const u64) };
         let cid = (hdr as u32) >> 3;
-        let is_i8 = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            matches!(
-                &reg.infos[cid as usize].composite,
-                CanonComposite::Array {
-                    elem: GcStorageKind::I8,
-                    ..
-                }
-            )
-        };
+        let is_i8 = matches!(
+            &inner.ensure_type_info(cid).composite,
+            CanonComposite::Array {
+                elem: GcStorageKind::I8,
+                ..
+            }
+        );
         if !is_i8 {
             return Err(Error::msg("copy_i8_range_to_slice requires an i8 array"));
         }
@@ -1668,21 +1787,13 @@ impl Rooted<ArrayRef> {
         let word = self.read_abi_word(inner)?;
         let hdr = unsafe { *(word as *const u64) };
         let cid = (hdr as u32) >> 3;
-        let is_i8 = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            matches!(
-                &reg.infos[cid as usize].composite,
-                CanonComposite::Array {
-                    elem: GcStorageKind::I8,
-                    ..
-                }
-            )
-        };
+        let is_i8 = matches!(
+            &inner.ensure_type_info(cid).composite,
+            CanonComposite::Array {
+                elem: GcStorageKind::I8,
+                ..
+            }
+        );
         if !is_i8 {
             return Err(Error::msg("copy_to_i8_slice requires an i8 array"));
         }
@@ -1693,6 +1804,38 @@ impl Rooted<ArrayRef> {
         if len > 0 {
             unsafe {
                 std::ptr::copy_nonoverlapping((word + 8) as *const u8, dst.as_mut_ptr(), len);
+            }
+        }
+        Ok(())
+    }
+
+    /// Bulk-copies all UTF-16 code units of an `i16`-packed GC array directly into `dst`.
+    pub fn copy_to_i16_slice(&self, mut store: impl AsContextMut, dst: &mut [u16]) -> Result<()> {
+        let inner = store.as_store_inner_mut();
+        let word = self.read_abi_word(inner)?;
+        let hdr = unsafe { *(word as *const u64) };
+        let cid = (hdr as u32) >> 3;
+        let is_i16 = matches!(
+            &inner.ensure_type_info(cid).composite,
+            CanonComposite::Array {
+                elem: GcStorageKind::I16,
+                ..
+            }
+        );
+        if !is_i16 {
+            return Err(Error::msg("copy_to_i16_slice requires an i16 array"));
+        }
+        let len = unsafe { *((word + 4) as *const u32) } as usize;
+        if dst.len() != len {
+            return Err(Trap::ArrayOutOfBounds.into());
+        }
+        if len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (word + 8) as *const u8,
+                    dst.as_mut_ptr().cast::<u8>(),
+                    len * 2,
+                );
             }
         }
         Ok(())
@@ -1912,17 +2055,11 @@ impl StructRef {
         let inner = store.as_store_inner_mut();
         let cid = pre.ty.canon_id;
         let (total_bytes, field_specs) = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
             let CanonComposite::Struct {
                 fields: fdefs,
                 total_bytes,
                 ..
-            } = &reg.infos[cid as usize].composite
+            } = &inner.ensure_type_info(cid).composite
             else {
                 return Err(Error::msg("StructRefPre is not a struct type"));
             };
@@ -1970,13 +2107,7 @@ impl ArrayRef {
         let inner = store.as_store_inner_mut();
         let cid = pre.ty.canon_id;
         let elem = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let CanonComposite::Array { elem, .. } = &reg.infos[cid as usize].composite else {
+            let CanonComposite::Array { elem, .. } = &inner.ensure_type_info(cid).composite else {
                 return Err(Error::msg("ArrayRefPre is not an array type"));
             };
             *elem
@@ -2008,18 +2139,20 @@ impl ArrayRef {
                     | Val::FuncRef(None)
             ) {
                 let data_start = ptr + 8;
-                if data_bytes <= (1u64 << 20) {
-                    unsafe { std::ptr::write_bytes(data_start as *mut u8, 0, data_bytes as usize) };
-                } else {
-                    // Bump-allocated pages beyond the current partial page are freshly `mmap`ped
-                    // or `MADV_DONTNEED`ed anonymous memory and are already guaranteed OS-zeroed;
-                    // zero only the leading partial page to avoid faulting multi-GiB zero arrays.
-                    let first_page_end = (data_start + 4095) & !4095;
-                    let head_len = first_page_end.saturating_sub(data_start).min(data_bytes);
-                    if head_len > 0 {
-                        unsafe {
-                            std::ptr::write_bytes(data_start as *mut u8, 0, head_len as usize);
-                        }
+                // Zero any bytes overlapping the current partial page OR this semi-space's
+                // warm-reuse dirty watermark; pages strictly beyond both are freshly committed /
+                // `MADV_DONTNEED`ed anonymous memory guaranteed OS-zeroed (avoiding faulting
+                // multi-GiB zero arrays while remaining sound across warm semi-space reuse).
+                let active_dirty_addr =
+                    (inner.gc.active_space_start() + inner.gc.active_dirty()) as u64;
+                let first_page_end = (data_start + 4095) & !4095;
+                let must_zero_end = first_page_end
+                    .max(active_dirty_addr)
+                    .min(data_start + data_bytes);
+                let zero_len = must_zero_end.saturating_sub(data_start);
+                if zero_len > 0 {
+                    unsafe {
+                        std::ptr::write_bytes(data_start as *mut u8, 0, zero_len as usize);
                     }
                 }
             } else {
@@ -2043,13 +2176,7 @@ impl ArrayRef {
         let inner = store.as_store_inner_mut();
         let cid = pre.ty.canon_id;
         let elem = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let CanonComposite::Array { elem, .. } = &reg.infos[cid as usize].composite else {
+            let CanonComposite::Array { elem, .. } = &inner.ensure_type_info(cid).composite else {
                 return Err(Error::msg("ArrayRefPre is not an array type"));
             };
             *elem
@@ -2087,21 +2214,13 @@ impl ArrayRef {
             .map_err(|_| Error::from(GcHeapOutOfMemory::new((), bytes.len() as u64)))?;
         let inner = store.as_store_inner_mut();
         let cid = pre.ty.canon_id;
-        let is_i8 = {
-            let reg = inner
-                .engine
-                .inner
-                .types
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            matches!(
-                &reg.infos[cid as usize].composite,
-                CanonComposite::Array {
-                    elem: GcStorageKind::I8,
-                    ..
-                }
-            )
-        };
+        let is_i8 = matches!(
+            &inner.ensure_type_info(cid).composite,
+            CanonComposite::Array {
+                elem: GcStorageKind::I8,
+                ..
+            }
+        );
         if !is_i8 {
             return Err(Error::msg("new_from_i8_slice requires an i8 array type"));
         }
@@ -2113,6 +2232,44 @@ impl ArrayRef {
             *((ptr + 4) as *mut u32) = len;
             if !bytes.is_empty() {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), (ptr + 8) as *mut u8, bytes.len());
+            }
+        }
+        Ok(Rooted::from_abi_word(inner, ptr, false, false))
+    }
+
+    /// Allocates an `i16`-packed GC array initialized directly from UTF-16 `units` via bulk `memcpy`.
+    pub fn new_from_i16_slice(
+        mut store: impl AsContextMut,
+        pre: &ArrayRefPre,
+        units: &[u16],
+    ) -> Result<Rooted<ArrayRef>> {
+        let len = u32::try_from(units.len())
+            .map_err(|_| Error::from(GcHeapOutOfMemory::new((), units.len() as u64 * 2)))?;
+        let inner = store.as_store_inner_mut();
+        let cid = pre.ty.canon_id;
+        let is_i16 = matches!(
+            &inner.ensure_type_info(cid).composite,
+            CanonComposite::Array {
+                elem: GcStorageKind::I16,
+                ..
+            }
+        );
+        if !is_i16 {
+            return Err(Error::msg("new_from_i16_slice requires an i16 array type"));
+        }
+        let data_bytes = u64::from(len) * 2;
+        let total_bytes = (8u64 + data_bytes + 7) & !7;
+        let ptr = unsafe { gc_bump_alloc(inner, total_bytes) }.map_err(Error::from)?;
+        let hdr_u32 = (cid << 3) | GC_HDR_KIND_ARRAY;
+        unsafe {
+            *(ptr as *mut u32) = hdr_u32;
+            *((ptr + 4) as *mut u32) = len;
+            if !units.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    units.as_ptr().cast::<u8>(),
+                    (ptr + 8) as *mut u8,
+                    data_bytes as usize,
+                );
             }
         }
         Ok(Rooted::from_abi_word(inner, ptr, false, false))
@@ -2930,18 +3087,10 @@ impl Val {
                         Some(Rooted::from_abi_word(store, w, false, true))
                     })),
                     WH::Defined(idx) | WH::ExactDefined(idx) => {
-                        let is_func = {
-                            let reg = store
-                                .engine
-                                .inner
-                                .types
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            matches!(
-                                reg.infos[idx.0 as usize].composite,
-                                CanonComposite::Func { .. }
-                            )
-                        };
+                        let is_func = matches!(
+                            store.ensure_type_info(idx.0).composite,
+                            CanonComposite::Func { .. }
+                        );
                         if is_func {
                             Ok(Self::FuncRef(if w == 0 {
                                 None
