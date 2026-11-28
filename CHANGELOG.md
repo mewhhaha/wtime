@@ -2,6 +2,52 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.14] - 2026-11-28
+
+Unified `main` release merging `v0.1.13` (`wtime-aot` GC safepoint dedup /
+non-null analysis and `wtime-aot-host` zero-copy `WTMS0002` mmap & warm
+semi-spaces) with standalone Goose OS/math/sandbox imports, per-function x64
+`StoreCdylib` incremental caching, and pure-Rust `x64` loop/SIMD/FP codegen
+optimizations. Core crates (`wtime-types`, `wtime-decode`, `wtime-validate`,
+`wtime-runtime`) and `wtime-cli` remain `#![forbid(unsafe_code)]` with zero
+external production dependencies, and `tools/wtime-aot` remains
+`#![forbid(unsafe_code)]` with zero external production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Per-function x64 incremental cache for `StoreCdylib` (`--inc-cache`)**:
+  - Extended content-addressed per-function x64 incremental caching
+    (`src/x64/inc_cache.rs`) to `X64Target::StoreCdylib` with host binary salt
+    keying so single-function edits across multi-thousand-function modules
+    recompile only touched functions and relink unchanged functions directly
+    into full O2 native x64 code.
+- **x64 nested-loop layout, multi-exit rotation, `AddScaled` IV SR, and FP scheduling**:
+  - Added nested-loop fallthrough block layout (`src/x64/regalloc.rs`),
+    multi-exit counted-loop rotation (`rotate_counted_loops`), exact modular
+    32-bit `AddScaled` induction-variable strength reduction, intra-block
+    pure-FP/integer loop scheduling (`schedule_loop_fp_chains`), tautological
+    comparison folding, and `i64` relational facts (`src/x64/ir.rs`,
+    `src/x64/opt.rs`).
+- **Schoolbook `MulHiU`, widening `u32` SIMD reductions, and spill-cache parity**:
+  - Added schoolbook 64×64→128 `MulHiU` folding, widening `u32` SIMD
+    reductions (`U32ZextSum`, `U32XorZextSum`) across x64 (SSE2/AVX2/AVX-512)
+    and AArch64 NEON, and multi-instruction `SpillRegCache` forwarding while
+    preserving `v0.1.13`'s `sgp2_val` GC scratch fast path.
+- **Standalone Goose OS/math/sandbox imports (`x64` & `aarch64`)**:
+  - Added standalone Goose OS, Ryū `f64` digit formatting, `stdin`, random,
+    sleep, atomic write, and directory-listing imports with `openat2` sandbox
+    enforcement (`src/x64/standalone_goose.rs`, `src/x64/standalone_rt.rs`,
+    `src/aarch64/standalone_rt.rs`).
+- **AArch64 CI parity**:
+  - Fixed AArch64 `-D warnings` unused-variable/import lints in
+    `src/x64/tests_unit.rs` and `host/tests/store_suite.rs`, and formatted
+    `src/x64/lower.rs`.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- **Per-function incremental x64 cache & memory64 cap**:
+  - Wired `Config::cache` into `StoreCdylib` `x86_64` per-function incremental
+    caching (`host_cache_salt`) and raised the memory64 host page cap in
+    `host/src/memory.rs`.
+
 ## [0.1.13] - 2026-11-28
 
 `wtime-aot` GC codegen & image-size optimizations plus `wtime-aot-host`

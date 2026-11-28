@@ -1,4 +1,4 @@
-# Release readiness (`v0.1.13`)
+# Release readiness (`v0.1.14`)
 
 The release decision is verified by `python3 -B tools/checks/release_audit.py`.
 It joins the frozen proposal/source lock ([spec-lock.json](architecture/spec-lock.json)),
@@ -12,14 +12,14 @@ built executables, and documentation hashes, no semantic ledger owner remains
 pending, and no excluded or unspecified behavior is claimed as supported. Any
 missing, stale, unsupported, empty, or hash-mismatched item exits nonzero.
 
-## `v0.1.13` Target Scope
+## `v0.1.14` Target Scope
 
 - **Supported target**: `x86_64-unknown-linux-gnu` (`rustc 1.99.0`).
 - **CI & release binaries**: Native `ubuntu-24.04` (`x86_64-unknown-linux-gnu`)
   and `ubuntu-24.04-arm` (`aarch64-unknown-linux-gnu`) CI checks run for both
   `core` and `wtime-aot` in `.github/workflows/ci.yml`, and
   `.github/workflows/release.yml` publishes signed-checksum tarballs for both
-  architectures (`wtime-aot` and `wtime-cli`). Local `v0.1.13` release-manifest
+  architectures (`wtime-aot` and `wtime-cli`). Local `v0.1.14` release-manifest
   evidence remains scoped to `x86_64-unknown-linux-gnu`.
 - **Excluded scope**: JS/browser embedding APIs (`content-security-policy`,
   `ecmascript_module_integration`, `javascript_bigint_to_webassembly_i64_integration`,
