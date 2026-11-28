@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 22;
+const FORMAT_VERSION: u32 = 23;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -251,6 +251,18 @@ pub fn compute_abi_hash(
     ]);
     hash_u32(&mut h, module.imports.len() as u32);
     hash_u32(&mut h, n_defs as u32);
+    hash_u32(&mut h, layout.imported_global_count);
+    hash_u32(&mut h, module.imported_mems.len() as u32);
+    hash_u32(&mut h, module.imported_tables.len() as u32);
+    hash_u32(&mut h, module.imported_tags.len() as u32);
+    hash_u32(&mut h, module.type_canon.len() as u32);
+    for &cid in &module.type_canon {
+        hash_u32(&mut h, cid);
+    }
+    hash_u32(&mut h, module.func_canon_sig.len() as u32);
+    for &cs in &module.func_canon_sig {
+        hash_u32(&mut h, cs);
+    }
 
     match module.memory {
         None => h.update(&[0]),
@@ -1773,7 +1785,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
 // ============================================================================
 
 const VIDX_MAGIC: &[u8; 8] = b"WTX64VID";
-const VIDX_VERSION: u32 = 6;
+const VIDX_VERSION: u32 = 7;
 const MAX_VIDX_FILE_BYTES: usize = 32 << 20;
 
 /// Per-body cached validation and `x64` admission summary for incremental validation skip.

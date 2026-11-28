@@ -544,6 +544,30 @@ impl Module {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn host_cache_salt() -> [u8; 32] {
+    static SALT: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *SALT.get_or_init(|| {
+        let mut h = wtime_aot::sha256::Sha256::new();
+        h.update(b"WTIME-AOT-HOST-INC-V1\0");
+        h.update(&STORE_ABI_VERSION.to_le_bytes());
+        h.update(env!("CARGO_PKG_VERSION").as_bytes());
+        if let Ok(exe_bytes) = std::fs::read("/proc/self/exe") {
+            h.update(&(exe_bytes.len() as u64).to_le_bytes());
+            h.update(&exe_bytes);
+        } else if let Ok(exe_path) = std::env::current_exe()
+            && let Ok(exe_bytes) = std::fs::read(&exe_path)
+        {
+            h.update(&(exe_bytes.len() as u64).to_le_bytes());
+            h.update(&exe_bytes);
+        } else {
+            // Fallback salt tied to this process's binary address if exe is unreadable.
+            h.update(&(host_cache_salt as *const () as usize).to_le_bytes());
+        }
+        h.finish()
+    })
+}
+
 pub(crate) fn compile_wasm_so(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<u8>> {
     let cfg = engine.config();
     let max_gc_bytes = cfg
@@ -558,12 +582,19 @@ pub(crate) fn compile_wasm_so(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<
             has_avx2: std::is_x86_feature_detected!("avx2"),
             has_avx512: false,
         };
+        let inc_cache_dir = cfg
+            .cache
+            .as_ref()
+            .and_then(|c| c.config().directory().map(|p| p.to_path_buf()));
+        let cache_key_salt = inc_cache_dir.as_ref().map(|_| host_cache_salt());
         let opts = X64CompileOptions {
             target: X64Target::StoreCdylib,
             isa,
             opt: cfg.opt_level != OptLevel::None,
             verify: false,
             jobs: if cfg.parallel_compilation { 0 } else { 1 },
+            inc_cache_dir,
+            cache_key_salt,
             gc_initial_heap_bytes: cfg.gc_heap_initial_size,
             gc_max_heap_bytes: max_gc_bytes,
             ..X64CompileOptions::default()

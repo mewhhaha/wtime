@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use wtime_aot_host::{
-    AnyRef, ArrayRef, ArrayRefPre, ArrayType, Caller, Collector, Config, Engine, EqRef, ExnRef,
-    ExnRefPre, ExnType, Extern, ExternRef, FieldType, GcEphemeron, GcEphemeronUpdate,
-    GcHeapOutOfMemory, I31, Instance, Linker, Memory, MemoryType, Module, Mutability, RootScope,
-    Rooted, SharedMemory, StorageType, Store, StoreLimits, StoreLimitsBuilder, StructRef,
-    StructRefPre, StructType, Tag, Trap, Val, ValType, WeakAnyRef,
+    AnyRef, ArrayRef, ArrayRefPre, ArrayType, Cache, CacheConfig, Caller, Collector, Config,
+    Engine, EqRef, ExnRef, ExnRefPre, ExnType, Extern, ExternRef, FieldType, GcEphemeron,
+    GcEphemeronUpdate, GcHeapOutOfMemory, I31, Instance, Linker, Memory, MemoryType, Module,
+    Mutability, RootScope, Rooted, SharedMemory, StorageType, Store, StoreLimits,
+    StoreLimitsBuilder, StructRef, StructRefPre, StructType, Tag, Trap, Val, ValType, WeakAnyRef,
 };
 
 fn parse_wat(src: &str) -> Vec<u8> {
@@ -940,4 +940,96 @@ fn large_byte_array_2gib_plus_16_survives_gc() {
     assert_eq!(arr.get(&mut store, 17).unwrap().i32(), Some(0));
     assert_eq!(arr.get(&mut store, 1u32 << 30).unwrap().i32(), Some(0));
     assert_eq!(arr.get(&mut store, len - 2).unwrap().i32(), Some(0));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn store_cdylib_incremental_cache_bit_exact_and_reuses_unchanged() {
+    let dir = std::env::temp_dir().join(format!("wtime_store_inc_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let make_wat = |delta: i32| {
+        parse_wat(&format!(
+            r#"
+            (module
+              (import "env" "bump" (func $bump (param i32) (result i32)))
+              (memory (export "memory") 1 4)
+              (global $g (mut i32) (i32.const 10))
+              (table 2 funcref)
+              (elem (i32.const 0) $f0 $f1)
+              (func $f0 (param $x i32) (result i32)
+                (i32.add (local.get $x) (global.get $g))
+              )
+              (func $f1 (param $x i32) (result i32)
+                (i32.add (call $bump (local.get $x)) (i32.const {delta}))
+              )
+              (func $f2 (param $x i32) (result i32)
+                (i32.mul (local.get $x) (i32.const 3))
+              )
+              (func (export "run") (param $x i32) (result i32)
+                (local $a i32)
+                (local.set $a (call_indirect (param i32) (result i32) (local.get $x) (i32.const 0)))
+                (i32.add
+                  (local.get $a)
+                  (i32.add
+                    (call_indirect (param i32) (result i32) (local.get $x) (i32.const 1))
+                    (call $f2 (local.get $x))))
+              )
+            )
+            "#
+        ))
+    };
+
+    let wasm_v1 = make_wat(7);
+    let wasm_v2 = make_wat(42);
+
+    // Uncached engine (cold ground truth for v2)
+    let cold_engine = Engine::new(&Config::new()).unwrap();
+    let cold_v2 = Module::new(&cold_engine, &wasm_v2).unwrap();
+    let cold_v2_bytes = cold_v2.serialize().unwrap();
+
+    // Cached engine (populate on v1, incremental compile on v2)
+    let mut ccfg = CacheConfig::new();
+    ccfg.with_directory(&dir);
+    let mut cfg = Config::new();
+    cfg.cache(Some(Cache::new(ccfg).unwrap()));
+    let inc_engine = Engine::new(&cfg).unwrap();
+
+    let inc_v1 = Module::new(&inc_engine, &wasm_v1).unwrap();
+    let inc_dir = dir.join("x64-inc");
+    assert!(
+        inc_dir.is_dir(),
+        "expected x64-inc directory to be populated on cold StoreCdylib compile"
+    );
+    let has_bin = std::fs::read_dir(&inc_dir)
+        .unwrap()
+        .flatten()
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("bin"));
+    assert!(has_bin, "expected .bin cache file in x64-inc");
+
+    let inc_v2 = Module::new(&inc_engine, &wasm_v2).unwrap();
+    let inc_v2_bytes = inc_v2.serialize().unwrap();
+    assert_eq!(
+        inc_v2_bytes, cold_v2_bytes,
+        "incremental StoreCdylib .so image must be bit-for-bit identical to cold compile"
+    );
+
+    // Execute both v1 and incremental v2 and verify host imports + indirect calls + globals.
+    let eval = |m: &Module| -> i32 {
+        let mut store = Store::new(&inc_engine, ());
+        let mut linker = Linker::new(&inc_engine);
+        linker
+            .func_wrap("env", "bump", |x: i32| -> i32 { x + 100 })
+            .unwrap();
+        let inst = linker.instantiate(&mut store, m).unwrap();
+        let f = inst.get_typed_func::<i32, i32>(&mut store, "run").unwrap();
+        f.call(&mut store, 5).unwrap()
+    };
+    // v1: f0(5)=15 + f1(5)=(105+7)=112 + f2(5)=15 = 142
+    assert_eq!(eval(&inc_v1), 142);
+    // v2: f0(5)=15 + f1(5)=(105+42)=147 + f2(5)=15 = 177
+    assert_eq!(eval(&inc_v2), 177);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

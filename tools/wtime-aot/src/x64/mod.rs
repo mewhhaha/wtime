@@ -2130,7 +2130,6 @@ fn compile_wasm_to_x64_so_inner(
         && opts.pgo_gen_path.is_none()
         && opts.pgo_use.is_none()
         && !module.uses_gc
-        && opts.target != X64Target::StoreCdylib
         && n_defs > 0
     {
         let abi_hash = inc_cache::compute_abi_hash(

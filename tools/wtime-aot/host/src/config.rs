@@ -81,6 +81,10 @@ impl CacheConfig {
         self
     }
 
+    pub fn directory(&self) -> Option<&Path> {
+        self.directory.as_deref()
+    }
+
     pub fn with_files_total_size_soft_limit(&mut self, _bytes: u64) -> &mut Self {
         self
     }
