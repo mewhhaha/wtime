@@ -3654,11 +3654,12 @@ pub fn emit_all_helpers(
     debug_assert_eq!(helpers.len(), super::HELPER_GOOSE_FMT_FLOAT as usize);
     let need_goose_float = module.target == super::module::X64Target::StandaloneExec
         && module.imports.iter().any(|(m, f)| {
-            m == "goose"
+            (m == "goose"
                 && matches!(
                     f.as_str(),
                     "print_f64" | "print_f32" | "format_f64" | "format_f32"
-                )
+                ))
+                || (m == "env" && f == "gs_f64_digits")
         });
     if need_goose_float {
         helpers.push(super::standalone_rt::emit_helper_goose_fmt_float()?);
@@ -3692,6 +3693,12 @@ pub fn emit_all_helpers(
                         | "gs_os_read_file"
                         | "gs_os_write_file"
                         | "gs_os_append_file"
+                        | "gs_os_write_file_atomic"
+                        | "gs_os_make_dir"
+                        | "gs_os_list_dir"
+                        | "gs_os_remove_file"
+                        | "gs_os_remove_dir"
+                        | "gs_os_rename_file"
                 )
         });
     if need_standalone_fs {
@@ -3707,7 +3714,17 @@ pub fn emit_all_helpers(
     );
     let need_standalone_reserve = module.target == super::module::X64Target::StandaloneExec
         && module.imports.iter().any(|(m, f)| {
-            m == "env" && matches!(f.as_str(), "gs_os_arg" | "gs_os_getenv" | "gs_os_read_file")
+            m == "env"
+                && matches!(
+                    f.as_str(),
+                    "gs_os_arg"
+                        | "gs_os_getenv"
+                        | "gs_os_read_file"
+                        | "gs_os_list_dir"
+                        | "gs_os_read_line"
+                        | "gs_os_read_stdin"
+                        | "gs_os_read_stdin_max"
+                )
         });
     if need_standalone_reserve {
         helpers.push(super::standalone_rt::emit_helper_standalone_reserve_copy(

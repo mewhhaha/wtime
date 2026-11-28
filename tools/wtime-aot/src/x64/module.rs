@@ -1414,10 +1414,20 @@ pub fn check_standalone_import_sig(
         }
         (
             "env",
-            "gs_os_clock_ns" | "bench_clock" | "bench_input" | "gs_os_time_ns" | "gs_os_arg_count",
+            "gs_os_clock_ns" | "bench_clock" | "bench_input" | "gs_os_time_ns" | "gs_os_arg_count"
+            | "gs_os_random_u64" | "gs_trim_memory",
         ) => ty.params.is_empty() && ty.results.len() == 1 && is_int(ty.results[0]),
-        ("env", "gs_os_resource_dir") => {
+        ("env", "gs_os_resource_dir" | "gs_os_read_line") => {
             ty.params.len() <= 1
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "gs_os_read_stdin" | "gs_os_sleep_ms") => {
+            ty.params.len() == 1 && is_int(ty.params[0]) && ty.results.is_empty()
+        }
+        ("env", "gs_os_read_stdin_max") => {
+            ty.params.len() == 2
                 && ty.params.iter().all(|&t| is_int(t))
                 && ty.results.len() == 1
                 && is_int(ty.results[0])
@@ -1425,21 +1435,38 @@ pub fn check_standalone_import_sig(
         ("env", "gs_os_arg") => {
             ty.params.len() == 2 && ty.params.iter().all(|&t| is_int(t)) && ty.results.is_empty()
         }
-        ("env", "gs_os_file_exists" | "gs_os_is_dir") => {
+        (
+            "env",
+            "gs_os_file_exists" | "gs_os_is_dir" | "gs_os_make_dir" | "gs_os_remove_file"
+            | "gs_os_remove_dir" | "gs_os_random_bytes",
+        ) => {
             matches!(ty.params.len(), 1 | 2)
                 && ty.params.iter().all(|&t| is_int(t))
                 && ty.results.len() == 1
                 && is_int(ty.results[0])
         }
-        ("env", "gs_os_read_file" | "gs_os_getenv" | "gs_find_any") => {
+        ("env", "gs_os_read_file" | "gs_os_list_dir" | "gs_os_getenv" | "gs_find_any") => {
             matches!(ty.params.len(), 2 | 3)
                 && ty.params.iter().all(|&t| is_int(t))
                 && ty.results.len() == 1
                 && is_int(ty.results[0])
         }
-        ("env", "gs_os_write_file" | "gs_os_append_file") => {
+        (
+            "env",
+            "gs_os_write_file"
+            | "gs_os_write_file_atomic"
+            | "gs_os_append_file"
+            | "gs_os_rename_file",
+        ) => {
             matches!(ty.params.len(), 2 | 4)
                 && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "gs_f64_digits") => {
+            matches!(ty.params.len(), 3 | 4)
+                && ty.params[0] == F64
+                && ty.params[1..].iter().all(|&t| is_int(t))
                 && ty.results.len() == 1
                 && is_int(ty.results[0])
         }
@@ -1448,6 +1475,18 @@ pub fn check_standalone_import_sig(
                 && ty.params.iter().all(|&t| is_int(t))
                 && ty.results.len() == 1
                 && is_int(ty.results[0])
+        }
+        ("env", "getcwd") => {
+            ty.params.len() == 2
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "frexp" | "ldexp") => {
+            ty.params.len() == 2
+                && ty.params[0] == F64
+                && is_int(ty.params[1])
+                && ty.results == [F64]
         }
         ("env", "bench_input_f64") => {
             ty.params.is_empty() && ty.results.len() == 1 && matches!(ty.results[0], F64 | F32)

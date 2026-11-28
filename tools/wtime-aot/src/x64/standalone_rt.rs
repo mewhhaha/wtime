@@ -1,6 +1,9 @@
 //! Self-contained Linux x86-64 static executable (`ET_EXEC`) runtime & direct-syscall
 //! WASI / Goose host import trampolines for `--backend x64` standalone binaries.
 
+#[path = "standalone_goose.rs"]
+mod goose;
+
 use wtime_types::ValType;
 
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
@@ -40,6 +43,7 @@ const AT_FDCWD: i64 = -100;
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_CREAT: u32 = 0x40;
+const O_EXCL: u32 = 0x80;
 const O_TRUNC: u32 = 0x200;
 const O_APPEND: u32 = 0x400;
 const O_DIRECTORY_X64: u32 = 0x10000;
@@ -49,6 +53,9 @@ const O_PATH: u32 = 0x200000;
 const RESOLVE_BENEATH: u64 = 0x08;
 const X64_STAT_OFF_MODE: i32 = 24;
 const X64_STAT_OFF_SIZE: i32 = 48;
+const FS_OPEN_LIST: u32 = 5;
+const FS_OPEN_FILE_PARENT: u32 = 6;
+const FS_OPEN_DIR_PARENT: u32 = 7;
 
 /// Shared standalone policy slab layout (`64 KiB` mmap'd once when `--allow-files` or `--allow-env` is given).
 pub(crate) const POLICY_SLAB_BYTES: u64 = 65_536;
@@ -2072,6 +2079,100 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
             a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
             a.ret();
         }
+        ("env", "gs_os_make_dir") => {
+            goose::unpack_path(&mut a, ty.params.len() == 1, zext_param);
+            goose::emit_make_dir(&mut a, fixed_mem);
+        }
+        ("env", "gs_os_remove_file" | "gs_os_remove_dir") => {
+            goose::unpack_path(&mut a, ty.params.len() == 1, zext_param);
+            goose::emit_remove_entry(&mut a, fixed_mem, fname == "gs_os_remove_dir");
+        }
+        ("env", "gs_os_rename_file") => {
+            if ty.params.len() == 2 {
+                a.mov_rr(true, Gp::Rcx, Gp::Rsi);
+                a.shr_imm(true, Gp::Rcx, 32);
+                a.mov_rr(false, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+                zext_param(&mut a, Gp::Rdx, 2);
+                zext_param(&mut a, Gp::Rcx, 3);
+            }
+            goose::emit_rename_file(&mut a, fixed_mem);
+        }
+        ("env", "gs_os_list_dir") => {
+            if ty.params.len() == 2 {
+                zext_param(&mut a, Gp::Rsi, 1);
+                a.mov_rr(true, Gp::Rdx, Gp::Rsi);
+                goose::unpack_path(&mut a, true, zext_param);
+            } else {
+                goose::unpack_path(&mut a, false, zext_param);
+                zext_param(&mut a, Gp::Rdx, 2);
+            }
+            goose::emit_list_dir(&mut a, fixed_mem);
+        }
+        ("env", "gs_os_random_u64") => {
+            goose::emit_random_u64(&mut a);
+        }
+        ("env", "gs_os_random_bytes") => {
+            goose::unpack_path(&mut a, ty.params.len() == 1, zext_param);
+            goose::emit_random_bytes(&mut a, fixed_mem);
+        }
+        ("env", "gs_os_sleep_ms") => {
+            if ty.params[0] == ValType::I32 {
+                a.movsxd_rr(Gp::Rdi, Gp::Rdi);
+            }
+            goose::emit_sleep_ms(&mut a);
+        }
+        ("env", "gs_trim_memory") => {
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+        }
+        ("env", "gs_os_read_line") => {
+            zext_param(&mut a, Gp::Rdi, 0);
+            goose::emit_read_line(&mut a);
+        }
+        ("env", "gs_os_read_stdin") => {
+            zext_param(&mut a, Gp::Rdi, 0);
+            goose::emit_read_stdin(&mut a, false);
+        }
+        ("env", "gs_os_read_stdin_max") => {
+            zext_param(&mut a, Gp::Rdi, 0);
+            if ty.params[1] == ValType::I32 {
+                a.movsxd_rr(Gp::Rsi, Gp::Rsi);
+            }
+            goose::emit_read_stdin(&mut a, true);
+        }
+        ("env", "gs_f64_digits") => {
+            if ty.params.len() == 3 {
+                // Xmm0=x, Rdi=packed_slice, Rsi=point_ptr -> Rdi=ptr, Rsi=len, Rdx=point_ptr
+                zext_param(&mut a, Gp::Rsi, 2);
+                a.mov_rr(true, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                // Xmm0=x, Rdi=ptr, Rsi=len, Rdx=point_ptr
+                zext_param(&mut a, Gp::Rdi, 1);
+                zext_param(&mut a, Gp::Rsi, 2);
+                zext_param(&mut a, Gp::Rdx, 3);
+            }
+            goose::emit_f64_digits(&mut a, fixed_mem);
+        }
+        ("env", "getcwd") => {
+            zext_param(&mut a, Gp::Rdi, 0);
+            zext_param(&mut a, Gp::Rsi, 1);
+            goose::emit_getcwd(&mut a, fixed_mem);
+        }
+        ("env", "frexp") => {
+            zext_param(&mut a, Gp::Rdi, 1);
+            goose::emit_frexp(&mut a, fixed_mem);
+        }
+        ("env", "ldexp") => goose::emit_ldexp(&mut a),
         ("env", "gs_os_read_file") => {
             if ty.params.len() == 2 {
                 zext_param(&mut a, Gp::Rsi, 1);
@@ -2265,12 +2366,7 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
             a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
             a.ret();
         }
-        ("env", "gs_os_write_file") | ("env", "gs_os_append_file") => {
-            let mode = if fname == "gs_os_write_file" {
-                3u32
-            } else {
-                4u32
-            };
+        ("env", "gs_os_write_file" | "gs_os_append_file" | "gs_os_write_file_atomic") => {
             if ty.params.len() == 2 {
                 // Rdi = packed_path, Rsi = packed_content -> Rdi=p_ptr, Rsi=p_len, Rdx=c_ptr, Rcx=c_len
                 a.mov_rr(true, Gp::Rcx, Gp::Rsi);
@@ -2285,6 +2381,12 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
                 zext_param(&mut a, Gp::Rdx, 2);
                 zext_param(&mut a, Gp::Rcx, 3);
             }
+            if fname == "gs_os_write_file_atomic" {
+                goose::emit_atomic_write(&mut a, fixed_mem);
+                a.finish_labels()?;
+                return Ok(a);
+            }
+            let mode = if fname == "gs_os_write_file" { 3 } else { 4 };
             a.push(Gp::Rbx);
             a.push(Gp::Rbp);
             a.sub_ri(true, Gp::Rsp, 24); // [rsp+0]=c_ptr, [rsp+8]=c_len, [rsp+16]=fd
@@ -2962,8 +3064,10 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     a.push(Gp::Rbp);
     a.push(Gp::R12);
     a.push(Gp::R13);
-    a.sub_ri(true, Gp::Rsp, 120);
+    a.sub_ri(true, Gp::Rsp, 136);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rdi); // [rsp+0] = out_ptr
+    a.mov_rr(false, Gp::Rax, Gp::Rsi);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 120), Gp::Rax); // [rsp+120] = mode (0=f32, 1=f64, 2=f64_digits)
 
     // Extract sign -> [rsp+8], biased exp -> R8, mantissa -> R9, exp_max -> R10, bias_adj -> R11, imp_bit -> Rcx
     let lbl_f32 = a.new_label();
@@ -3008,6 +3112,10 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     // Check exp == exp_max (NaN or ±inf)
     a.cmp_rr(true, Gp::R8, Gp::R10);
     a.jcc(Cond::Ne, lbl_not_special_max);
+    let lbl_special_zero_ret = a.new_label();
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 120));
+    a.cmp_ri(true, Gp::Rax, 2);
+    a.jcc(Cond::E, lbl_special_zero_ret);
     let lbl_inf = a.new_label();
     a.test_rr(true, Gp::R9, Gp::R9);
     a.jcc(Cond::E, lbl_inf);
@@ -3040,6 +3148,9 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     a.mov_rr(true, Gp::Rax, Gp::R8);
     a.or_rr(true, Gp::Rax, Gp::R9);
     a.jcc(Cond::Ne, lbl_not_zero);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 120));
+    a.cmp_ri(true, Gp::Rax, 2);
+    a.jcc(Cond::E, lbl_special_zero_ret);
     let lbl_pos_zero = a.new_label();
     a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, 8));
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
@@ -3055,6 +3166,9 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     a.mov_mi8(Mem::base_disp(Gp::Rdi, 1), b'.');
     a.mov_mi8(Mem::base_disp(Gp::Rdi, 2), b'0');
     a.mov_ri32(Gp::Rax, 3);
+    a.jmp(lbl_ret);
+    a.bind(lbl_special_zero_ret);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
     a.jmp(lbl_ret);
 
     // Finite non-zero: compute m2 (Rax), e2 (Rbx), flags (Rbp: bit0=accept_bounds, bit3=mm_shift)
@@ -3495,6 +3609,20 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     a.jmp(lbl_trim);
     a.bind(lbl_trim_done);
 
+    // Mode 2 (`gs_f64_digits`): copy trimmed digits to `[out_ptr..+count]`, store `point = first_exp + 1` at `[out_ptr + 24]`, return `count`.
+    let lbl_not_digits_mode = a.new_label();
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 120));
+    a.cmp_ri(true, Gp::Rax, 2);
+    a.jcc(Cond::Ne, lbl_not_digits_mode);
+    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 0));
+    a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rbx, 1));
+    a.mov_mr(true, Mem::base_disp(Gp::Rdi, 24), Gp::Rax);
+    a.mov_rr(true, Gp::R8, Gp::Rcx);
+    a.rep_movsb();
+    a.mov_rr(true, Gp::Rax, Gp::R8);
+    a.jmp(lbl_ret);
+    a.bind(lbl_not_digits_mode);
+
     // Prepare Goose layout writer: Rdi = out_cur, R12 = orig_out_ptr, Rsi = digits, Rcx = count, Rbx = first_exp
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 0));
     a.mov_rr(true, Gp::R12, Gp::Rdi);
@@ -3631,7 +3759,7 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     a.sub_rr(true, Gp::Rax, Gp::R12);
 
     a.bind(lbl_ret);
-    a.add_ri(true, Gp::Rsp, 120);
+    a.add_ri(true, Gp::Rsp, 136);
     a.pop(Gp::R13);
     a.pop(Gp::R12);
     a.pop(Gp::Rbp);
@@ -3721,10 +3849,12 @@ pub fn emit_helper_standalone_reserve_copy(module: &X64Module) -> Result<Asm, St
 }
 
 /// Emits `HELPER_STANDALONE_FS`: enforces `--allow-files` lexical + kernel `openat2(RESOLVE_BENEATH)`
-/// path sandboxing for `file_exists` (0), `is_dir` (1), `read_file` (2), `write_file` (3), and `append_file` (4).
+/// path sandboxing for `file_exists` (0), `is_dir` (1), `read_file` (2), `write_file` (3), `append_file` (4),
+/// `list_dir` (5), and opening a parent directory for a file (6) or directory (7).
 ///
 /// ABI: `Rdi = path_off` (bounds-checked), `Rsi = path_len`, `Rdx = mode`
 /// -> `Rax = 0/1 (stat) or fd/-1 (open)`, `R11d = 0 | TRAP_HOST` (embedded NUL for mode >= 2).
+/// Modes 6 and 7 additionally return the normalized basename (a pointer into the policy slab) in Rdx.
 /// Preserves `Rbx, Rbp, R12, R13, R14, R15`.
 pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     let mut a = Asm::with_capacity(1024);
@@ -3732,7 +3862,9 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.push(Gp::Rbx);
     a.push(Gp::Rbp);
     // [rsp+0]=mode, [rsp+8]=path_host, [rsp+16]=path_len, [rsp+24]=norm_len
-    a.sub_ri(true, Gp::Rsp, 40);
+    let split_at = Mem::base_disp(Gp::Rsp, 32);
+    let basename = Mem::base_disp(Gp::Rsp, 40);
+    a.sub_ri(true, Gp::Rsp, 56);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rdx);
     a.lea(true, Gp::R8, Mem::indexed(Gp::R14, Gp::Rdi, 1, 0));
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::R8);
@@ -3766,7 +3898,7 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_deny);
 
-    // 3. Trailing '/' or '/.' check: disallowed for file_exists (0), write (3), append (4).
+    // 3. File-only operations reject a trailing '/' or '/.'.
     let lbl_trail_ok = a.new_label();
     let lbl_is_trail = a.new_label();
     a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rsi, 1, -1));
@@ -3783,8 +3915,12 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 0));
     a.cmp_ri(true, Gp::Rax, 0);
     a.jcc(Cond::E, lbl_deny);
+    a.cmp_ri(true, Gp::Rax, FS_OPEN_FILE_PARENT as i32);
+    a.jcc(Cond::E, lbl_deny);
     a.cmp_ri(true, Gp::Rax, 3);
-    a.jcc(Cond::Ae, lbl_deny);
+    a.jcc(Cond::E, lbl_deny);
+    a.cmp_ri(true, Gp::Rax, 4);
+    a.jcc(Cond::E, lbl_deny);
     a.bind(lbl_trail_ok);
 
     // 4. Lexical normalization into `policy + POLICY_OFF_SCRATCH_PATH` (cap 4095); reject any `..`.
@@ -3992,6 +4128,14 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     let lbl_m3 = a.new_label();
     let lbl_m4 = a.new_label();
     let lbl_how_ready = a.new_label();
+    let lbl_m5 = a.new_label();
+    let lbl_parent = a.new_label();
+    a.mov_mi32(true, split_at, 0);
+    a.mov_mi32(true, basename, 0);
+    a.cmp_ri(true, Gp::Rax, FS_OPEN_FILE_PARENT as i32);
+    a.jcc(Cond::Ae, lbl_parent);
+    a.cmp_ri(true, Gp::Rax, FS_OPEN_LIST as i32);
+    a.jcc(Cond::E, lbl_m5);
     a.cmp_ri(true, Gp::Rax, 2);
     a.jcc(Cond::E, lbl_m2);
     a.cmp_ri(true, Gp::Rax, 3);
@@ -4019,6 +4163,22 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
         u64::from(O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW_X64 | O_CLOEXEC),
     );
     a.mov_ri64(Gp::R8, 0o644);
+    a.jmp(lbl_how_ready);
+
+    a.bind(lbl_m5);
+    a.mov_ri64(Gp::Rcx, u64::from(O_RDONLY | O_DIRECTORY_X64 | O_CLOEXEC));
+    a.xor_rr(false, Gp::R8, Gp::R8);
+    a.jmp(lbl_how_ready);
+
+    a.bind(lbl_parent);
+    // Reject a mutation of the grant itself. Otherwise separate the final component and
+    // pin its parent with openat2 before doing any operation on the basename.
+    a.lea_rip(Gp::Rax, RelocTarget::LocalRodata(dot_off));
+    a.cmp_rr(true, Gp::Rax, Gp::Rsi);
+    a.jcc(Cond::E, lbl_dir_next);
+    goose::emit_split_parent(&mut a, dot_off, split_at, basename);
+    a.mov_ri64(Gp::Rcx, u64::from(O_PATH | O_DIRECTORY_X64 | O_CLOEXEC));
+    a.xor_rr(false, Gp::R8, Gp::R8);
 
     a.bind(lbl_how_ready);
     a.mov_mr(true, Mem::base_disp(Gp::Rbx, POLICY_OFF_OPEN_HOW), Gp::Rcx);
@@ -4043,6 +4203,13 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.mov_ri32(Gp::R10, 24);
     a.mov_ri32(Gp::Rax, SYS_OPENAT2);
     a.syscall();
+    let lbl_no_restore = a.new_label();
+    a.mov_rm(true, Gp::Rcx, split_at);
+    a.test_rr(true, Gp::Rcx, Gp::Rcx);
+    a.jcc(Cond::E, lbl_no_restore);
+    a.mov_mi8(Mem::base(Gp::Rcx), b'/');
+    a.bind(lbl_no_restore);
+    a.mov_rm(true, Gp::Rdx, basename);
     a.cmp_ri(true, Gp::Rax, 0);
     a.jcc(Cond::L, lbl_dir_next);
 
@@ -4092,7 +4259,7 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
     a.cmp_ri(true, Gp::Rcx, 2);
     a.jcc(Cond::B, lbl_deny);
-    a.add_ri(true, Gp::Rsp, 40);
+    a.add_ri(true, Gp::Rsp, 56);
     a.pop(Gp::Rbp);
     a.pop(Gp::Rbx);
     a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
@@ -4108,7 +4275,7 @@ pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
     a.bind(lbl_deny_ret);
 
     a.bind(lbl_ret_ok);
-    a.add_ri(true, Gp::Rsp, 40);
+    a.add_ri(true, Gp::Rsp, 56);
     a.pop(Gp::Rbp);
     a.pop(Gp::Rbx);
     a.xor_rr(false, Gp::R11, Gp::R11);

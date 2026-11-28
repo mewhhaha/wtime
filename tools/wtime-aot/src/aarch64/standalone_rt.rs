@@ -30,6 +30,9 @@ use super::asm::{A64Asm, A64RelocTarget, Cond, Label, Reg, VReg};
 use super::lower::{CTX_REG, MEM_BASE_REG, MEM_LEN_REG, SGP1, SGP3, emit_load_off, emit_store_off};
 
 const SYS_GETCWD: u64 = 17;
+const SYS_MKDIRAT: u64 = 34;
+const SYS_UNLINKAT: u64 = 35;
+const SYS_RENAMEAT: u64 = 38;
 const SYS_OPENAT: u64 = 56;
 const SYS_CLOSE: u64 = 57;
 const SYS_READ: u64 = 63;
@@ -37,12 +40,18 @@ const SYS_WRITE: u64 = 64;
 const SYS_READLINKAT: u64 = 78;
 const SYS_FSTAT: u64 = 80;
 const SYS_EXIT_GROUP: u64 = 94;
+const SYS_NANOSLEEP: u64 = 101;
 const SYS_CLOCK_GETTIME: u64 = 113;
 const SYS_RT_SIGACTION: u64 = 134;
 const SYS_MUNMAP: u64 = 215;
 const SYS_MMAP: u64 = 222;
 const SYS_MPROTECT: u64 = 226;
+const SYS_GETRANDOM: u64 = 278;
 const SYS_OPENAT2: u64 = 437;
+
+const AT_REMOVEDIR: u32 = 0x200;
+const FS_OPEN_FILE_PARENT: u32 = 6;
+const FS_OPEN_DIR_PARENT: u32 = 7;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
 const O_RDONLY: u32 = 0;
@@ -1179,6 +1188,8 @@ pub fn emit_a64_helper_goose_fmt_float() -> Result<A64Asm, String> {
     a.stp_x(Reg::X23, Reg::X24, Reg::SP, 160);
     a.stp_x(Reg::FP, Reg::LR, Reg::SP, 176);
     a.str_uimm(true, Reg::X0, Reg::SP, 0); // [SP+0] = out_ptr
+    a.uxtw(Reg::X2, Reg::X1);
+    a.str_uimm(true, Reg::X2, Reg::SP, 120); // [SP+120] = mode (0=f32, 1=f64, 2=f64_digits)
 
     // Unpack: sign -> [SP+8], exp -> X9, mant -> X10, exp_max -> X11, bias_adj -> X12, imp_bit -> X13
     let lbl_f32 = a.new_label();
@@ -1218,6 +1229,10 @@ pub fn emit_a64_helper_goose_fmt_float() -> Result<A64Asm, String> {
     // Check exp == exp_max (NaN or ±inf)
     a.cmp_r(true, Reg::X9, Reg::X11);
     a.b_cond(Cond::Ne, lbl_not_max);
+    let lbl_special_zero_ret = a.new_label();
+    a.ldr_uimm(true, Reg::X3, Reg::SP, 120);
+    a.cmp_imm(true, Reg::X3, 2);
+    a.b_cond(Cond::Eq, lbl_special_zero_ret);
     let lbl_inf = a.new_label();
     a.cbz(true, Reg::X10, lbl_inf);
     // "nan"
@@ -1252,6 +1267,9 @@ pub fn emit_a64_helper_goose_fmt_float() -> Result<A64Asm, String> {
     a.bind(lbl_not_max);
     a.orr_r(true, Reg::X2, Reg::X9, Reg::X10);
     a.cbnz(true, Reg::X2, lbl_not_zero);
+    a.ldr_uimm(true, Reg::X3, Reg::SP, 120);
+    a.cmp_imm(true, Reg::X3, 2);
+    a.b_cond(Cond::Eq, lbl_special_zero_ret);
     let lbl_pos_zero = a.new_label();
     a.ldr_uimm(true, Reg::X3, Reg::SP, 8);
     a.cbz(true, Reg::X3, lbl_pos_zero);
@@ -1267,6 +1285,9 @@ pub fn emit_a64_helper_goose_fmt_float() -> Result<A64Asm, String> {
         a.strb_uimm(Reg::X3, Reg::X0, i as u32);
     }
     a.mov_imm32(Reg::X0, 3);
+    a.b(lbl_ret);
+    a.bind(lbl_special_zero_ret);
+    a.movz(true, Reg::X0, 0, 0);
     a.b(lbl_ret);
 
     // Finite non-zero: X2 = m2, X19 = e2 (signed i64), X20 = flags
@@ -1695,6 +1716,29 @@ pub fn emit_a64_helper_goose_fmt_float() -> Result<A64Asm, String> {
     a.mov_r(true, Reg::X21, Reg::X3);
     a.b(lbl_trim);
     a.bind(lbl_trim_done);
+
+    // Mode 2 (`gs_f64_digits`): copy trimmed digits to `[out_ptr..+count]`, store `point = first_exp + 1` at `[out_ptr + 24]`, return `count`.
+    let lbl_not_digits_mode = a.new_label();
+    a.ldr_uimm(true, Reg::X3, Reg::SP, 120);
+    a.cmp_imm(true, Reg::X3, 2);
+    a.b_cond(Cond::Ne, lbl_not_digits_mode);
+    a.ldr_uimm(true, Reg::X0, Reg::SP, 0);
+    a.add_imm(true, Reg::X3, Reg::X20, 1);
+    a.str_uimm(true, Reg::X3, Reg::X0, 24);
+    a.movz(true, Reg::X4, 0, 0);
+    let lbl_dcp = a.new_label();
+    let lbl_dcp_done = a.new_label();
+    a.bind(lbl_dcp);
+    a.cmp_r(true, Reg::X4, Reg::X21);
+    a.b_cond(Cond::Hs, lbl_dcp_done);
+    a.ldrb_reg(Reg::X5, Reg::X22, Reg::X4, false);
+    a.strb_reg(Reg::X5, Reg::X0, Reg::X4, false);
+    a.add_imm(true, Reg::X4, Reg::X4, 1);
+    a.b(lbl_dcp);
+    a.bind(lbl_dcp_done);
+    a.mov_r(true, Reg::X0, Reg::X21);
+    a.b(lbl_ret);
+    a.bind(lbl_not_digits_mode);
 
     // Goose writer: X19 = out_cur, X23 = orig_out_ptr, X22 = digits, X21 = count, X20 = first_exp
     a.ldr_uimm(true, Reg::X19, Reg::SP, 0);
@@ -2641,6 +2685,669 @@ pub fn emit_a64_standalone_import_trampoline(
             a.mov_imm32(SGP1, u32::from(TRAP_HOST));
             a.ret();
         }
+        ("env", "gs_os_make_dir") => {
+            if ty.params.len() == 1 {
+                a.lsr_imm(true, Reg::X1, Reg::X0, 32);
+                a.uxtw(Reg::X0, Reg::X0);
+            } else {
+                zext_param(&mut a, Reg::X0, 0);
+                zext_param(&mut a, Reg::X1, 1);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_done = a.new_label();
+            let lbl_retry = a.new_label();
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -48);
+            a.str_uimm(true, Reg::X0, Reg::SP, 16);
+            a.str_uimm(true, Reg::X1, Reg::SP, 24);
+            a.mov_imm32(Reg::X2, 1);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.cbnz(true, Reg::X0, lbl_done);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.ldr_uimm(true, Reg::X1, Reg::SP, 24);
+            a.mov_imm32(Reg::X2, FS_OPEN_DIR_PARENT);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.cbnz(false, SGP1, lbl_done);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Lt, lbl_retry);
+            a.str_uimm(true, Reg::X0, Reg::SP, 32);
+            a.mov_r(true, Reg::X1, Reg::X2);
+            a.mov_imm32(Reg::X2, 0o777);
+            emit_syscall(&mut a, SYS_MKDIRAT);
+            a.mov_r(true, Reg::X9, Reg::X0);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 32);
+            emit_syscall(&mut a, SYS_CLOSE);
+            a.mov_imm32(Reg::X0, 1);
+            a.movz(false, SGP1, 0, 0);
+            a.cbz(true, Reg::X9, lbl_done);
+            a.bind(lbl_retry);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.ldr_uimm(true, Reg::X1, Reg::SP, 24);
+            a.mov_imm32(Reg::X2, 1);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.bind(lbl_done);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 48);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_remove_file" | "gs_os_remove_dir") => {
+            let is_dir = fname == "gs_os_remove_dir";
+            if ty.params.len() == 1 {
+                a.lsr_imm(true, Reg::X1, Reg::X0, 32);
+                a.uxtw(Reg::X0, Reg::X0);
+            } else {
+                zext_param(&mut a, Reg::X0, 0);
+                zext_param(&mut a, Reg::X1, 1);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_deny = a.new_label();
+            let lbl_done = a.new_label();
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -32);
+            a.mov_imm32(
+                Reg::X2,
+                if is_dir {
+                    FS_OPEN_DIR_PARENT
+                } else {
+                    FS_OPEN_FILE_PARENT
+                },
+            );
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.cbnz(false, SGP1, lbl_done);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Lt, lbl_deny);
+            a.str_uimm(true, Reg::X0, Reg::SP, 16);
+            a.mov_r(true, Reg::X1, Reg::X2);
+            a.mov_imm32(Reg::X2, if is_dir { AT_REMOVEDIR } else { 0 });
+            emit_syscall(&mut a, SYS_UNLINKAT);
+            a.mov_r(true, Reg::X9, Reg::X0);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            emit_syscall(&mut a, SYS_CLOSE);
+            a.cmp_imm(true, Reg::X9, 0);
+            a.mov_imm32(Reg::X1, 1);
+            a.csel(true, Reg::X0, Reg::X1, Reg::XZR, Cond::Eq);
+            a.movz(false, SGP1, 0, 0);
+            a.b(lbl_done);
+            a.bind(lbl_deny);
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.bind(lbl_done);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 32);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_rename_file") => {
+            if ty.params.len() == 2 {
+                a.lsr_imm(true, Reg::X3, Reg::X1, 32);
+                a.uxtw(Reg::X2, Reg::X1);
+                a.lsr_imm(true, Reg::X1, Reg::X0, 32);
+                a.uxtw(Reg::X0, Reg::X0);
+            } else {
+                zext_param(&mut a, Reg::X0, 0);
+                zext_param(&mut a, Reg::X1, 1);
+                zext_param(&mut a, Reg::X2, 2);
+                zext_param(&mut a, Reg::X3, 3);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_deny = a.new_label();
+            let lbl_close_from = a.new_label();
+            let lbl_trap_from = a.new_label();
+            let lbl_done = a.new_label();
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            emit_check_range(&mut a, Reg::X2, Reg::X3, lbl_oob);
+            a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -320);
+            a.str_uimm(true, Reg::X2, Reg::SP, 16);
+            a.str_uimm(true, Reg::X3, Reg::SP, 24);
+            a.mov_imm32(Reg::X2, FS_OPEN_FILE_PARENT);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.cbnz(false, SGP1, lbl_done);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Lt, lbl_deny);
+            a.str_uimm(true, Reg::X0, Reg::SP, 32); // from_parent_fd
+            a.add_imm(true, Reg::X3, Reg::SP, 48); // from_base buf
+            a.movz(true, Reg::X4, 0, 0);
+            let lbl_cp = a.new_label();
+            let lbl_cp_done = a.new_label();
+            a.bind(lbl_cp);
+            a.ldrb_reg(Reg::X5, Reg::X2, Reg::X4, false);
+            a.strb_reg(Reg::X5, Reg::X3, Reg::X4, false);
+            a.cbz(false, Reg::X5, lbl_cp_done);
+            a.add_imm(true, Reg::X4, Reg::X4, 1);
+            a.cmp_imm(true, Reg::X4, 256);
+            a.b_cond(Cond::Hs, lbl_close_from);
+            a.b(lbl_cp);
+            a.bind(lbl_cp_done);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.ldr_uimm(true, Reg::X1, Reg::SP, 24);
+            a.mov_imm32(Reg::X2, FS_OPEN_FILE_PARENT);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.cbnz(false, SGP1, lbl_trap_from);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Lt, lbl_close_from);
+            a.str_uimm(true, Reg::X0, Reg::SP, 40); // to_parent_fd
+            a.mov_r(true, Reg::X3, Reg::X2); // newpath
+            a.mov_r(true, Reg::X2, Reg::X0); // newdirfd
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 32); // olddirfd
+            a.add_imm(true, Reg::X1, Reg::SP, 48); // oldpath
+            emit_syscall(&mut a, SYS_RENAMEAT);
+            a.mov_r(true, Reg::X9, Reg::X0);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 40);
+            emit_syscall(&mut a, SYS_CLOSE);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 32);
+            emit_syscall(&mut a, SYS_CLOSE);
+            a.cmp_imm(true, Reg::X9, 0);
+            a.mov_imm32(Reg::X1, 1);
+            a.csel(true, Reg::X0, Reg::X1, Reg::XZR, Cond::Eq);
+            a.movz(false, SGP1, 0, 0);
+            a.b(lbl_done);
+            a.bind(lbl_trap_from);
+            a.mov_r(false, Reg::X12, SGP1);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 32);
+            emit_syscall(&mut a, SYS_CLOSE);
+            a.mov_r(false, SGP1, Reg::X12);
+            a.b(lbl_done);
+            a.bind(lbl_close_from);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 32);
+            emit_syscall(&mut a, SYS_CLOSE);
+            a.bind(lbl_deny);
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.bind(lbl_done);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 320);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_random_u64") => {
+            let lbl_retry = a.new_label();
+            let lbl_fail = a.new_label();
+            let lbl_done = a.new_label();
+            a.sub_imm(true, Reg::SP, Reg::SP, 16);
+            a.bind(lbl_retry);
+            a.mov_r(true, Reg::X0, Reg::SP);
+            a.mov_imm32(Reg::X1, 8);
+            a.movz(true, Reg::X2, 0, 0);
+            emit_syscall(&mut a, SYS_GETRANDOM);
+            a.mov_imm64(Reg::X3, (-4i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X3);
+            a.b_cond(Cond::Eq, lbl_retry);
+            a.cmp_imm(true, Reg::X0, 8);
+            a.b_cond(Cond::Ne, lbl_fail);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 0);
+            a.b(lbl_done);
+            a.bind(lbl_fail);
+            a.movz(true, Reg::X0, 0, 0);
+            a.bind(lbl_done);
+            a.add_imm(true, Reg::SP, Reg::SP, 16);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+        }
+        ("env", "gs_os_random_bytes") => {
+            if ty.params.len() == 1 {
+                a.lsr_imm(true, Reg::X1, Reg::X0, 32);
+                a.uxtw(Reg::X0, Reg::X0);
+            } else {
+                zext_param(&mut a, Reg::X0, 0);
+                zext_param(&mut a, Reg::X1, 1);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_lp = a.new_label();
+            let lbl_ok = a.new_label();
+            let lbl_fail = a.new_label();
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            a.add_r(true, Reg::X9, MEM_BASE_REG, Reg::X0);
+            a.mov_r(true, Reg::X10, Reg::X1);
+            a.bind(lbl_lp);
+            a.cbz(true, Reg::X10, lbl_ok);
+            a.mov_r(true, Reg::X0, Reg::X9);
+            a.mov_r(true, Reg::X1, Reg::X10);
+            a.movz(true, Reg::X2, 0, 0);
+            emit_syscall(&mut a, SYS_GETRANDOM);
+            a.mov_imm64(Reg::X3, (-4i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X3);
+            a.b_cond(Cond::Eq, lbl_lp);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Le, lbl_fail);
+            a.add_r(true, Reg::X9, Reg::X9, Reg::X0);
+            a.sub_r(true, Reg::X10, Reg::X10, Reg::X0);
+            a.b(lbl_lp);
+            a.bind(lbl_ok);
+            a.mov_imm32(Reg::X0, 1);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_fail);
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_sleep_ms") => {
+            if ty.params[0] == ValType::I32 {
+                a.sxtw(Reg::X0, Reg::X0);
+            }
+            let lbl_done = a.new_label();
+            let lbl_retry = a.new_label();
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Le, lbl_done);
+            a.sub_imm(true, Reg::SP, Reg::SP, 32);
+            a.mov_imm32(Reg::X1, 1000);
+            a.udiv(true, Reg::X2, Reg::X0, Reg::X1);
+            a.msub(true, Reg::X3, Reg::X2, Reg::X1, Reg::X0);
+            a.mov_imm32(Reg::X4, 1_000_000);
+            a.mul(true, Reg::X3, Reg::X3, Reg::X4);
+            a.str_uimm(true, Reg::X2, Reg::SP, 0);
+            a.str_uimm(true, Reg::X3, Reg::SP, 8);
+            a.bind(lbl_retry);
+            a.mov_r(true, Reg::X0, Reg::SP);
+            a.add_imm(true, Reg::X1, Reg::SP, 16);
+            emit_syscall(&mut a, SYS_NANOSLEEP);
+            a.mov_imm64(Reg::X3, (-4i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X3);
+            let lbl_fin = a.new_label();
+            a.b_cond(Cond::Ne, lbl_fin);
+            a.ldr_uimm(true, Reg::X2, Reg::SP, 16);
+            a.ldr_uimm(true, Reg::X3, Reg::SP, 24);
+            a.str_uimm(true, Reg::X2, Reg::SP, 0);
+            a.str_uimm(true, Reg::X3, Reg::SP, 8);
+            a.b(lbl_retry);
+            a.bind(lbl_fin);
+            a.add_imm(true, Reg::SP, Reg::SP, 32);
+            a.bind(lbl_done);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+        }
+        ("env", "gs_trim_memory") => {
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+        }
+        ("env", "frexp") => {
+            zext_param(&mut a, Reg::X0, 1);
+            let lbl_oob = a.new_label();
+            let lbl_normal = a.new_label();
+            let lbl_write = a.new_label();
+            a.mov_imm32(Reg::X1, 4);
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            a.movz(true, Reg::X2, 0, 0); // exp_out
+            a.fmov_gp_from_fp(true, Reg::X3, VReg::V0);
+            a.lsl_imm(true, Reg::X4, Reg::X3, 1);
+            a.cbz(true, Reg::X4, lbl_write);
+            a.lsr_imm(true, Reg::X4, Reg::X4, 53);
+            a.cmp_imm(false, Reg::X4, 0x7ff);
+            a.b_cond(Cond::Eq, lbl_write);
+            a.cbnz(false, Reg::X4, lbl_normal);
+            a.mov_imm64(Reg::X5, 1077u64 << 52);
+            a.fmov_fp_from_gp(true, VReg::V1, Reg::X5);
+            a.fmul(true, VReg::V0, VReg::V0, VReg::V1);
+            a.fmov_gp_from_fp(true, Reg::X3, VReg::V0);
+            a.lsl_imm(true, Reg::X4, Reg::X3, 1);
+            a.lsr_imm(true, Reg::X4, Reg::X4, 53);
+            a.sub_imm(false, Reg::X2, Reg::X2, 54);
+            a.bind(lbl_normal);
+            a.add_r(false, Reg::X2, Reg::X2, Reg::X4);
+            a.sub_imm(false, Reg::X2, Reg::X2, 1022);
+            a.mov_imm64(Reg::X5, 0x800f_ffff_ffff_ffff);
+            a.and_r(true, Reg::X3, Reg::X3, Reg::X5);
+            a.mov_imm64(Reg::X5, 1022u64 << 52);
+            a.orr_r(true, Reg::X3, Reg::X3, Reg::X5);
+            a.fmov_fp_from_gp(true, VReg::V0, Reg::X3);
+            a.bind(lbl_write);
+            a.add_r(true, Reg::X5, MEM_BASE_REG, Reg::X0);
+            a.str_uimm(false, Reg::X2, Reg::X5, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "ldexp") => {
+            a.sxtw(Reg::X0, Reg::X0);
+            let lbl_end = a.new_label();
+            let lbl_pos = a.new_label();
+            let lbl_neg = a.new_label();
+            let lbl_ub = a.new_label();
+            let lbl_lb = a.new_label();
+            let lbl_final = a.new_label();
+            a.fmov_gp_from_fp(true, Reg::X1, VReg::V0);
+            a.lsl_imm(true, Reg::X1, Reg::X1, 1);
+            a.cbz(true, Reg::X1, lbl_end);
+            a.lsr_imm(true, Reg::X1, Reg::X1, 53);
+            a.cmp_imm(false, Reg::X1, 0x7ff);
+            a.b_cond(Cond::Eq, lbl_end);
+            a.mov_imm64(Reg::X2, 4096);
+            a.cmp_r(true, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Le, lbl_ub);
+            a.mov_r(true, Reg::X0, Reg::X2);
+            a.bind(lbl_ub);
+            a.mov_imm64(Reg::X2, (-4096i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Ge, lbl_lb);
+            a.mov_r(true, Reg::X0, Reg::X2);
+            a.bind(lbl_lb);
+            a.bind(lbl_pos);
+            a.cmp_imm(true, Reg::X0, 1023);
+            a.b_cond(Cond::Le, lbl_neg);
+            a.mov_imm64(Reg::X1, 2046u64 << 52);
+            a.fmov_fp_from_gp(true, VReg::V1, Reg::X1);
+            a.fmul(true, VReg::V0, VReg::V0, VReg::V1);
+            a.sub_imm(true, Reg::X0, Reg::X0, 1023);
+            a.b(lbl_pos);
+            a.bind(lbl_neg);
+            a.mov_imm64(Reg::X2, (-1022i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Ge, lbl_final);
+            a.mov_imm64(Reg::X1, 54u64 << 52);
+            a.fmov_fp_from_gp(true, VReg::V1, Reg::X1);
+            a.fmul(true, VReg::V0, VReg::V0, VReg::V1);
+            a.add_imm(true, Reg::X0, Reg::X0, 969);
+            a.b(lbl_neg);
+            a.bind(lbl_final);
+            a.add_imm(true, Reg::X0, Reg::X0, 1023);
+            a.lsl_imm(true, Reg::X0, Reg::X0, 52);
+            a.fmov_fp_from_gp(true, VReg::V1, Reg::X0);
+            a.fmul(true, VReg::V0, VReg::V0, VReg::V1);
+            a.bind(lbl_end);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+        }
+        ("env", "getcwd") => {
+            zext_param(&mut a, Reg::X0, 0);
+            zext_param(&mut a, Reg::X1, 1);
+            let lbl_fail = a.new_label();
+            let lbl_oob = a.new_label();
+            a.cbz(true, Reg::X0, lbl_fail);
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X2),
+                None,
+                CTX_REG,
+                OFF_EXEC_POLICY_PTR,
+                SGP3,
+            );
+            a.cbz(true, Reg::X2, lbl_fail);
+            a.ldr_uimm(true, Reg::X2, Reg::X2, POLICY_OFF_DIR_COUNT as u32);
+            a.cbz(true, Reg::X2, lbl_fail);
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            a.mov_r(true, Reg::X9, Reg::X0);
+            a.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
+            emit_syscall(&mut a, SYS_GETCWD);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Le, lbl_fail);
+            a.mov_r(true, Reg::X0, Reg::X9);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_fail);
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_f64_digits") => {
+            if ty.params.len() == 3 {
+                zext_param(&mut a, Reg::X1, 2);
+                a.mov_r(true, Reg::X2, Reg::X1);
+                a.lsr_imm(true, Reg::X1, Reg::X0, 32);
+                a.uxtw(Reg::X0, Reg::X0);
+            } else {
+                zext_param(&mut a, Reg::X0, 1);
+                zext_param(&mut a, Reg::X1, 2);
+                zext_param(&mut a, Reg::X2, 3);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_done = a.new_label();
+            emit_check_range(&mut a, Reg::X0, Reg::X1, lbl_oob);
+            a.mov_imm32(Reg::X3, 8);
+            emit_check_range(&mut a, Reg::X2, Reg::X3, lbl_oob);
+            a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -80);
+            a.str_uimm(true, Reg::X0, Reg::SP, 48);
+            a.str_uimm(true, Reg::X1, Reg::SP, 56);
+            a.str_uimm(true, Reg::X2, Reg::SP, 64);
+            a.add_imm(true, Reg::X0, Reg::SP, 16);
+            a.mov_imm32(Reg::X1, 2);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_GOOSE_FMT_FLOAT));
+            a.cbz(true, Reg::X0, lbl_done);
+            a.ldr_uimm(true, Reg::X1, Reg::SP, 56);
+            a.cmp_r(true, Reg::X0, Reg::X1);
+            a.csel(true, Reg::X0, Reg::X1, Reg::X0, Cond::Hi);
+            a.ldr_uimm(true, Reg::X2, Reg::SP, 48);
+            a.add_r(true, Reg::X2, MEM_BASE_REG, Reg::X2);
+            a.add_imm(true, Reg::X3, Reg::SP, 16);
+            a.movz(true, Reg::X4, 0, 0);
+            let lbl_cp = a.new_label();
+            let lbl_cp_done = a.new_label();
+            a.bind(lbl_cp);
+            a.cmp_r(true, Reg::X4, Reg::X0);
+            a.b_cond(Cond::Hs, lbl_cp_done);
+            a.ldrb_reg(Reg::X5, Reg::X3, Reg::X4, false);
+            a.strb_reg(Reg::X5, Reg::X2, Reg::X4, false);
+            a.add_imm(true, Reg::X4, Reg::X4, 1);
+            a.b(lbl_cp);
+            a.bind(lbl_cp_done);
+            a.ldr_uimm(true, Reg::X5, Reg::SP, 40); // [SP+16+24] = point
+            a.ldr_uimm(true, Reg::X6, Reg::SP, 64);
+            a.add_r(true, Reg::X6, MEM_BASE_REG, Reg::X6);
+            a.str_uimm(true, Reg::X5, Reg::X6, 0);
+            a.bind(lbl_done);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 80);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_read_stdin" | "gs_os_read_stdin_max") => {
+            let has_max = fname == "gs_os_read_stdin_max";
+            zext_param(&mut a, Reg::X0, 0);
+            if has_max && ty.params[1] == ValType::I32 {
+                a.sxtw(Reg::X1, Reg::X1);
+            }
+            let lbl_early0 = a.new_label();
+            let lbl_lp = a.new_label();
+            let lbl_rlp = a.new_label();
+            let lbl_done = a.new_label();
+            let lbl_trap = a.new_label();
+            let lbl_leave = a.new_label();
+            if has_max {
+                a.cmp_imm(true, Reg::X1, 0);
+                a.b_cond(Cond::Le, lbl_early0);
+            }
+            // Frame 1088B: [SP+0]=FP/LR, [SP+16]=ctrl, [SP+24]=rem, [SP+32]=total, [SP+48..1072]=buf[1024]
+            a.sub_imm(true, Reg::SP, Reg::SP, 1088);
+            a.stp_x(Reg::FP, Reg::LR, Reg::SP, 0);
+            a.str_uimm(true, Reg::X0, Reg::SP, 16);
+            if has_max {
+                a.str_uimm(true, Reg::X1, Reg::SP, 24);
+            }
+            a.str_uimm(true, Reg::XZR, Reg::SP, 32);
+            a.bind(lbl_lp);
+            a.mov_imm32(Reg::X2, 1024);
+            if has_max {
+                a.ldr_uimm(true, Reg::X3, Reg::SP, 24);
+                a.cbz(true, Reg::X3, lbl_done);
+                a.cmp_r(true, Reg::X3, Reg::X2);
+                a.csel(true, Reg::X2, Reg::X3, Reg::X2, Cond::Lo);
+            }
+            a.mov_r(true, Reg::X9, Reg::X2);
+            a.bind(lbl_rlp);
+            a.movz(true, Reg::X0, 0, 0);
+            a.add_imm(true, Reg::X1, Reg::SP, 48);
+            a.mov_r(true, Reg::X2, Reg::X9);
+            emit_syscall(&mut a, SYS_READ);
+            a.mov_imm64(Reg::X3, (-4i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X3);
+            a.b_cond(Cond::Eq, lbl_rlp);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Le, lbl_done);
+            a.ldr_uimm(true, Reg::X3, Reg::SP, 32);
+            a.adds_r(true, Reg::X3, Reg::X3, Reg::X0);
+            a.b_cond(Cond::Hs, lbl_trap);
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X4),
+                None,
+                CTX_REG,
+                OFF_EXEC_OUTPUT_LIMIT,
+                SGP3,
+            );
+            a.cmp_r(true, Reg::X3, Reg::X4);
+            a.b_cond(Cond::Hi, lbl_trap);
+            a.str_uimm(true, Reg::X3, Reg::SP, 32);
+            if has_max {
+                a.ldr_uimm(true, Reg::X3, Reg::SP, 24);
+                a.sub_r(true, Reg::X3, Reg::X3, Reg::X0);
+                a.str_uimm(true, Reg::X3, Reg::SP, 24);
+            }
+            a.mov_r(true, Reg::X2, Reg::X0);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.add_imm(true, Reg::X1, Reg::SP, 48);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.cbnz(false, SGP1, lbl_leave);
+            a.b(lbl_lp);
+            a.bind(lbl_done);
+            if has_max {
+                a.ldr_uimm(true, Reg::X3, Reg::SP, 32);
+                a.cmp_imm(true, Reg::X3, 0);
+                a.mov_imm32(Reg::X1, 1);
+                a.csel(true, Reg::X0, Reg::X1, Reg::XZR, Cond::Ne);
+            }
+            a.movz(false, SGP1, 0, 0);
+            a.b(lbl_leave);
+            a.bind(lbl_trap);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.bind(lbl_leave);
+            a.ldp_x(Reg::FP, Reg::LR, Reg::SP, 0);
+            a.add_imm(true, Reg::SP, Reg::SP, 1088);
+            a.ret();
+            if has_max {
+                a.bind(lbl_early0);
+                a.movz(true, Reg::X0, 0, 0);
+                a.movz(false, SGP1, 0, 0);
+                a.ret();
+            }
+        }
+        ("env", "gs_os_read_line") => {
+            zext_param(&mut a, Reg::X0, 0);
+            let lbl_lp = a.new_label();
+            let lbl_r1 = a.new_label();
+            let lbl_eof = a.new_label();
+            let lbl_nocr = a.new_label();
+            let lbl_skip_flush = a.new_label();
+            let lbl_ret0 = a.new_label();
+            let lbl_trap = a.new_label();
+            let lbl_leave = a.new_label();
+            // Frame 1120B: [SP+0]=FP/LR, [SP+16]=ctrl, [SP+24]=total, [SP+32]=got_any, [SP+40]=count, [SP+48]=byte, [SP+64..1088]=buf[1024]
+            a.sub_imm(true, Reg::SP, Reg::SP, 1120);
+            a.stp_x(Reg::FP, Reg::LR, Reg::SP, 0);
+            a.str_uimm(true, Reg::X0, Reg::SP, 16);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 24);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 32);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 40);
+            a.bind(lbl_lp);
+            a.ldr_uimm(true, Reg::X9, Reg::SP, 40);
+            let lbl_nf = a.new_label();
+            a.cmp_imm(true, Reg::X9, 1024);
+            a.b_cond(Cond::Lo, lbl_nf);
+            a.add_imm(true, Reg::X1, Reg::SP, 64);
+            a.ldrb_uimm(Reg::X3, Reg::X1, 1023);
+            let lbl_fa = a.new_label();
+            a.cmp_imm(false, Reg::X3, u16::from(b'\r'));
+            a.b_cond(Cond::Ne, lbl_fa);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.mov_imm32(Reg::X2, 1023);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.cbnz(false, SGP1, lbl_leave);
+            a.mov_imm32(Reg::X3, u32::from(b'\r'));
+            a.strb_uimm(Reg::X3, Reg::SP, 64);
+            a.mov_imm32(Reg::X9, 1);
+            a.str_uimm(true, Reg::X9, Reg::SP, 40);
+            a.b(lbl_nf);
+            a.bind(lbl_fa);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.add_imm(true, Reg::X1, Reg::SP, 64);
+            a.mov_imm32(Reg::X2, 1024);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.cbnz(false, SGP1, lbl_leave);
+            a.str_uimm(true, Reg::XZR, Reg::SP, 40);
+            a.bind(lbl_nf);
+            a.bind(lbl_r1);
+            a.movz(true, Reg::X0, 0, 0);
+            a.add_imm(true, Reg::X1, Reg::SP, 48);
+            a.mov_imm32(Reg::X2, 1);
+            emit_syscall(&mut a, SYS_READ);
+            a.mov_imm64(Reg::X3, (-4i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X3);
+            a.b_cond(Cond::Eq, lbl_r1);
+            a.cmp_imm(true, Reg::X0, 0);
+            a.b_cond(Cond::Le, lbl_eof);
+            a.mov_imm32(Reg::X3, 1);
+            a.str_uimm(true, Reg::X3, Reg::SP, 32);
+            a.ldrb_uimm(Reg::X4, Reg::SP, 48);
+            a.cmp_imm(false, Reg::X4, u16::from(b'\n'));
+            a.b_cond(Cond::Eq, lbl_eof);
+            a.ldr_uimm(true, Reg::X3, Reg::SP, 24);
+            a.add_imm(true, Reg::X3, Reg::X3, 1);
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X5),
+                None,
+                CTX_REG,
+                OFF_EXEC_OUTPUT_LIMIT,
+                SGP3,
+            );
+            a.cmp_r(true, Reg::X3, Reg::X5);
+            a.b_cond(Cond::Hi, lbl_trap);
+            a.str_uimm(true, Reg::X3, Reg::SP, 24);
+            a.ldr_uimm(true, Reg::X9, Reg::SP, 40);
+            a.add_imm(true, Reg::X1, Reg::SP, 64);
+            a.strb_reg(Reg::X4, Reg::X1, Reg::X9, false);
+            a.add_imm(true, Reg::X9, Reg::X9, 1);
+            a.str_uimm(true, Reg::X9, Reg::SP, 40);
+            a.b(lbl_lp);
+            a.bind(lbl_eof);
+            a.ldr_uimm(true, Reg::X3, Reg::SP, 32);
+            a.cbz(true, Reg::X3, lbl_ret0);
+            a.ldr_uimm(true, Reg::X9, Reg::SP, 40);
+            a.cbz(true, Reg::X9, lbl_skip_flush);
+            a.add_imm(true, Reg::X1, Reg::SP, 64);
+            a.sub_imm(true, Reg::X3, Reg::X9, 1);
+            a.ldrb_reg(Reg::X4, Reg::X1, Reg::X3, false);
+            a.cmp_imm(false, Reg::X4, u16::from(b'\r'));
+            a.b_cond(Cond::Ne, lbl_nocr);
+            a.mov_r(true, Reg::X9, Reg::X3);
+            a.bind(lbl_nocr);
+            a.cbz(true, Reg::X9, lbl_skip_flush);
+            a.ldr_uimm(true, Reg::X0, Reg::SP, 16);
+            a.add_imm(true, Reg::X1, Reg::SP, 64);
+            a.mov_r(true, Reg::X2, Reg::X9);
+            a.bl_reloc(A64RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.cbnz(false, SGP1, lbl_leave);
+            a.bind(lbl_skip_flush);
+            a.mov_imm32(Reg::X0, 1);
+            a.movz(false, SGP1, 0, 0);
+            a.b(lbl_leave);
+            a.bind(lbl_ret0);
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(false, SGP1, 0, 0);
+            a.b(lbl_leave);
+            a.bind(lbl_trap);
+            a.mov_imm32(SGP1, u32::from(TRAP_HOST));
+            a.bind(lbl_leave);
+            a.ldp_x(Reg::FP, Reg::LR, Reg::SP, 0);
+            a.add_imm(true, Reg::SP, Reg::SP, 1120);
+            a.ret();
+        }
         ("env", "gs_os_read_file") => {
             if ty.params.len() == 2 {
                 zext_param(&mut a, Reg::X1, 1);
@@ -3455,8 +4162,8 @@ pub fn emit_a64_helper_standalone_reserve_copy(module: &X64Module) -> Result<A64
 pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
     let mut a = A64Asm::new();
     let dot_off = a.add_local_rodata(1, b".\0");
-    // Frame 96B: [SP+0]=FP/LR, [SP+16]=X19/X20, [SP+32]=X21/X22, [SP+48]=X23/X24, [SP+64]=mode, [SP+72]=norm_len
-    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -96);
+    // Frame 112B: [SP+0]=FP/LR, [SP+16]=X19/X20, [SP+32]=X21/X22, [SP+48]=X23/X24, [SP+64]=mode, [SP+72]=norm_len, [SP+80]=split_at, [SP+88]=basename
+    a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -112);
     a.stp_x(Reg::X19, Reg::X20, Reg::SP, 16);
     a.stp_x(Reg::X21, Reg::X22, Reg::SP, 32);
     a.stp_x(Reg::X23, Reg::X24, Reg::SP, 48);
@@ -3515,7 +4222,11 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
     a.ldr_uimm(true, Reg::X4, Reg::SP, 64);
     a.cbz(true, Reg::X4, lbl_deny);
     a.cmp_imm(true, Reg::X4, 3);
-    a.b_cond(Cond::Hs, lbl_deny);
+    a.b_cond(Cond::Eq, lbl_deny);
+    a.cmp_imm(true, Reg::X4, 4);
+    a.b_cond(Cond::Eq, lbl_deny);
+    a.cmp_imm(true, Reg::X4, FS_OPEN_FILE_PARENT as u16);
+    a.b_cond(Cond::Eq, lbl_deny);
     a.bind(lbl_trail_ok);
 
     // 4. Lexical normalization into `X22 = policy + POLICY_OFF_SCRATCH_PATH`; X23 = out_len; X24 = src_idx.
@@ -3699,13 +4410,18 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
 
     a.bind(lbl_dmatch);
     // Build open_how at X2 + 0 = X21 + POLICY_OFF_OPEN_HOW
+    a.str_uimm(true, Reg::XZR, Reg::SP, 80); // split_at = 0
+    a.str_uimm(true, Reg::XZR, Reg::SP, 88); // basename = 0
     a.mov_imm64(Reg::X2, POLICY_OFF_OPEN_HOW as u64);
     a.add_r(true, Reg::X2, Reg::X21, Reg::X2);
     a.ldr_uimm(true, Reg::X3, Reg::SP, 64);
     let lbl_m2 = a.new_label();
     let lbl_m3 = a.new_label();
     let lbl_m4 = a.new_label();
+    let lbl_parent = a.new_label();
     let lbl_hr = a.new_label();
+    a.cmp_imm(true, Reg::X3, FS_OPEN_FILE_PARENT as u16);
+    a.b_cond(Cond::Hs, lbl_parent);
     a.cmp_imm(true, Reg::X3, 2);
     a.b_cond(Cond::Eq, lbl_m2);
     a.cmp_imm(true, Reg::X3, 3);
@@ -3732,6 +4448,42 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
         u64::from(O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW_A64 | O_CLOEXEC),
     );
     a.mov_imm32(Reg::X5, 0o644);
+    a.b(lbl_hr);
+
+    a.bind(lbl_parent);
+    // Reject mutating the grant root itself; otherwise split parent + basename.
+    a.adr_reloc(Reg::X4, A64RelocTarget::LocalRodata(dot_off));
+    a.cmp_r(true, Reg::X1, Reg::X4);
+    a.b_cond(Cond::Eq, lbl_dnext);
+    let lbl_sp_scan = a.new_label();
+    let lbl_sp_next = a.new_label();
+    let lbl_sp_split = a.new_label();
+    let lbl_sp_leaf = a.new_label();
+    let lbl_sp_done = a.new_label();
+    a.mov_r(true, Reg::X4, Reg::X1);
+    a.movz(true, Reg::X5, 0, 0); // last '/' ptr
+    a.bind(lbl_sp_scan);
+    a.ldrb_uimm(Reg::X6, Reg::X4, 0);
+    a.cbz(false, Reg::X6, lbl_sp_split);
+    a.cmp_imm(false, Reg::X6, u16::from(b'/'));
+    a.b_cond(Cond::Ne, lbl_sp_next);
+    a.mov_r(true, Reg::X5, Reg::X4);
+    a.bind(lbl_sp_next);
+    a.add_imm(true, Reg::X4, Reg::X4, 1);
+    a.b(lbl_sp_scan);
+    a.bind(lbl_sp_split);
+    a.cbz(true, Reg::X5, lbl_sp_leaf);
+    a.strb_uimm(Reg::XZR, Reg::X5, 0);
+    a.str_uimm(true, Reg::X5, Reg::SP, 80); // split_at
+    a.add_imm(true, Reg::X6, Reg::X5, 1);
+    a.str_uimm(true, Reg::X6, Reg::SP, 88); // basename
+    a.b(lbl_sp_done);
+    a.bind(lbl_sp_leaf);
+    a.str_uimm(true, Reg::X1, Reg::SP, 88);
+    a.adr_reloc(Reg::X1, A64RelocTarget::LocalRodata(dot_off));
+    a.bind(lbl_sp_done);
+    a.mov_imm64(Reg::X4, u64::from(O_PATH | O_DIRECTORY_A64 | O_CLOEXEC));
+    a.movz(true, Reg::X5, 0, 0);
 
     a.bind(lbl_hr);
     a.str_uimm(true, Reg::X4, Reg::X2, 0);
@@ -3744,6 +4496,13 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
     // X1 = rel_path, X2 = &open_how
     a.mov_imm32(Reg::X3, 24);
     emit_syscall(&mut a, SYS_OPENAT2);
+    let lbl_no_restore = a.new_label();
+    a.ldr_uimm(true, Reg::X4, Reg::SP, 80);
+    a.cbz(true, Reg::X4, lbl_no_restore);
+    a.mov_imm32(Reg::X5, u32::from(b'/'));
+    a.strb_uimm(Reg::X5, Reg::X4, 0);
+    a.bind(lbl_no_restore);
+    a.ldr_uimm(true, Reg::X2, Reg::SP, 88); // basename
     a.cmp_imm(true, Reg::X0, 0);
     a.b_cond(Cond::Lt, lbl_dnext);
 
@@ -3807,7 +4566,7 @@ pub fn emit_a64_helper_standalone_fs() -> Result<A64Asm, String> {
     a.ldp_x(Reg::X19, Reg::X20, Reg::SP, 16);
     a.ldp_x(Reg::X21, Reg::X22, Reg::SP, 32);
     a.ldp_x(Reg::X23, Reg::X24, Reg::SP, 48);
-    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 96);
+    a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 112);
     a.ret();
 
     a.finish()?;

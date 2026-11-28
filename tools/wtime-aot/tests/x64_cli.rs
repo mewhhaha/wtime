@@ -1851,3 +1851,345 @@ fn cli_guard_pages_validation_and_cache_keys() {
         );
     }
 }
+
+#[test]
+fn standalone_x64_goose_atomic_write_mkdir_and_sorted_list() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempRoot::new("wtime-aot-goose-fs");
+    let grant = root.path("grant");
+    let outside = root.path("outside");
+    fs::create_dir(&grant).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("target"), b"original").unwrap();
+    symlink(&outside, grant.join("escape")).unwrap();
+
+    let imports = [
+        ("goose", "print_i64", 0),
+        ("goose", "newline", 1),
+        ("goose", "write", 2),
+        ("env", "gs_os_make_dir", 3),
+        ("env", "gs_os_write_file_atomic", 4),
+        ("env", "gs_os_list_dir", 4),
+    ];
+    let mut import_section = vec![imports.len() as u8];
+    for (module, name, signature) in imports {
+        enc_str(&mut import_section, module);
+        enc_str(&mut import_section, name);
+        import_section.extend_from_slice(&[0, signature]);
+    }
+
+    const DATA_OFFSET: u16 = 256;
+    const OUTPUT_OFFSET: i64 = 4096;
+    let put_i64 = |bytes: &mut Vec<u8>, value| {
+        bytes.push(0x42);
+        leb_i64(bytes, value);
+    };
+    let mut text = Vec::new();
+    let mut start = Vec::new();
+    let mut push_slice = |code: &mut Vec<u8>, value: &str| {
+        let offset = i64::from(DATA_OFFSET) + text.len() as i64;
+        put_i64(code, ((value.len() as i64) << 32) | offset);
+        text.extend_from_slice(value.as_bytes());
+    };
+    let print_result = |bytes: &mut Vec<u8>, import| {
+        bytes.extend_from_slice(&[0x10, import, 0xad, 0x10, 0, 0x10, 1]);
+    };
+
+    push_slice(&mut start, "files/");
+    print_result(&mut start, 3);
+    for (path, value) in [
+        ("files/z", "old"),
+        ("files/b", "middle"),
+        ("files/a", "first"),
+        ("files/z", "new"),
+        ("files", "rename fails"),
+        ("escape/target", "denied"),
+        ("../outside/target", "denied"),
+    ] {
+        push_slice(&mut start, path);
+        push_slice(&mut start, value);
+        print_result(&mut start, 4);
+    }
+    push_slice(&mut start, "escape/new-dir");
+    print_result(&mut start, 3);
+    push_slice(&mut start, "files");
+    put_i64(&mut start, 0); // reserve ignores the control pointer
+    start.extend_from_slice(&[0x10, 5, 0x04, 0x40]); // if list_dir succeeded
+    put_i64(&mut start, OUTPUT_OFFSET);
+    start.extend_from_slice(&[0x41, 6, 0x10, 2, 0x0b]); // write "a\nb\nz\n"
+
+    let mut reserve = Vec::new();
+    put_i64(&mut reserve, OUTPUT_OFFSET);
+    let mut data = vec![1, 0, 0x41];
+    leb_i64(&mut data, i64::from(DATA_OFFSET));
+    data.push(0x0b);
+    leb_u32(&mut data, text.len() as u32);
+    data.extend(text);
+
+    let signatures: &[(&[u8], &[u8])] = &[
+        (&[0x7e], &[]),
+        (&[], &[]),
+        (&[0x7e, 0x7f], &[]),
+        (&[0x7e], &[0x7f]),
+        (&[0x7e, 0x7e], &[0x7f]),
+        (&[0x7e, 0x7e], &[0x7e]),
+    ];
+    let mut types = vec![signatures.len() as u8];
+    for (params, results) in signatures {
+        types.extend_from_slice(&[0x60, params.len() as u8]);
+        types.extend_from_slice(params);
+        types.push(results.len() as u8);
+        types.extend_from_slice(results);
+    }
+    let mut exports = vec![2];
+    enc_str(&mut exports, "goose.reserve");
+    exports.extend_from_slice(&[0, 6]);
+    enc_str(&mut exports, "_start");
+    exports.extend_from_slice(&[0, 7]);
+    let mut code = vec![2];
+    code.extend(enc_body(&[], &reserve));
+    code.extend(enc_body(&[], &start));
+    let wasm = wasm_module(&[
+        section(1, &types),
+        section(2, &import_section),
+        section(3, &[2, 5, 1]),
+        section(5, &[1, 0, 1]),
+        section(7, &exports),
+        section(10, &code),
+        section(11, &data),
+    ]);
+    let module = root.path("fs.wasm");
+    let binary = root.path("fs");
+    fs::write(&module, wasm).unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_wtime-aot"))
+        .arg(&module)
+        .arg("-o")
+        .arg(&binary)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{build:?}");
+
+    let run = || {
+        let mut command = Command::new(&binary);
+        command.current_dir(&grant);
+        command
+    };
+    let denied = run().output().unwrap();
+    assert!(denied.status.success(), "{denied:?}");
+    assert_eq!(denied.stdout, b"0\n0\n0\n0\n0\n0\n0\n0\n0\n");
+    assert!(!grant.join("files").exists());
+
+    let allowed = run().arg("--allow-files").arg(&grant).output().unwrap();
+    assert!(allowed.status.success(), "{allowed:?}");
+    assert_eq!(allowed.stdout, b"1\n1\n1\n1\n1\n0\n0\n0\n0\na\nb\nz\n");
+    assert_eq!(fs::read(grant.join("files/z")).unwrap(), b"new");
+    assert_eq!(fs::read(outside.join("target")).unwrap(), b"original");
+    assert!(!outside.join("new-dir").exists());
+    assert_eq!(fs::read_dir(&grant).unwrap().count(), 2);
+    assert_eq!(fs::read_dir(grant.join("files")).unwrap().count(), 3);
+}
+
+#[test]
+fn standalone_x64_goose_remove_rename_random_sleep_stdin_and_f64_digits() {
+    use std::io::Write as _;
+    use std::os::unix::fs::symlink;
+    use std::process::Stdio;
+
+    let root = TempRoot::new("wtime-aot-goose-os-extra");
+    let grant = root.path("grant");
+    let outside = root.path("outside");
+    fs::create_dir(&grant).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(grant.join("a.txt"), b"hello").unwrap();
+    fs::create_dir(grant.join("empty_dir")).unwrap();
+    fs::write(outside.join("keep.txt"), b"safe").unwrap();
+    symlink(&outside, grant.join("escape")).unwrap();
+
+    // Imports:
+    // 0: goose.print_i64(i64) -> ()
+    // 1: goose.newline() -> ()
+    // 2: goose.write(i64, i32) -> ()
+    // 3: env.gs_os_rename_file(i64, i64) -> i32
+    // 4: env.gs_os_remove_file(i64) -> i32
+    // 5: env.gs_os_remove_dir(i64) -> i32
+    // 6: env.gs_os_random_u64() -> i64
+    // 7: env.gs_os_random_bytes(i64) -> i32
+    // 8: env.gs_os_sleep_ms(i64) -> ()
+    // 9: env.gs_trim_memory() -> i32
+    // 10: env.gs_os_read_line(i64) -> i32
+    // 11: env.gs_os_read_stdin_max(i64, i64) -> i32
+    // 12: env.gs_f64_digits(f64, i64, i32) -> i64
+    let imports = [
+        ("goose", "print_i64", 0),
+        ("goose", "newline", 1),
+        ("goose", "write", 2),
+        ("env", "gs_os_rename_file", 3),
+        ("env", "gs_os_remove_file", 4),
+        ("env", "gs_os_remove_dir", 4),
+        ("env", "gs_os_random_u64", 5),
+        ("env", "gs_os_random_bytes", 4),
+        ("env", "gs_os_sleep_ms", 0),
+        ("env", "gs_trim_memory", 6),
+        ("env", "gs_os_read_line", 4),
+        ("env", "gs_os_read_stdin_max", 3),
+        ("env", "gs_f64_digits", 7),
+    ];
+    let mut import_section = vec![imports.len() as u8];
+    for (module, name, sig) in imports {
+        enc_str(&mut import_section, module);
+        enc_str(&mut import_section, name);
+        import_section.extend_from_slice(&[0, sig]);
+    }
+
+    const DATA_OFFSET: u16 = 256;
+    const OUT_BUF: i64 = 4096;
+    const RAND_BUF: i64 = 8192;
+    const DIGITS_BUF: i64 = 8256;
+    const POINT_OFF: i32 = 8320;
+    let put_i64 = |bytes: &mut Vec<u8>, value: i64| {
+        bytes.push(0x42);
+        leb_i64(bytes, value);
+    };
+    let mut text = Vec::new();
+    let mut start = Vec::new();
+    let mut push_slice = |code: &mut Vec<u8>, value: &str| {
+        let offset = i64::from(DATA_OFFSET) + text.len() as i64;
+        put_i64(code, ((value.len() as i64) << 32) | offset);
+        text.extend_from_slice(value.as_bytes());
+    };
+    let print_i32_res = |bytes: &mut Vec<u8>, import: u8| {
+        bytes.extend_from_slice(&[0x10, import, 0xad, 0x10, 0, 0x10, 1]);
+    };
+
+    // rename a.txt -> b.txt (1), escape/keep.txt -> c.txt (0)
+    push_slice(&mut start, "a.txt");
+    push_slice(&mut start, "b.txt");
+    print_i32_res(&mut start, 3);
+    push_slice(&mut start, "escape/keep.txt");
+    push_slice(&mut start, "c.txt");
+    print_i32_res(&mut start, 3);
+    // remove b.txt (1), escape/keep.txt (0), empty_dir (1)
+    push_slice(&mut start, "b.txt");
+    print_i32_res(&mut start, 4);
+    push_slice(&mut start, "escape/keep.txt");
+    print_i32_res(&mut start, 4);
+    push_slice(&mut start, "empty_dir");
+    print_i32_res(&mut start, 5);
+    // sleep_ms(-1), trim_memory() -> 0
+    put_i64(&mut start, -1);
+    start.extend_from_slice(&[0x10, 8]);
+    print_i32_res(&mut start, 9);
+    // random_u64() != 0 || true, random_bytes(16) -> 1
+    start.extend_from_slice(&[0x10, 6, 0x1a]); // call + drop
+    put_i64(&mut start, (16i64 << 32) | RAND_BUF);
+    print_i32_res(&mut start, 7);
+    // read_line(control=OUT_BUF) -> 1, writes "hi" to OUT_BUF
+    put_i64(&mut start, OUT_BUF);
+    print_i32_res(&mut start, 10);
+    // write "hi\n"
+    put_i64(&mut start, OUT_BUF);
+    start.extend_from_slice(&[0x41, 2, 0x10, 2, 0x10, 1]);
+    // read_stdin_max(control=OUT_BUF+64, max=3) -> 1, writes "abc"
+    put_i64(&mut start, OUT_BUF + 64);
+    put_i64(&mut start, 3);
+    print_i32_res(&mut start, 11);
+    put_i64(&mut start, OUT_BUF + 64);
+    start.extend_from_slice(&[0x41, 3, 0x10, 2, 0x10, 1]);
+    // gs_f64_digits(1.5e300, DIGITS_BUF[..17], POINT_OFF) -> 2, digits="15", point=301
+    start.push(0x44);
+    start.extend_from_slice(&1.5e300f64.to_bits().to_le_bytes());
+    put_i64(&mut start, (17i64 << 32) | DIGITS_BUF);
+    start.push(0x41);
+    leb_i64(&mut start, i64::from(POINT_OFF));
+    start.extend_from_slice(&[0x10, 12, 0x10, 0, 0x10, 1]); // print len (2)
+    put_i64(&mut start, DIGITS_BUF);
+    start.extend_from_slice(&[0x41, 2, 0x10, 2, 0x10, 1]); // write "15"
+    start.push(0x41);
+    leb_i64(&mut start, i64::from(POINT_OFF));
+    start.extend_from_slice(&[0x29, 0x03, 0x00, 0x10, 0, 0x10, 1]); // i64.load point (301)
+
+    // goose.reserve(control, _len) -> control
+    let reserve = vec![0x20, 0];
+    let mut data = vec![1, 0, 0x41];
+    leb_i64(&mut data, i64::from(DATA_OFFSET));
+    data.push(0x0b);
+    leb_u32(&mut data, text.len() as u32);
+    data.extend(text);
+
+    let signatures: &[(&[u8], &[u8])] = &[
+        (&[0x7e], &[]),                 // 0: (i64) -> ()
+        (&[], &[]),                     // 1: () -> ()
+        (&[0x7e, 0x7f], &[]),           // 2: (i64, i32) -> ()
+        (&[0x7e, 0x7e], &[0x7f]),       // 3: (i64, i64) -> i32
+        (&[0x7e], &[0x7f]),             // 4: (i64) -> i32
+        (&[], &[0x7e]),                 // 5: () -> i64
+        (&[], &[0x7f]),                 // 6: () -> i32
+        (&[0x7c, 0x7e, 0x7f], &[0x7e]), // 7: (f64, i64, i32) -> i64
+        (&[0x7e, 0x7e], &[0x7e]),       // 8: reserve (i64, i64) -> i64
+    ];
+    let mut types = vec![signatures.len() as u8];
+    for (params, results) in signatures {
+        types.extend_from_slice(&[0x60, params.len() as u8]);
+        types.extend_from_slice(params);
+        types.push(results.len() as u8);
+        types.extend_from_slice(results);
+    }
+    let mut exports = vec![2];
+    enc_str(&mut exports, "goose.reserve");
+    exports.extend_from_slice(&[0, 13]);
+    enc_str(&mut exports, "_start");
+    exports.extend_from_slice(&[0, 14]);
+    let mut code = vec![2];
+    code.extend(enc_body(&[], &reserve));
+    code.extend(enc_body(&[], &start));
+    let wasm = wasm_module(&[
+        section(1, &types),
+        section(2, &import_section),
+        section(3, &[2, 8, 1]),
+        section(5, &[1, 0, 1]),
+        section(7, &exports),
+        section(10, &code),
+        section(11, &data),
+    ]);
+    let module = root.path("os_extra.wasm");
+    let binary = root.path("os_extra");
+    let binary_a64 = root.path("os_extra.a64");
+    fs::write(&module, wasm).unwrap();
+    for (backend, out) in [("x64", &binary), ("aarch64", &binary_a64)] {
+        let build = Command::new(env!("CARGO_BIN_EXE_wtime-aot"))
+            .arg(&module)
+            .arg("-o")
+            .arg(out)
+            .args(["--backend", backend])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{backend} build failed: {build:?}");
+    }
+    let mut child = Command::new(&binary)
+        .current_dir(&grant)
+        .args(["--allow-files"])
+        .arg(&grant)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"hi\r\nabcdef")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "1\n0\n1\n0\n1\n0\n1\n1\nhi\n1\nabc\n2\n15\n301\n"
+    );
+    assert!(!grant.join("a.txt").exists());
+    assert!(!grant.join("b.txt").exists());
+    assert!(!grant.join("empty_dir").exists());
+    assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"safe");
+}

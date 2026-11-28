@@ -152,6 +152,9 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     stdout/Ryū shortest round-trip float formatting (`goose::*`),
     `env::bench_input*`, and `8 GiB + 64 KiB` guard-page `memory32` bounds
     checks (zero signal handlers in `--blot-cdylib`).
+  The standalone x64 Goose host also supports atomic file replacement,
+  directory creation and sorted listing through `--allow-files`, plus
+  `getcwd` with a file grant and the `frexp` / `ldexp` math imports.
 
 The CLI builds with the selected backend. For `--backend x64`, an admission
 rejection exits with code `4`. I/O failures, timeouts, and internal errors exit

@@ -50,7 +50,12 @@ impl PrivateMemoryData {
                 "memory initial size ({init_bytes} B) exceeds Store limit ({max_bytes_limit} B)"
             )));
         }
-        let eff_max_pages = ty.maximum().unwrap_or(MAX_MEM32_PAGES).min(MAX_MEM32_PAGES);
+        let max_cap_pages = if ty.is_64() {
+            (max_bytes_limit as u64 / WASM_PAGE_BYTES).max(MAX_MEM32_PAGES)
+        } else {
+            MAX_MEM32_PAGES
+        };
+        let eff_max_pages = ty.maximum().unwrap_or(max_cap_pages).min(max_cap_pages);
         let needed_reserve = (eff_max_pages as usize)
             .saturating_mul(WASM_PAGE_BYTES as usize)
             .saturating_add(32 << 20);

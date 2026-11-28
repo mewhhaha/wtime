@@ -1775,11 +1775,12 @@ fn compile_wasm_to_aarch64_detailed(
     };
     let needs_float_fmt = opts.target == X64Target::StandaloneExec
         && module.imports.iter().any(|(m, f)| {
-            m == "goose"
+            (m == "goose"
                 && matches!(
                     f.as_str(),
                     "print_f64" | "print_f32" | "format_f64" | "format_f32"
-                )
+                ))
+                || (m == "env" && f == "gs_f64_digits")
         });
     if needs_float_fmt {
         helper_asms.push((
@@ -1797,6 +1798,10 @@ fn compile_wasm_to_aarch64_detailed(
                         | "gs_os_read_file"
                         | "gs_os_write_file"
                         | "gs_os_append_file"
+                        | "gs_os_make_dir"
+                        | "gs_os_remove_file"
+                        | "gs_os_remove_dir"
+                        | "gs_os_rename_file"
                 )
         });
     if needs_standalone_fs {
@@ -1807,7 +1812,16 @@ fn compile_wasm_to_aarch64_detailed(
     }
     let needs_standalone_reserve = opts.target == X64Target::StandaloneExec
         && module.imports.iter().any(|(m, f)| {
-            m == "env" && matches!(f.as_str(), "gs_os_arg" | "gs_os_getenv" | "gs_os_read_file")
+            m == "env"
+                && matches!(
+                    f.as_str(),
+                    "gs_os_arg"
+                        | "gs_os_getenv"
+                        | "gs_os_read_file"
+                        | "gs_os_read_line"
+                        | "gs_os_read_stdin"
+                        | "gs_os_read_stdin_max"
+                )
         });
     if needs_standalone_reserve {
         helper_asms.push((
