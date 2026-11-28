@@ -51,5 +51,5 @@
     "crates/wtime-runtime/tests/fixtures/feature_profiles/wide_arithmetic.wasm": "5f8b0ed57d7e495b1fa805fd68976051f2bd1cb08f45be6f5e4220479bfe9b4a"
   },
   "core_spec_commit": "7e9fb78c63d65018cc111422f657947b3df80d7b",
-  "target_sha256": "458aa015829806053f82c4ffc9786c2d8988e1a15953fdc16897fa9badffe966"
+  "target_sha256": "dc902677b788ddb52151c6b38027c758eefe072aebadd8e49753f99e9e92706a"
 }
