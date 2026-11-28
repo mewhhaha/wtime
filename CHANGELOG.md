@@ -2,6 +2,55 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.15] - 2026-11-28
+
+`wtime-aot` GC-aware SSA optimization, live GC-ref register allocation across
+bump-alloc safepoints, and `wtime-aot-host` generational copying GC +
+`StoreSnapshot` binary heap snapshots (released from `feat/aarch64-store-ci`
+prior to the unified `v0.1.16` `main` release). Core crates (`wtime-types`,
+`wtime-decode`, `wtime-validate`, `wtime-runtime`) and `wtime-cli` remain
+`#![forbid(unsafe_code)]` with zero external production dependencies, and
+`tools/wtime-aot` remains `#![forbid(unsafe_code)]` with zero external
+production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **GC-aware inlining, alias separation, and read-only GC GVN/CSE (`x64`)**:
+  - Enabled inlining of Wasm-GC helpers (`StructGet`/`StructSet`/`StructNew`,
+    `ArrayGet`/`ArraySet`/`ArrayLen`, `RefTest`/`RefCast`/`RefEq`/`I31*`).
+  - Separated linear-memory and GC-heap alias classes so linear stores never
+    clobber cached GC values and GC stores never clobber linear loads.
+  - Added dominator-scoped GC GVN/CSE (`StructGet`/`ArrayLen`/immutable
+    `ArrayGet`/`RefTest`/`RefEq`), `StructNew`/`StructSet` store-to-load
+    forwarding, and redundant `RefCast`/`RefTest` elimination.
+- **Register allocation of traced GC/Extern refs across bump-alloc safepoints (`x64` & `aarch64`)**:
+  - Allowed traced GC/Extern refs live only across inline bump-allocation
+    safepoints to live in callee-saved registers (`SafepointPlan::{gc_regs,
+    ext_regs}`), spilling/reloading them exclusively in out-of-line cold GC
+    stubs with zero fast-path overhead and clean OOM `rsp` restoration.
+- **Generational card-marking write barriers (`x64` & `aarch64`, `STORE_ABI_VERSION = 2`)**:
+  - Emitted inline Old-to-Young 512-byte card-marking write barriers on
+    `StructSet`, `ArraySet`, `ArrayFill`, `ArrayCopy`, and `ArrayInitElem`
+    against `StoreState::{gc_nursery_base, gc_arena_base, gc_card_table_base}`.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- **Generational Nursery + 512 B Card-Table Minor GC**:
+  - Partitioned the 16 GiB virtual GC arena into `6.5 GiB` `OLD_A` + `6.5 GiB`
+    `OLD_B` + `3 GiB` `NURSERY` + `26 MiB` `CARD_TABLE` (1 byte per 512 B Old
+    card), supporting three concurrent 2 GiB arrays while preserving compact
+    32-bit raw GC handles.
+  - Added zero-syscall Young-Nursery Minor GC (`collect_minor_gc`) scanning
+    only dirty Old cards via `old_card_first_obj` in 8-card `u64` chunks,
+    preserving WeakMap/ephemeron/WeakRef semantics without copying Old Space
+    or sweeping `extern_arena`, plus `Store::gc_minor_count()` /
+    `Store::gc_major_count()`.
+- **Binary `StoreSnapshot` (`capture_snapshot` / `restore_snapshot`)**:
+  - Added shareable `StoreSnapshot` capturing compacted GC heap bytes,
+    precomputed `gc_ref_offsets` and `func_ref_patches`, sparse non-zero 4 KiB
+    linear/shared memory pages, instance `ctx_buf` tails, passive `elem_buf`s,
+    dynamic tables, standalone globals, weak/ephemeron tables, and caller
+    `OwnedRooted<EqRef>` roots, plus `Store::rebind_ephemeron` /
+    `Store::rebind_weak_ref`.
+
 ## [0.1.14] - 2026-11-28
 
 Unified `main` release merging `v0.1.13` (`wtime-aot` GC safepoint dedup /

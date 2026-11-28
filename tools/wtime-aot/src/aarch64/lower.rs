@@ -18,7 +18,10 @@ use super::simd_lower::{
     emit_a64_v128_bin, emit_a64_v128_shift, emit_a64_v128_shuffle, emit_a64_v128_to_i32,
     emit_a64_v128_un,
 };
-use crate::x64::gc_rt::{GC_OFF_ALLOC_LIMIT, GC_OFF_ALLOC_PTR, GC_OFF_FROM_BASE, GC_OFF_FROM_CAP};
+use crate::x64::gc_rt::{
+    GC_OFF_ALLOC_LIMIT, GC_OFF_ALLOC_PTR, GC_OFF_FROM_BASE, GC_OFF_FROM_CAP, GC_OFF_TO_BASE,
+    GC_OFF_TO_CAP,
+};
 use crate::x64::ir::{
     AtomicRmwOp, AtomicWidth, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, GcFieldLoadKind,
     GcHeapTarget, IntBinOp, IrFunc, LoadKind, Op, SimdLaneKind, SimdSplatKind, StoreKind, Term,
@@ -2157,6 +2160,32 @@ impl<'a> LowerA64<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Emits the generational GC card-marking write barrier for `StoreCdylib` on AArch64.
+    /// Uses only `SGP1` and `SGP3` (never clobbers `obj_reg` or `SGP2`).
+    fn emit_store_gc_write_barrier(&mut self, obj_reg: Reg, check_null: bool) {
+        if !self.layout.is_store {
+            return;
+        }
+        debug_assert_ne!(obj_reg, SGP1);
+        debug_assert_ne!(obj_reg, SGP3);
+        let lbl_done = self.asm.new_label();
+        if check_null {
+            self.asm.cbz(true, obj_reg, lbl_done);
+        }
+        self.asm.ldr_uimm(true, SGP1, CTX_REG, OFF_STORE_PTR as u32);
+        self.asm.ldr_uimm(true, SGP3, SGP1, GC_OFF_TO_CAP as u32);
+        self.asm.cmp_r(true, obj_reg, SGP3);
+        self.asm.b_cond(Cond::Hs, lbl_done);
+        self.asm.ldr_uimm(true, SGP3, SGP1, GC_OFF_FROM_BASE as u32);
+        self.asm.sub_r(true, SGP3, obj_reg, SGP3);
+        self.asm.lsr_imm(true, SGP3, SGP3, 9);
+        self.asm.ldr_uimm(true, SGP1, SGP1, GC_OFF_TO_BASE as u32);
+        self.asm.add_r(true, SGP1, SGP1, SGP3);
+        self.asm.movz(false, SGP3, 1, 0);
+        self.asm.strb_uimm(SGP3, SGP1, 0);
+        self.asm.bind(lbl_done);
     }
 
     /// Stores a GC struct/array field of `storage` kind from SSA `val` into `[base + off]`.
@@ -7692,6 +7721,9 @@ impl<'a> LowerA64<'a> {
                 let or = self.gp_read(obj, SGP2);
                 self.asm.cbz(true, or, trap);
                 self.emit_gc_storage_store(or, fd.offset as i32, fd.storage, val);
+                if matches!(fd.storage, GcStorageKind::GcRef | GcStorageKind::ExternRef) {
+                    self.emit_store_gc_write_barrier(or, false);
+                }
             }
             Op::ArrayNew { ty, init, len } => {
                 let r = res.unwrap();
@@ -8036,6 +8068,12 @@ impl<'a> LowerA64<'a> {
                 self.asm.add_imm(true, SGP1, SGP1, 8);
                 self.asm.add_r(true, SGP2, ar, SGP1);
                 self.emit_gc_storage_store(SGP2, 0, elem, val);
+                if self.layout.is_store
+                    && matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef)
+                {
+                    let ar_wb = self.gp_read(arr, SGP2);
+                    self.emit_store_gc_write_barrier(ar_wb, false);
+                }
             }
             Op::ArrayLen(arr) => {
                 let r = res.unwrap();
@@ -8089,6 +8127,9 @@ impl<'a> LowerA64<'a> {
                         emit_parallel_moves(&mut self.asm, &moves);
                     }
                 }
+                if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef) {
+                    self.emit_store_gc_write_barrier(Reg::X0, true);
+                }
                 self.asm.mov_imm32(Reg::X4, elem_sz);
                 self.asm
                     .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_FILL));
@@ -8105,8 +8146,8 @@ impl<'a> LowerA64<'a> {
                 ..
             } => {
                 let gt = self.module.gc_type(dst_ty);
-                let elem_sz = match gt.composite {
-                    GcCompositeInfo::Array { elem, .. } => elem.byte_size(),
+                let (elem, elem_sz) = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => (elem, elem.byte_size()),
                     _ => return Err("aarch64: ArrayCopy on non-array type".into()),
                 };
                 let moves = [
@@ -8125,6 +8166,9 @@ impl<'a> LowerA64<'a> {
                     (MoveLoc::Gp(Reg::X4), MoveLoc::from(self.loc(len)), Ty::I32),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
+                if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef) {
+                    self.emit_store_gc_write_barrier(Reg::X0, true);
+                }
                 self.asm.mov_imm32(Reg::X5, elem_sz);
                 self.asm
                     .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_COPY));
@@ -8159,13 +8203,17 @@ impl<'a> LowerA64<'a> {
                 self.asm.cbnz(false, SGP1, prop);
             }
             Op::ArrayInitElem {
+                ty,
                 elem,
                 arr,
                 dst,
                 src,
                 len,
-                ..
             } => {
+                let elem_storage = match self.module.gc_type(ty).composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("aarch64: ArrayInitElem on non-array type".into()),
+                };
                 let moves = [
                     (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(arr)), Ty::I64),
                     (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(dst)), Ty::I32),
@@ -8173,6 +8221,12 @@ impl<'a> LowerA64<'a> {
                     (MoveLoc::Gp(Reg::X3), MoveLoc::from(self.loc(len)), Ty::I32),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
+                if matches!(
+                    elem_storage,
+                    GcStorageKind::GcRef | GcStorageKind::ExternRef
+                ) {
+                    self.emit_store_gc_write_barrier(Reg::X0, true);
+                }
                 self.asm.mov_imm32(Reg::X4, elem);
                 self.asm
                     .bl_reloc(A64RelocTarget::Helper(HELPER_GC_ARRAY_INIT_ELEM));

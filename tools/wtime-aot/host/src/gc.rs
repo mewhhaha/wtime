@@ -22,18 +22,29 @@ use crate::signal::InterruptHandle;
 use crate::store::{AsContext, AsContextMut, StoreInner};
 use crate::types::{ArrayType, CanonComposite, CanonTypeInfo, ExnType, StructType, ValType};
 
-/// Each semi-space reserves 8 GiB of virtual address space inside a single contiguous 16 GiB arena:
-/// - Space A: `[arena_base + 64, arena_base + 8 GiB)`
-/// - Space B: `[arena_base + 8 GiB + 64, arena_base + 16 GiB)`
+/// Generational GC arena layout (16 GiB object address space + 26 MiB card table):
+/// - `OLD_A`:      `[arena_base + 0 GiB + 64,    arena_base + 6.5 GiB)` (6.5 GiB Old semi-space A)
+/// - `OLD_B`:      `[arena_base + 6.5 GiB + 64,  arena_base + 13 GiB)`  (6.5 GiB Old semi-space B)
+/// - `NURSERY`:    `[arena_base + 13 GiB + 64,   arena_base + 16 GiB)`  (3 GiB young bump-alloc space)
+/// - `CARD_TABLE`: `[arena_base + 16 GiB,        arena_base + 16 GiB + 26 MiB)` (1 B / 512 B Old card)
 ///
 /// Skipping the first 64 bytes of each space guarantees every live 8-byte-aligned GC object pointer
 /// `p` has an offset `off = p - arena_base` in `[64, 16 GiB)` with `off & 7 == 0`. Encoding its
 /// 32-bit raw handle as `raw = (off >> 2) as u32` (decoded as `arena_base + ((raw as u64) << 2)`)
-/// guarantees `raw != 0`, `raw & 1 == 0` (distinct from null `0` and `i31` `bit 0 == 1`), and
-/// moving between Space A (`off < 8 GiB`) and Space B (`off >= 8 GiB`) flips bit 31 so every
-/// surviving object changes its raw handle across collection!
-pub const SEMI_SPACE_RESERVE_BYTES: usize = 8usize << 30; // 8 GiB
-const ARENA_TOTAL_BYTES: usize = SEMI_SPACE_RESERVE_BYTES * 2; // 16 GiB
+/// guarantees `raw != 0`, `raw & 1 == 0` (distinct from null `0` and `i31` `bit 0 == 1`).
+/// `OLD_A`, `OLD_B`, and `NURSERY` occupy disjoint address ranges, so both Nursery promotion and
+/// Major GC (`OLD_A <-> OLD_B`) always move every surviving object to a distinct raw handle.
+pub const SEMI_SPACE_RESERVE_BYTES: usize = 13usize << 29; // 6.5 GiB per Old semi-space
+const OLD_A_OFFSET: usize = 0;
+const OLD_B_OFFSET: usize = SEMI_SPACE_RESERVE_BYTES; // 6.5 GiB
+const NURSERY_OFFSET: usize = SEMI_SPACE_RESERVE_BYTES * 2; // 13 GiB
+const NURSERY_RESERVE_BYTES: usize = 3usize << 30; // 3 GiB Young Nursery
+const CARD_TABLE_OFFSET: usize = NURSERY_OFFSET + NURSERY_RESERVE_BYTES; // 16 GiB
+const CARD_SHIFT: usize = 9; // 512 bytes per card
+const CARD_BYTES: usize = 1usize << CARD_SHIFT;
+const OLD_SPACE_CARDS_BYTES: usize = SEMI_SPACE_RESERVE_BYTES >> CARD_SHIFT; // 13 MiB per Old space
+pub(crate) const GC_ADDR_RANGE_BYTES: usize = CARD_TABLE_OFFSET; // 16 GiB (OLD_A + OLD_B + NURSERY)
+const ARENA_TOTAL_BYTES: usize = CARD_TABLE_OFFSET + OLD_SPACE_CARDS_BYTES * 2; // 16 GiB + 26 MiB
 const SPACE_START_PAD: usize = 64;
 
 /// A 31-bit signed integer stored unboxed in Wasm GC `i31ref` slots (`(val << 1) | 1`).
@@ -204,27 +215,42 @@ impl Drop for StoreExnBox {
     }
 }
 
-/// Per-`Store` dual-semi-space Cheney GC heap + root tables + Weak/Ephemeron/Extern arenas.
+/// Per-`Store` generational GC heap (Young Nursery + dual-semi-space Old Space + 512 B card table)
+/// plus root tables and Weak/Ephemeron/Extern arenas.
 pub(crate) struct GcHeap {
     pub(crate) arena_base: usize,
-    /// Which half is currently active (`false` = Space A @ +0, `true` = Space B @ +8 GiB).
-    pub(crate) active_is_b: bool,
-    /// Initial committed bytes of a semi-space (floor when shrinking back after bursts).
+    /// Which Old semi-space is currently active (`false` = `OLD_A` @ +0, `true` = `OLD_B` @ +4 GiB).
+    pub(crate) old_active_is_b: bool,
+    /// Initial committed bytes of Old Space (floor when shrinking back after bursts).
     pub(crate) init_cap: usize,
-    /// Committed bytes of the active semi-space (aligned to 4 KiB).
-    pub(crate) from_cap: usize,
-    /// Hard cap per semi-space (bounded by `StoreLimits` & `SEMI_SPACE_RESERVE_BYTES - 4096`).
+    /// Active Old Space capacity (4 KiB-aligned, bounded by `heap_cap`).
+    pub(crate) old_cap: usize,
+    /// Active Old Space bump pointer (`[active_old_base() .. active_old_base() + old_cap]`).
+    pub(crate) old_alloc_ptr: u64,
+    /// Hard cap for live heap + request bytes (bounded by `StoreLimits` & `SEMI_SPACE_RESERVE_BYTES - 4096`).
     pub(crate) heap_cap: usize,
-    /// Currently committed RW prefix bytes (4 KiB-aligned) of Space A and Space B.
-    /// Steady-state bump-alloc GCs keep both semi-spaces warm up to `init_cap` to eliminate
-    /// per-GC `mprotect` / `MADV_DONTNEED` kernel `mmap_lock` and cross-core TLB shootdowns.
-    pub(crate) space_a_commit: usize,
-    pub(crate) space_b_commit: usize,
-    /// High-water byte offset (4 KiB-aligned, relative to space start) that may hold non-zero
-    /// bytes from prior cycles. Pages strictly at or beyond this watermark are guaranteed OS-zeroed.
-    pub(crate) space_a_dirty: usize,
-    pub(crate) space_b_dirty: usize,
-    /// Active interrupt handle to keep GC heap region registered for `mprotect`.
+    /// Currently committed RW prefix bytes (4 KiB-aligned) of `OLD_A` and `OLD_B`.
+    pub(crate) old_a_commit: usize,
+    pub(crate) old_b_commit: usize,
+    /// Currently committed RW prefix bytes (4 KiB-aligned) of `OLD_A` and `OLD_B` card tables.
+    pub(crate) old_a_card_commit: usize,
+    pub(crate) old_b_card_commit: usize,
+    /// For each 512-byte card in the active Old Space, the byte offset (`0..511`) of the first
+    /// object header starting inside that card, or `u16::MAX` if no object header starts in it.
+    pub(crate) old_card_first_obj: Vec<u16>,
+    /// Steady-state Young Nursery capacity (4 KiB-aligned, `32 KiB..=1 MiB`).
+    pub(crate) nursery_init_cap: usize,
+    /// Current Young Nursery capacity (may grow temporarily for single allocations `> nursery_init_cap`).
+    pub(crate) nursery_cap: usize,
+    /// Currently committed RW prefix bytes (4 KiB-aligned) of the Young Nursery.
+    pub(crate) nursery_commit: usize,
+    /// High-water 4 KiB-aligned dirty byte offset (relative to `nursery_start()`) that may hold
+    /// non-zero bytes from prior cycles; pages at/beyond this offset are guaranteed OS-zeroed.
+    pub(crate) nursery_dirty: usize,
+    /// Count of Minor (nursery-only) and Major (full old+nursery) collections.
+    pub(crate) minor_gc_count: u64,
+    pub(crate) major_gc_count: u64,
+    /// Active interrupt handle to keep GC heap regions registered for `mprotect`.
     pub(crate) interrupt: InterruptHandle,
     /// Generational host root table (`Rooted` & `OwnedRooted`).
     pub(crate) host_roots: Vec<HostRootSlot>,
@@ -239,9 +265,9 @@ pub(crate) struct GcHeap {
     /// Generational `GcEphemeron` table.
     pub(crate) ephemerons: Vec<EphemeronEntry>,
     pub(crate) ephemerons_free: Vec<u32>,
-    /// Set of active-space addresses of WeakMap reference arrays registered via `register_table_raw`.
+    /// Set of active-heap addresses of WeakMap reference arrays registered via `register_table_raw`.
     pub(crate) weak_tables: HashSet<u64>,
-    /// Arena of host-owned `ExternRef` payloads (swept after ephemeron fixed-point on every GC).
+    /// Arena of host-owned `ExternRef` payloads (swept after ephemeron fixed-point on Major GC).
     pub(crate) extern_arena: Vec<ExternArenaSlot>,
     pub(crate) extern_free: Vec<u32>,
     /// All Store-allocated `StoreExnObject`s (kept alive while Store lives, traced during GC).
@@ -252,8 +278,9 @@ pub(crate) struct GcHeap {
 impl Drop for GcHeap {
     fn drop(&mut self) {
         if self.arena_base != 0 {
-            self.interrupt.remove_region(self.space_a_start());
-            self.interrupt.remove_region(self.space_b_start());
+            self.interrupt.remove_region(self.old_space_start(false));
+            self.interrupt.remove_region(self.old_space_start(true));
+            self.interrupt.remove_region(self.nursery_start());
             unsafe {
                 let _ = libc::munmap(self.arena_base as *mut libc::c_void, ARENA_TOTAL_BYTES);
             }
@@ -270,6 +297,9 @@ impl GcHeap {
         let max_allowed = SEMI_SPACE_RESERVE_BYTES - 4096;
         let heap_cap = heap_cap.clamp(64 * 1024, max_allowed);
         let init_cap = ((init_bytes.min(heap_cap) + 4095) & !4095).max(64 * 1024);
+        let nursery_init_cap =
+            (((init_cap / 2).clamp(32 * 1024, 1024 * 1024).min(heap_cap) + 4095) & !4095)
+                .max(32 * 1024);
 
         let base = unsafe {
             libc::mmap(
@@ -285,33 +315,64 @@ impl GcHeap {
             return Err(Error::msg("failed to reserve 16 GiB GC virtual arena"));
         }
         let arena_base = base as usize;
-        // Commit Space A `[arena_base, arena_base + SPACE_START_PAD + init_cap)`.
-        let commit_len = (SPACE_START_PAD + init_cap + 4095) & !4095;
-        let rc = unsafe {
+
+        // Commit `OLD_A`, its 512-byte card table, and the Young Nursery.
+        let old_a_commit = (SPACE_START_PAD + init_cap + 4095) & !4095;
+        let old_a_card_commit = ((old_a_commit >> CARD_SHIFT) + 4095) & !4095;
+        let nursery_commit = (SPACE_START_PAD + nursery_init_cap + 4095) & !4095;
+        let nursery_start = arena_base + NURSERY_OFFSET;
+        let card_a_start = arena_base + CARD_TABLE_OFFSET;
+
+        let rc1 = unsafe {
             libc::mprotect(
                 arena_base as *mut libc::c_void,
-                commit_len,
+                old_a_commit,
                 libc::PROT_READ | libc::PROT_WRITE,
             )
         };
-        if rc != 0 {
+        let rc2 = unsafe {
+            libc::mprotect(
+                card_a_start as *mut libc::c_void,
+                old_a_card_commit,
+                libc::PROT_READ | libc::PROT_WRITE,
+            )
+        };
+        let rc3 = unsafe {
+            libc::mprotect(
+                nursery_start as *mut libc::c_void,
+                nursery_commit,
+                libc::PROT_READ | libc::PROT_WRITE,
+            )
+        };
+        if rc1 != 0 || rc2 != 0 || rc3 != 0 {
             unsafe {
                 let _ = libc::munmap(base, ARENA_TOTAL_BYTES);
             }
-            return Err(Error::msg("failed to commit initial GC semi-space"));
+            return Err(Error::msg(
+                "failed to commit initial generational GC spaces",
+            ));
         }
-        interrupt.set_region(arena_base, commit_len);
+        interrupt.set_region(arena_base, old_a_commit);
+        interrupt.set_region(nursery_start, nursery_commit);
 
         Ok(Self {
             arena_base,
-            active_is_b: false,
+            old_active_is_b: false,
             init_cap,
-            from_cap: init_cap,
+            old_cap: init_cap,
+            old_alloc_ptr: (arena_base + OLD_A_OFFSET + SPACE_START_PAD) as u64,
             heap_cap,
-            space_a_commit: commit_len,
-            space_b_commit: 0,
-            space_a_dirty: 0,
-            space_b_dirty: 0,
+            old_a_commit,
+            old_b_commit: 0,
+            old_a_card_commit,
+            old_b_card_commit: 0,
+            old_card_first_obj: Vec::new(),
+            nursery_init_cap,
+            nursery_cap: nursery_init_cap,
+            nursery_commit,
+            nursery_dirty: 0,
+            minor_gc_count: 0,
+            major_gc_count: 0,
             interrupt,
             host_roots: Vec::new(),
             host_roots_free: Vec::new(),
@@ -330,100 +391,215 @@ impl GcHeap {
     }
 
     #[inline]
-    pub(crate) fn space_a_start(&self) -> usize {
-        self.arena_base
+    pub(crate) fn old_space_start(&self, is_b: bool) -> usize {
+        self.arena_base + if is_b { OLD_B_OFFSET } else { OLD_A_OFFSET }
     }
 
     #[inline]
-    pub(crate) fn space_b_start(&self) -> usize {
-        self.arena_base + SEMI_SPACE_RESERVE_BYTES
+    pub(crate) fn old_base(&self, is_b: bool) -> u64 {
+        (self.old_space_start(is_b) + SPACE_START_PAD) as u64
     }
 
     #[inline]
-    pub(crate) fn active_space_start(&self) -> usize {
-        if self.active_is_b {
-            self.space_b_start()
-        } else {
-            self.space_a_start()
-        }
+    pub(crate) fn active_old_base(&self) -> u64 {
+        self.old_base(self.old_active_is_b)
     }
 
     #[inline]
-    pub(crate) fn active_dirty(&self) -> usize {
-        if self.active_is_b {
-            self.space_b_dirty
-        } else {
-            self.space_a_dirty
-        }
+    pub(crate) fn nursery_start(&self) -> usize {
+        self.arena_base + NURSERY_OFFSET
     }
 
     #[inline]
-    fn space_commit_mut(&mut self, is_b: bool) -> &mut usize {
+    pub(crate) fn nursery_base(&self) -> u64 {
+        (self.nursery_start() + SPACE_START_PAD) as u64
+    }
+
+    #[inline]
+    pub(crate) fn card_table_base(&self) -> u64 {
+        (self.arena_base + CARD_TABLE_OFFSET) as u64
+    }
+
+    #[inline]
+    pub(crate) fn card_table_start(&self, is_b: bool) -> usize {
+        self.arena_base + CARD_TABLE_OFFSET + if is_b { OLD_SPACE_CARDS_BYTES } else { 0 }
+    }
+
+    #[inline]
+    pub(crate) fn heap_capacity(&self) -> usize {
+        self.old_cap.max(self.nursery_cap)
+    }
+
+    #[inline]
+    fn old_commit_mut(&mut self, is_b: bool) -> &mut usize {
         if is_b {
-            &mut self.space_b_commit
+            &mut self.old_b_commit
         } else {
-            &mut self.space_a_commit
+            &mut self.old_a_commit
         }
     }
 
     #[inline]
-    fn space_dirty_mut(&mut self, is_b: bool) -> &mut usize {
+    fn old_card_commit_mut(&mut self, is_b: bool) -> &mut usize {
         if is_b {
-            &mut self.space_b_dirty
+            &mut self.old_b_card_commit
         } else {
-            &mut self.space_a_dirty
+            &mut self.old_a_card_commit
         }
     }
 
-    /// Releases physical pages of the currently inactive GC semi-space back to the OS
-    /// (`MADV_DONTNEED` + `PROT_NONE`), leaving the active semi-space and all live objects untouched.
-    /// Safe and O(1) no-op when the inactive semi-space is already released.
-    pub(crate) fn reclaim_inactive_space(&mut self) {
-        let inactive_is_b = !self.active_is_b;
-        let commit = *self.space_commit_mut(inactive_is_b);
-        if commit == 0 {
-            return;
+    /// Commits RW pages in Old Space `is_b` and its matching card table to cover `cap` bytes.
+    pub(crate) fn ensure_old_committed(&mut self, is_b: bool, cap: usize) -> bool {
+        let space_start = self.old_space_start(is_b);
+        let commit_needed = (SPACE_START_PAD + cap + 4095) & !4095;
+        let prev_commit = *self.old_commit_mut(is_b);
+        if commit_needed > prev_commit {
+            let delta_ptr = (space_start + prev_commit) as *mut libc::c_void;
+            let delta_len = commit_needed - prev_commit;
+            let rc =
+                unsafe { libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE) };
+            if rc != 0 {
+                return false;
+            }
+            *self.old_commit_mut(is_b) = commit_needed;
+            self.interrupt.set_region(space_start, commit_needed);
         }
-        let page_start = if inactive_is_b {
-            self.space_b_start()
-        } else {
-            self.space_a_start()
-        };
-        self.interrupt.remove_region(page_start);
-        unsafe {
-            let _ = libc::madvise(page_start as *mut libc::c_void, commit, libc::MADV_DONTNEED);
-            let _ = libc::mprotect(page_start as *mut libc::c_void, commit, libc::PROT_NONE);
+        let card_needed = ((commit_needed >> CARD_SHIFT) + 4095) & !4095;
+        let prev_card = *self.old_card_commit_mut(is_b);
+        if card_needed > prev_card {
+            let card_start = self.card_table_start(is_b);
+            let delta_ptr = (card_start + prev_card) as *mut libc::c_void;
+            let delta_len = card_needed - prev_card;
+            let rc =
+                unsafe { libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE) };
+            if rc != 0 {
+                return false;
+            }
+            *self.old_card_commit_mut(is_b) = card_needed;
         }
-        *self.space_commit_mut(inactive_is_b) = 0;
-        *self.space_dirty_mut(inactive_is_b) = 0;
+        true
     }
 
-    #[inline]
-    pub(crate) fn active_from_base(&self) -> u64 {
-        let base = if self.active_is_b {
-            self.space_b_start()
+    /// Reclaims pages above `keep_commit` (or all pages if `keep_commit == 0`) from Old Space `is_b`
+    /// and its card table via `MADV_DONTNEED` + `PROT_NONE`.
+    pub(crate) fn shrink_old_space(&mut self, is_b: bool, keep_commit: usize) {
+        let space_start = self.old_space_start(is_b);
+        let cur_commit = *self.old_commit_mut(is_b);
+        if cur_commit > keep_commit {
+            if keep_commit == 0 {
+                self.interrupt.remove_region(space_start);
+            }
+            let tail_ptr = (space_start + keep_commit) as *mut libc::c_void;
+            let tail_len = cur_commit - keep_commit;
+            unsafe {
+                let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
+                let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
+            }
+            *self.old_commit_mut(is_b) = keep_commit;
+            if keep_commit > 0 {
+                self.interrupt.set_region(space_start, keep_commit);
+            }
+        }
+        let keep_card = if keep_commit == 0 {
+            0
         } else {
-            self.space_a_start()
+            ((keep_commit >> CARD_SHIFT) + 4095) & !4095
         };
-        (base + SPACE_START_PAD) as u64
+        let cur_card = *self.old_card_commit_mut(is_b);
+        let card_start = self.card_table_start(is_b);
+        if cur_card > keep_card {
+            let tail_ptr = (card_start + keep_card) as *mut libc::c_void;
+            let tail_len = cur_card - keep_card;
+            unsafe {
+                let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
+                let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
+            }
+            *self.old_card_commit_mut(is_b) = keep_card;
+        }
+        if keep_card > 0 {
+            unsafe {
+                std::ptr::write_bytes(card_start as *mut u8, 0, keep_card);
+            }
+        }
+    }
+
+    /// Commits RW pages in the Young Nursery to cover `cap` bytes.
+    pub(crate) fn ensure_nursery_committed(&mut self, cap: usize) -> bool {
+        let start = self.nursery_start();
+        let needed = (SPACE_START_PAD + cap + 4095) & !4095;
+        if needed > self.nursery_commit {
+            let delta_ptr = (start + self.nursery_commit) as *mut libc::c_void;
+            let delta_len = needed - self.nursery_commit;
+            let rc =
+                unsafe { libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE) };
+            if rc != 0 {
+                return false;
+            }
+            self.nursery_commit = needed;
+            self.interrupt.set_region(start, needed);
+        }
+        true
+    }
+
+    /// Shrinks the Young Nursery committed tail down to `cap` bytes (when Nursery is empty).
+    pub(crate) fn shrink_nursery(&mut self, cap: usize) {
+        let start = self.nursery_start();
+        let keep_commit = (SPACE_START_PAD + cap + 4095) & !4095;
+        if self.nursery_commit > keep_commit {
+            let tail_ptr = (start + keep_commit) as *mut libc::c_void;
+            let tail_len = self.nursery_commit - keep_commit;
+            unsafe {
+                let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
+                let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
+            }
+            self.nursery_commit = keep_commit;
+            self.nursery_dirty = self.nursery_dirty.min(keep_commit);
+            self.interrupt.set_region(start, keep_commit);
+        }
+    }
+
+    /// Releases physical pages of the inactive Old Space (and its card table) back to the OS,
+    /// plus releases dirty physical pages of the Young Nursery if the Nursery is currently empty.
+    pub(crate) fn reclaim_inactive_space(&mut self, nursery_is_empty: bool) {
+        let inactive_is_b = !self.old_active_is_b;
+        self.shrink_old_space(inactive_is_b, 0);
+        if nursery_is_empty {
+            self.shrink_nursery(self.nursery_init_cap);
+            self.nursery_cap = self.nursery_init_cap;
+            if self.nursery_dirty > 0 {
+                let len = self.nursery_dirty.min(self.nursery_commit);
+                unsafe {
+                    let _ = libc::madvise(
+                        self.nursery_start() as *mut libc::c_void,
+                        len,
+                        libc::MADV_DONTNEED,
+                    );
+                }
+                self.nursery_dirty = 0;
+            }
+        }
+    }
+
+    /// Host-side generational write barrier: marks the 512-byte card of an Old Space object header
+    /// when a Young Nursery reference is written into one of its traced fields.
+    #[inline]
+    pub(crate) fn write_barrier(&self, obj_ptr: u64, val_word: u64) {
+        let nursery_base = self.nursery_base();
+        if obj_ptr != 0 && obj_ptr < nursery_base && val_word >= nursery_base {
+            let card_idx = ((obj_ptr - self.arena_base as u64) >> CARD_SHIFT) as usize;
+            unsafe {
+                *(self.card_table_base() as *mut u8).add(card_idx) = 1;
+            }
+        }
     }
 
     #[inline]
-    pub(crate) fn inactive_to_base(&self) -> u64 {
-        let base = if self.active_is_b {
-            self.space_a_start()
-        } else {
-            self.space_b_start()
-        };
-        (base + SPACE_START_PAD) as u64
+    pub(crate) fn is_in_gc_arena(&self, ptr: u64) -> bool {
+        let base = self.arena_base as u64;
+        ptr >= base && ptr < base.wrapping_add(GC_ADDR_RANGE_BYTES as u64) && (ptr & 7) == 0
     }
 
-    #[inline]
-    pub(crate) fn is_in_from_space(&self, ptr: u64, from_base: u64, from_cap: u64) -> bool {
-        ptr >= from_base && ptr < from_base.wrapping_add(from_cap) && (ptr & 7) == 0
-    }
-
-    /// Converts an active-space 64-bit GC pointer / i31 / null into a compact 32-bit raw handle.
+    /// Converts an active-heap 64-bit GC pointer / i31 / null into a compact 32-bit raw handle.
     #[inline]
     pub(crate) fn abi_word_to_raw_u32(&self, word: u64) -> u32 {
         if word == 0 {
@@ -433,7 +609,9 @@ impl GcHeap {
         } else {
             let off = word.wrapping_sub(self.arena_base as u64);
             debug_assert!(
-                off >= SPACE_START_PAD as u64 && off < (ARENA_TOTAL_BYTES as u64) && (off & 7) == 0
+                off >= SPACE_START_PAD as u64
+                    && off < (GC_ADDR_RANGE_BYTES as u64)
+                    && (off & 7) == 0
             );
             let raw = (off >> 2) as u32;
             debug_assert!(raw != 0 && (raw & 1) == 0);
@@ -441,7 +619,7 @@ impl GcHeap {
         }
     }
 
-    /// Converts a compact 32-bit raw GC handle back to a 64-bit ABI word (validating active space).
+    /// Converts a compact 32-bit raw GC handle back to a 64-bit ABI word.
     #[inline]
     pub(crate) fn raw_u32_to_abi_word(&self, raw: u32) -> u64 {
         if raw == 0 {
@@ -455,7 +633,13 @@ impl GcHeap {
 
     #[inline]
     pub(crate) fn is_valid_active_heap_ptr(&self, ptr: u64, state: &StoreState) -> bool {
-        ptr != 0 && (ptr & 7) == 0 && ptr >= state.gc_from_base && ptr < state.gc_alloc_ptr
+        if ptr == 0 || (ptr & 7) != 0 {
+            return false;
+        }
+        let old_base = self.active_old_base();
+        let nursery_base = self.nursery_base();
+        (ptr >= old_base && ptr < self.old_alloc_ptr)
+            || (ptr >= nursery_base && ptr < state.gc_alloc_ptr)
     }
 
     /// Allocates a host root slot; if a `RootScope` is active, attaches it to the innermost scope.
@@ -534,18 +718,22 @@ impl GcHeap {
 }
 
 // =========================================================================
-// Cheney Semi-Space Copying Garbage Collector (Multi-Module + Weak + Ephemeron + Extern Sweep)
+// Generational Copying Garbage Collector
+// (Young Nursery Minor GC with 512 B Old Card Table + Full Semi-Space Major GC)
 // =========================================================================
 
-/// Performs a full stop-the-world Cheney copying collection for `store`, ensuring at least
-/// `req_bytes` of free bump-allocation space (growing the semi-space up to `heap_cap` if needed).
+/// Performs either a fast Young-Nursery Minor GC or a full Old+Nursery Major GC for `store`,
+/// ensuring at least `req_bytes` of free bump-allocation space in the Young Nursery.
 ///
-/// When `reclaim_old` is `true` (explicit host `Store::gc()`), the entire evacuated old semi-space
-/// is immediately returned to Linux (`MADV_DONTNEED` + `PROT_NONE`) so idle isolates hold minimal
-/// RSS. When `reclaim_old` is `false` (automatic bump-alloc GC during active execution), the old
-/// semi-space stays committed RW up to `init_cap` (reclaiming only any burst tail above `init_cap`)
-/// so steady-state Cheney flips execute with zero `mprotect` / `madvise` kernel VM locks or
-/// cross-core TLB shootdowns.
+/// When `reclaim_old` is `true` (explicit host `Store::gc()`), ALWAYS runs a Major GC so that
+/// unreachable `ExternRef` payloads are swept, dead Old weak/ephemeron entries are retired,
+/// Old Space is compacted and flipped (`OLD_A <-> OLD_B`), and inactive Old + empty Nursery
+/// physical pages are immediately returned to Linux (`MADV_DONTNEED` + `PROT_NONE`).
+///
+/// When `reclaim_old` is `false` (automatic bump-alloc GC during active execution), runs a
+/// zero-syscall Minor GC whenever the Nursery can safely promote into already-committed active
+/// Old Space headroom (`old_used + nursery_used <= old_cap`), scanning only dirty 512-byte Old
+/// cards instead of copying the entire Old Space heap.
 ///
 /// Returns `Ok(())` on success, or `Err(GcHeapOutOfMemory)` if `live_bytes + req_bytes > heap_cap`.
 pub(crate) unsafe fn collect_store_gc(
@@ -560,298 +748,295 @@ pub(crate) unsafe fn collect_store_gc(
     // Ensure GC arena pages are writable before copying (O(1) atomic fast-path when un-interrupted).
     store.interrupt.restore_all_rw();
 
-    let old_is_b = store.gc.active_is_b;
-    let to_is_b = !old_is_b;
-    let from_base = store.state.gc_from_base;
-    let from_cap = store.state.gc_from_cap;
-    let old_alloc_ptr = store.state.gc_alloc_ptr;
-    let heap_cap = store.gc.heap_cap as u64;
+    let old_base = store.gc.active_old_base();
+    let old_used = (store.gc.old_alloc_ptr - old_base) as usize;
+    let nursery_base = store.gc.nursery_base();
+    let nursery_used = (store.state.gc_alloc_ptr - nursery_base) as usize;
+    let req_usize = usize::try_from(req_bytes).unwrap_or(usize::MAX);
 
-    // Size `to_space` to `from_cap` during copying: surviving live bytes are strictly bounded
-    // by `from_cap`, so we never prematurely double the semi-space based on pre-collection
-    // garbage! Growth (or shrinking after a burst) is decided in step 7 using exact
-    // post-collection `live_bytes + req_bytes`.
-    let copy_cap = ((from_cap as usize).max(64 * 1024) + 4095) & !4095;
-    let target_cap = copy_cap.min(heap_cap as usize);
+    let can_minor = !reclaim_old
+        && nursery_used > 0
+        && req_usize <= store.gc.nursery_init_cap
+        && old_used.saturating_add(nursery_used) <= store.gc.old_cap
+        && old_used
+            .saturating_add(nursery_used)
+            .saturating_add(req_usize)
+            <= store.gc.heap_cap;
 
-    let to_space_page_start = if to_is_b {
-        store.gc.space_b_start()
-    } else {
-        store.gc.space_a_start()
-    };
-    let to_base = (to_space_page_start + SPACE_START_PAD) as u64;
-    let to_commit_needed = (SPACE_START_PAD + target_cap + 4095) & !4095;
-    let prev_to_commit = *store.gc.space_commit_mut(to_is_b);
-    if to_commit_needed > prev_to_commit {
-        let delta_ptr = (to_space_page_start + prev_to_commit) as *mut libc::c_void;
-        let delta_len = to_commit_needed - prev_to_commit;
-        let rc =
-            unsafe { libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE) };
-        if rc != 0 {
-            return Err(GcHeapOutOfMemory::new((), req_bytes));
-        }
-        *store.gc.space_commit_mut(to_is_b) = to_commit_needed;
-        store
-            .interrupt
-            .set_region(to_space_page_start, to_commit_needed);
+    if can_minor {
+        unsafe { collect_minor_gc(store, gc_call_ret_rsp) };
+        return Ok(());
+    }
+    unsafe { collect_major_gc(store, req_bytes, gc_call_ret_rsp, reclaim_old) }
+}
+
+struct Collector<'a> {
+    infos: &'a [CanonTypeInfo],
+    /// Minor GC: `[nursery_base .. nursery_end)` only (`from_old_base == from_old_end`).
+    /// Major GC: BOTH `[from_old_base .. from_old_end)` AND `[from_nursery_base .. from_nursery_end)`.
+    from_old_base: u64,
+    from_old_end: u64,
+    from_nursery_base: u64,
+    from_nursery_end: u64,
+    to_space_start: usize,
+    to_alloc: u64,
+    to_scan: u64,
+    to_limit: u64,
+    to_card_first_obj: &'a mut Vec<u16>,
+    /// `Some(...)` on Major GC (tracks live host `ExternRef` slots); `None` on Minor GC.
+    extern_live: Option<&'a mut [bool]>,
+    /// Unpromoted WeakMap table addresses in the collected `from` region(s).
+    from_weak_tables: &'a HashSet<u64>,
+    /// Surviving WeakMap table addresses (in Minor GC, starts pre-populated with Old WeakMaps).
+    live_weak_tables: &'a mut Vec<u64>,
+    live_weak_table_set: &'a mut HashSet<u64>,
+    oom: bool,
+}
+
+impl<'a> Collector<'a> {
+    #[inline]
+    fn in_from(&self, ptr: u64) -> bool {
+        (ptr & 7) == 0
+            && ((ptr >= self.from_nursery_base && ptr < self.from_nursery_end)
+                || (ptr >= self.from_old_base && ptr < self.from_old_end))
     }
 
-    // Lock-free per-Store snapshots so concurrent Stores across CPU cores never stall each other
-    // during stop-the-world Cheney collections.
-    store.sync_type_descs();
-    let types_snap = Arc::clone(&store.types_snapshot);
-    let code_ranges = store.sync_code_ranges();
-
-    let mut extern_live = vec![false; store.gc.extern_arena.len()];
-    let old_weak_tables = std::mem::take(&mut store.gc.weak_tables);
-    let mut live_weak_tables: Vec<u64> = Vec::new();
-    let mut live_weak_table_set: HashSet<u64> = HashSet::new();
-
-    struct Collector<'a> {
-        infos: &'a [CanonTypeInfo],
-        from_base: u64,
-        from_cap: u64,
-        to_alloc: u64,
-        to_scan: u64,
-        to_limit: u64,
-        extern_live: &'a mut [bool],
-        old_weak_tables: &'a HashSet<u64>,
-        live_weak_tables: &'a mut Vec<u64>,
-        live_weak_table_set: &'a mut HashSet<u64>,
-        oom: bool,
+    #[inline]
+    fn mark_extern_word(&mut self, word: u64) {
+        if let Some(extern_live) = self.extern_live.as_deref_mut()
+            && let Some(slot) = decode_host_extern_slot(word)
+            && let Some(flag) = extern_live.get_mut(slot as usize)
+        {
+            *flag = true;
+        }
     }
 
-    impl<'a> Collector<'a> {
-        #[inline]
-        fn in_from(&self, ptr: u64) -> bool {
-            ptr >= self.from_base
-                && ptr < self.from_base.wrapping_add(self.from_cap)
-                && (ptr & 7) == 0
+    #[inline]
+    unsafe fn forwarded_addr(&self, old_ptr: u64) -> Option<u64> {
+        if !self.in_from(old_ptr) {
+            return None;
         }
+        let hdr = unsafe { *(old_ptr as *const u64) };
+        if (hdr & 1) != 0 { Some(hdr & !1) } else { None }
+    }
 
-        #[inline]
-        fn mark_extern_word(&mut self, word: u64) {
-            if let Some(slot) = decode_host_extern_slot(word)
-                && let Some(flag) = self.extern_live.get_mut(slot as usize)
-            {
-                *flag = true;
-            }
+    #[inline]
+    fn record_card_first_obj(&mut self, new_ptr: u64) {
+        let off = (new_ptr as usize) - self.to_space_start;
+        let card = off >> CARD_SHIFT;
+        if card >= self.to_card_first_obj.len() {
+            self.to_card_first_obj.resize(card + 1, u16::MAX);
         }
-
-        #[inline]
-        unsafe fn forwarded_addr(&self, old_ptr: u64) -> Option<u64> {
-            if !self.in_from(old_ptr) {
-                return None;
-            }
-            let hdr = unsafe { *(old_ptr as *const u64) };
-            if (hdr & 1) != 0 { Some(hdr & !1) } else { None }
+        if self.to_card_first_obj[card] == u16::MAX {
+            self.to_card_first_obj[card] = (off & (CARD_BYTES - 1)) as u16;
         }
+    }
 
-        /// Evacuates a single `from_space` object into `to_space` (idempotent via forwarding bit 0).
-        unsafe fn evacuate(&mut self, old_ptr: u64) -> u64 {
-            if !self.in_from(old_ptr) {
-                self.mark_extern_word(old_ptr);
-                return old_ptr;
-            }
-            let hdr = unsafe { *(old_ptr as *const u64) };
-            if (hdr & 1) != 0 {
-                return hdr & !1;
-            }
-            let kind = (hdr as u32) & 6;
-            let obj_bytes: u64 = match kind {
-                GC_HDR_KIND_STRUCT => {
-                    let cid = (hdr as u32) >> 3;
-                    match &self.infos[cid as usize].composite {
-                        CanonComposite::Struct { total_bytes, .. } => u64::from(*total_bytes),
-                        _ => unreachable!("GC struct header has non-struct canon_id {cid}"),
-                    }
-                }
-                GC_HDR_KIND_ARRAY => {
-                    let cid = (hdr as u32) >> 3;
-                    let len = unsafe { *((old_ptr + 4) as *const u32) } as u64;
-                    let elem_sz = match &self.infos[cid as usize].composite {
-                        CanonComposite::Array { elem, .. } => u64::from(elem.byte_size()),
-                        _ => unreachable!("GC array header has non-array canon_id {cid}"),
-                    };
-                    ((8u64 + len * elem_sz) + 7) & !7
-                }
-                GC_HDR_KIND_INTERNAL_EXTERN => 16,
-                other => unreachable!("corrupt GC object header kind {other} at {old_ptr:#x}"),
-            };
-
-            if self.to_alloc + obj_bytes > self.to_limit {
-                self.oom = true;
-                return old_ptr;
-            }
-            let new_ptr = self.to_alloc;
-            self.to_alloc += obj_bytes;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    old_ptr as *const u8,
-                    new_ptr as *mut u8,
-                    obj_bytes as usize,
-                );
-                // Install forwarding pointer in old header (`bit 0 = 1`).
-                *(old_ptr as *mut u64) = new_ptr | 1;
-            }
-            if kind == GC_HDR_KIND_ARRAY
-                && !self.old_weak_tables.is_empty()
-                && self.old_weak_tables.contains(&old_ptr)
-            {
-                self.live_weak_tables.push(new_ptr);
-                self.live_weak_table_set.insert(new_ptr);
-            }
-            new_ptr
+    /// Evacuates a single `from` object into `to_old` (idempotent via forwarding bit 0).
+    unsafe fn evacuate(&mut self, old_ptr: u64) -> u64 {
+        if !self.in_from(old_ptr) {
+            self.mark_extern_word(old_ptr);
+            return old_ptr;
         }
-
-        #[inline]
-        unsafe fn trace_slot(&mut self, slot: *mut u64) {
-            let v = unsafe { *slot };
-            if v == 0 || (v & 1) != 0 {
-                return;
-            }
-            if self.in_from(v) {
-                let nv = unsafe { self.evacuate(v) };
-                unsafe { *slot = nv };
-            } else {
-                self.mark_extern_word(v);
-            }
+        let hdr = unsafe { *(old_ptr as *const u64) };
+        if (hdr & 1) != 0 {
+            return hdr & !1;
         }
-
-        /// Drains the Cheney BFS scan queue `[to_scan .. to_alloc)` to quiescence.
-        unsafe fn scan_to_completion(&mut self) {
-            while self.to_scan < self.to_alloc && !self.oom {
-                let obj = self.to_scan;
-                let hdr = unsafe { *(obj as *const u64) };
-                let kind = (hdr as u32) & 6;
-                match kind {
-                    GC_HDR_KIND_STRUCT => {
-                        let cid = (hdr as u32) >> 3;
-                        let (total_bytes, gc_offs, ext_offs) =
-                            match &self.infos[cid as usize].composite {
-                                CanonComposite::Struct {
-                                    total_bytes,
-                                    gc_ref_offs,
-                                    ext_ref_offs,
-                                    ..
-                                } => (*total_bytes, gc_ref_offs, ext_ref_offs),
-                                _ => unreachable!(),
-                            };
-                        for &off in gc_offs {
-                            unsafe { self.trace_slot((obj + u64::from(off)) as *mut u64) };
-                        }
-                        for &off in ext_offs {
-                            unsafe { self.trace_slot((obj + u64::from(off)) as *mut u64) };
-                        }
-                        self.to_scan += u64::from(total_bytes);
-                    }
-                    GC_HDR_KIND_ARRAY => {
-                        let cid = (hdr as u32) >> 3;
-                        let len = unsafe { *((obj + 4) as *const u32) } as u64;
-                        let elem = match &self.infos[cid as usize].composite {
-                            CanonComposite::Array { elem, .. } => *elem,
-                            _ => unreachable!(),
-                        };
-                        let obj_bytes = ((8u64 + len * u64::from(elem.byte_size())) + 7) & !7;
-                        // Registered WeakMap reference arrays are NOT strongly traced during BFS;
-                        // their `(key, value)` pairs are resolved in the ephemeron fixed-point loop!
-                        if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef)
-                            && (self.live_weak_table_set.is_empty()
-                                || !self.live_weak_table_set.contains(&obj))
-                        {
-                            for i in 0..len {
-                                unsafe { self.trace_slot((obj + 8 + i * 8) as *mut u64) };
-                            }
-                        }
-                        self.to_scan += obj_bytes;
-                    }
-                    GC_HDR_KIND_INTERNAL_EXTERN => {
-                        let payload = unsafe { *((obj + 8) as *const u64) };
-                        self.mark_extern_word(payload);
-                        self.to_scan += 16;
-                    }
-                    other => unreachable!("corrupt scanned GC object kind {other}"),
+        let kind = (hdr as u32) & 6;
+        let obj_bytes: u64 = match kind {
+            GC_HDR_KIND_STRUCT => {
+                let cid = (hdr as u32) >> 3;
+                match &self.infos[cid as usize].composite {
+                    CanonComposite::Struct { total_bytes, .. } => u64::from(*total_bytes),
+                    _ => unreachable!("GC struct header has non-struct canon_id {cid}"),
                 }
             }
-        }
-
-        /// Walks one contiguous Wasm call-stack segment from `start_ret_rsp` up to `stop_rsp`.
-        unsafe fn walk_stack_segment(
-            &mut self,
-            code_ranges: &[RegisteredCodeRange],
-            mut cur_ret_rsp: u64,
-            stop_rsp: u64,
-        ) {
-            if cur_ret_rsp == 0 || stop_rsp == 0 {
-                return;
-            }
-            while cur_ret_rsp < stop_rsp {
-                let ret_pc = unsafe { *(cur_ret_rsp as *const usize) };
-                let Some(sp) = lookup_safepoint(code_ranges, ret_pc) else {
-                    break;
+            GC_HDR_KIND_ARRAY => {
+                let cid = (hdr as u32) >> 3;
+                let len = unsafe { *((old_ptr + 4) as *const u32) } as u64;
+                let elem_sz = match &self.infos[cid as usize].composite {
+                    CanonComposite::Array { elem, .. } => u64::from(elem.byte_size()),
+                    _ => unreachable!("GC array header has non-array canon_id {cid}"),
                 };
-                let frame_rsp = cur_ret_rsp + 8;
-                let slots_base = sp.slots_ptr;
-                for i in 0..sp.entry.num_slots {
-                    let slot_off =
-                        unsafe { *slots_base.add((sp.entry.first_slot_idx + i) as usize) };
-                    let addr = (frame_rsp as i64 + i64::from(slot_off)) as *mut u64;
-                    unsafe { self.trace_slot(addr) };
-                }
-                cur_ret_rsp = frame_rsp + u64::from(sp.entry.frame_caller_ret_off);
+                ((8u64 + len * elem_sz) + 7) & !7
             }
+            GC_HDR_KIND_INTERNAL_EXTERN => 16,
+            other => unreachable!("corrupt GC object header kind {other} at {old_ptr:#x}"),
+        };
+
+        if self.to_alloc + obj_bytes > self.to_limit {
+            self.oom = true;
+            return old_ptr;
+        }
+        let new_ptr = self.to_alloc;
+        self.to_alloc += obj_bytes;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                old_ptr as *const u8,
+                new_ptr as *mut u8,
+                obj_bytes as usize,
+            );
+            // Install forwarding pointer in old header (`bit 0 = 1`).
+            *(old_ptr as *mut u64) = new_ptr | 1;
+        }
+        self.record_card_first_obj(new_ptr);
+        if kind == GC_HDR_KIND_ARRAY
+            && !self.from_weak_tables.is_empty()
+            && self.from_weak_tables.contains(&old_ptr)
+        {
+            self.live_weak_tables.push(new_ptr);
+            self.live_weak_table_set.insert(new_ptr);
+        }
+        new_ptr
+    }
+
+    #[inline]
+    unsafe fn trace_slot(&mut self, slot: *mut u64) {
+        let v = unsafe { *slot };
+        if v == 0 || (v & 1) != 0 {
+            return;
+        }
+        if self.in_from(v) {
+            let nv = unsafe { self.evacuate(v) };
+            unsafe { *slot = nv };
+        } else {
+            self.mark_extern_word(v);
         }
     }
 
-    let mut col = Collector {
-        infos: &types_snap,
-        from_base,
-        from_cap,
-        to_alloc: to_base,
-        to_scan: to_base,
-        to_limit: to_base + target_cap as u64,
-        extern_live: &mut extern_live,
-        old_weak_tables: &old_weak_tables,
-        live_weak_tables: &mut live_weak_tables,
-        live_weak_table_set: &mut live_weak_table_set,
-        oom: false,
-    };
+    /// Traces all `GcRef`/`ExternRef` fields of one object at `obj` (skipping WeakMap tables)
+    /// and returns its 8-byte-aligned size in bytes.
+    unsafe fn scan_object_fields(&mut self, obj: u64) -> u64 {
+        let hdr = unsafe { *(obj as *const u64) };
+        let kind = (hdr as u32) & 6;
+        match kind {
+            GC_HDR_KIND_STRUCT => {
+                let cid = (hdr as u32) >> 3;
+                let (total_bytes, gc_offs, ext_offs) = match &self.infos[cid as usize].composite {
+                    CanonComposite::Struct {
+                        total_bytes,
+                        gc_ref_offs,
+                        ext_ref_offs,
+                        ..
+                    } => (*total_bytes, gc_ref_offs, ext_ref_offs),
+                    _ => unreachable!(),
+                };
+                for &off in gc_offs {
+                    unsafe { self.trace_slot((obj + u64::from(off)) as *mut u64) };
+                }
+                for &off in ext_offs {
+                    unsafe { self.trace_slot((obj + u64::from(off)) as *mut u64) };
+                }
+                u64::from(total_bytes)
+            }
+            GC_HDR_KIND_ARRAY => {
+                let cid = (hdr as u32) >> 3;
+                let len = unsafe { *((obj + 4) as *const u32) } as u64;
+                let elem = match &self.infos[cid as usize].composite {
+                    CanonComposite::Array { elem, .. } => *elem,
+                    _ => unreachable!(),
+                };
+                let obj_bytes = ((8u64 + len * u64::from(elem.byte_size())) + 7) & !7;
+                // Registered WeakMap reference arrays are NOT strongly traced during BFS / card scan;
+                // their `(key, value)` pairs are resolved in the ephemeron fixed-point loop!
+                if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef)
+                    && (self.live_weak_table_set.is_empty()
+                        || !self.live_weak_table_set.contains(&obj))
+                {
+                    for i in 0..len {
+                        unsafe { self.trace_slot((obj + 8 + i * 8) as *mut u64) };
+                    }
+                }
+                obj_bytes
+            }
+            GC_HDR_KIND_INTERNAL_EXTERN => {
+                let payload = unsafe { *((obj + 8) as *const u64) };
+                self.mark_extern_word(payload);
+                16
+            }
+            other => unreachable!("corrupt scanned GC object kind {other}"),
+        }
+    }
 
-    // ---- 1. Trace ALL strong roots ----
+    /// Drains the Cheney BFS scan queue `[to_scan .. to_alloc)` to quiescence.
+    unsafe fn scan_to_completion(&mut self) {
+        while self.to_scan < self.to_alloc && !self.oom {
+            let obj = self.to_scan;
+            let sz = unsafe { self.scan_object_fields(obj) };
+            self.to_scan += sz;
+        }
+    }
 
+    /// Walks one contiguous Wasm call-stack segment from `start_ret_rsp` up to `stop_rsp`.
+    unsafe fn walk_stack_segment(
+        &mut self,
+        code_ranges: &[RegisteredCodeRange],
+        mut cur_ret_rsp: u64,
+        stop_rsp: u64,
+    ) {
+        if cur_ret_rsp == 0 || stop_rsp == 0 {
+            return;
+        }
+        while cur_ret_rsp < stop_rsp {
+            let ret_pc = unsafe { *(cur_ret_rsp as *const usize) };
+            let Some(sp) = lookup_safepoint(code_ranges, ret_pc) else {
+                break;
+            };
+            let frame_rsp = cur_ret_rsp + 8;
+            let slots_base = sp.slots_ptr;
+            for i in 0..sp.entry.num_slots {
+                let slot_off = unsafe { *slots_base.add((sp.entry.first_slot_idx + i) as usize) };
+                let addr = (frame_rsp as i64 + i64::from(slot_off)) as *mut u64;
+                unsafe { self.trace_slot(addr) };
+            }
+            cur_ret_rsp = frame_rsp + u64::from(sp.entry.frame_caller_ret_off);
+        }
+    }
+}
+
+/// Traces all Store strong roots (Wasm stack frames, reentrant chain, init roots, globals,
+/// passive elem ranges, standalone globals, dynamic tables, host roots, exception objects).
+#[allow(clippy::too_many_arguments)]
+unsafe fn trace_all_strong_roots(
+    col: &mut Collector<'_>,
+    state: &StoreState,
+    instances: &[crate::store::InstanceData],
+    standalone_globals: &mut [crate::store::StandaloneGlobalData],
+    tables: &[crate::store::DynamicTableData],
+    host_roots: &mut [HostRootSlot],
+    exn_objects: &[StoreExnBox],
+    code_ranges: &[RegisteredCodeRange],
+    gc_call_ret_rsp: u64,
+) {
     // (a) Active Wasm stack segment (if GC was triggered from compiled Wasm code).
-    if gc_call_ret_rsp != 0 && store.state.gc_walk_stop_rsp != 0 {
+    if gc_call_ret_rsp != 0 && state.gc_walk_stop_rsp != 0 {
         unsafe {
-            col.walk_stack_segment(&code_ranges, gc_call_ret_rsp, store.state.gc_walk_stop_rsp);
+            col.walk_stack_segment(code_ranges, gc_call_ret_rsp, state.gc_walk_stop_rsp);
         }
     }
 
     // (b) Paused outer Wasm stack segments across reentrant Host -> Wasm -> Host calls.
-    let mut chain_ptr = store.state.gc_stack_chain;
+    let mut chain_ptr = state.gc_stack_chain;
     while chain_ptr != 0 {
         let node = unsafe { *(chain_ptr as *const GcStackChainNode) };
         if node.outer_paused_ret_rsp != 0 && node.outer_stop_rsp != 0 {
             unsafe {
-                col.walk_stack_segment(
-                    &code_ranges,
-                    node.outer_paused_ret_rsp,
-                    node.outer_stop_rsp,
-                );
+                col.walk_stack_segment(code_ranges, node.outer_paused_ret_rsp, node.outer_stop_rsp);
             }
         }
         chain_ptr = node.prev_chain;
     }
 
     // (c) In-flight `init_instance` constant-expression root buffer.
-    if store.state.gc_init_roots_ptr != 0 && store.state.gc_init_roots_len != 0 {
-        let ptr = store.state.gc_init_roots_ptr as *mut u64;
-        for i in 0..store.state.gc_init_roots_len {
+    if state.gc_init_roots_ptr != 0 && state.gc_init_roots_len != 0 {
+        let ptr = state.gc_init_roots_ptr as *mut u64;
+        for i in 0..state.gc_init_roots_len {
             unsafe { col.trace_slot(ptr.add(i as usize)) };
         }
     }
 
     // (d) All instantiated modules' defined traced globals + live passive GC elem buffers.
-    for inst in &store.instances {
+    for inst in instances {
         let ctx_ptr = inst.ctx_buf.as_ptr() as *mut u8;
         for &goff in &inst.traced_defined_global_offs {
             unsafe { col.trace_slot(ctx_ptr.offset(goff as isize).cast::<u64>()) };
@@ -878,14 +1063,14 @@ pub(crate) unsafe fn collect_store_gc(
     }
 
     // (e) Standalone host-created traced globals (`Global::new`).
-    for g in &mut store.standalone_globals {
+    for g in standalone_globals {
         if g.is_traced {
             unsafe { col.trace_slot(g.cell.as_mut() as *mut [u64; 2] as *mut u64) };
         }
     }
 
     // (f) All traced dynamic tables (`Any` / `Extern` ref families).
-    for tbl in &store.tables {
+    for tbl in tables {
         if tbl.is_traced && !tbl.desc.ptr.is_null() {
             for i in 0..tbl.desc.cur_len {
                 unsafe { col.trace_slot(tbl.desc.ptr.add(i as usize)) };
@@ -894,17 +1079,386 @@ pub(crate) unsafe fn collect_store_gc(
     }
 
     // (g) All host `RootScope` / `Rooted` / `OwnedRooted` slots.
-    for slot in &mut store.gc.host_roots {
+    for slot in host_roots {
         if slot.alive && !slot.is_exn {
             unsafe { col.trace_slot(&mut slot.value as *mut u64) };
         }
     }
 
     // (h) All Store exception objects' traced payload fields.
-    for exn in &store.gc.exn_objects {
+    for exn in exn_objects {
         for &(foff, _is_ext) in &exn.traced_fields {
             unsafe { col.trace_slot(exn.ptr.offset(foff as isize).cast::<u64>()) };
         }
+    }
+}
+
+/// Fast Young-Nursery Minor GC: evacuates only live Young Nursery objects into active Old Space,
+/// scanning only dirty 512-byte Old Space cards (zero `mprotect`/`madvise` syscalls, zero copying
+/// of Old Space objects, and NO `extern_arena` sweep).
+unsafe fn collect_minor_gc(store: &mut StoreInner, gc_call_ret_rsp: u64) {
+    store.sync_type_descs();
+    let types_snap = Arc::clone(&store.types_snapshot);
+    let code_ranges = store.sync_code_ranges();
+
+    let old_is_b = store.gc.old_active_is_b;
+    let old_space_start = store.gc.old_space_start(old_is_b);
+    let old_base = store.gc.old_base(old_is_b);
+    let old_alloc_before = store.gc.old_alloc_ptr;
+    let old_limit = old_base + store.gc.old_cap as u64;
+    let nursery_base = store.gc.nursery_base();
+    let nursery_end = store.state.gc_alloc_ptr;
+    let card_base = store.gc.card_table_start(old_is_b) as *mut u8;
+
+    // Partition registered WeakMaps into already-Old (assumed alive during Minor GC) vs Young.
+    let all_weak_tables = std::mem::take(&mut store.gc.weak_tables);
+    let mut young_weak_tables: HashSet<u64> = HashSet::new();
+    let mut live_weak_tables: Vec<u64> = Vec::new();
+    let mut live_weak_table_set: HashSet<u64> = HashSet::new();
+    for t in all_weak_tables {
+        if t < nursery_base {
+            live_weak_tables.push(t);
+            live_weak_table_set.insert(t);
+        } else {
+            young_weak_tables.insert(t);
+        }
+    }
+
+    let mut card_first_obj = std::mem::take(&mut store.gc.old_card_first_obj);
+
+    let mut col = Collector {
+        infos: &types_snap,
+        from_old_base: 0,
+        from_old_end: 0,
+        from_nursery_base: nursery_base,
+        from_nursery_end: nursery_end,
+        to_space_start: old_space_start,
+        to_alloc: old_alloc_before,
+        to_scan: old_alloc_before,
+        to_limit: old_limit,
+        to_card_first_obj: &mut card_first_obj,
+        extern_live: None,
+        from_weak_tables: &young_weak_tables,
+        live_weak_tables: &mut live_weak_tables,
+        live_weak_table_set: &mut live_weak_table_set,
+        oom: false,
+    };
+
+    // 1. Trace all strong roots (stack, globals, tables, host roots, exceptions).
+    unsafe {
+        trace_all_strong_roots(
+            &mut col,
+            &store.state,
+            &store.instances,
+            &mut store.standalone_globals,
+            &store.tables,
+            &mut store.gc.host_roots,
+            &store.gc.exn_objects,
+            &code_ranges,
+            gc_call_ret_rsp,
+        );
+    }
+
+    // 2. Scan dirty 512-byte Old Space cards (skipping 8 clean cards = 4 KiB per u64 check).
+    if old_alloc_before > old_base {
+        let num_cards =
+            (((old_alloc_before as usize) - old_space_start) + CARD_BYTES - 1) >> CARD_SHIFT;
+        let mut c = 0usize;
+        while c < num_cards {
+            if c + 8 <= num_cards {
+                let word = unsafe { (card_base.add(c) as *const u64).read_unaligned() };
+                if word == 0 {
+                    c += 8;
+                    continue;
+                }
+                let end_chunk = c + 8;
+                while c < end_chunk {
+                    if unsafe { *card_base.add(c) } != 0 {
+                        unsafe { *card_base.add(c) = 0 };
+                        let first_off = col.to_card_first_obj.get(c).copied().unwrap_or(u16::MAX);
+                        if first_off != u16::MAX {
+                            let card_start = (old_space_start + (c << CARD_SHIFT)) as u64;
+                            let card_end = (card_start + CARD_BYTES as u64).min(old_alloc_before);
+                            let mut p = card_start + u64::from(first_off);
+                            while p < card_end {
+                                p += unsafe { col.scan_object_fields(p) };
+                            }
+                        }
+                    }
+                    c += 1;
+                }
+            } else {
+                if unsafe { *card_base.add(c) } != 0 {
+                    unsafe { *card_base.add(c) = 0 };
+                    let first_off = col.to_card_first_obj.get(c).copied().unwrap_or(u16::MAX);
+                    if first_off != u16::MAX {
+                        let card_start = (old_space_start + (c << CARD_SHIFT)) as u64;
+                        let card_end = (card_start + CARD_BYTES as u64).min(old_alloc_before);
+                        let mut p = card_start + u64::from(first_off);
+                        while p < card_end {
+                            p += unsafe { col.scan_object_fields(p) };
+                        }
+                    }
+                }
+                c += 1;
+            }
+        }
+    }
+
+    // 3. Drain Cheney BFS for newly promoted Young objects `[old_alloc_before .. to_alloc)`.
+    unsafe { col.scan_to_completion() };
+
+    // 4. Ephemeron + WeakMap fixed-point loop (Old pointers are assumed live in Minor GC).
+    for e in &mut store.gc.ephemerons {
+        e.activated = false;
+    }
+    let mut progress = true;
+    while progress {
+        progress = false;
+
+        // (a) Explicit `GcEphemeron` entries.
+        for e in &mut store.gc.ephemerons {
+            if !e.live || e.activated {
+                continue;
+            }
+            let owner_alive =
+                !col.in_from(e.owner) || unsafe { col.forwarded_addr(e.owner).is_some() };
+            let key_alive = !col.in_from(e.key) || unsafe { col.forwarded_addr(e.key).is_some() };
+            if owner_alive && key_alive {
+                e.activated = true;
+                if e.value != 0 && (e.value & 1) == 0 && col.in_from(e.value) {
+                    let was_fwd = unsafe { col.forwarded_addr(e.value).is_some() };
+                    e.value = unsafe { col.evacuate(e.value) };
+                    if !was_fwd {
+                        progress = true;
+                        unsafe { col.scan_to_completion() };
+                    }
+                }
+            }
+        }
+
+        // (b) Registered WeakMap reference arrays (both Old and newly promoted Young tables).
+        let mut ti = 0usize;
+        while ti < col.live_weak_tables.len() {
+            let arr_ptr = col.live_weak_tables[ti];
+            ti += 1;
+            let len = unsafe { *((arr_ptr + 4) as *const u32) } as usize;
+            let pairs = len / 2;
+            for p in 0..pairs {
+                let key_slot = (arr_ptr + 8 + (p * 16) as u64) as *mut u64;
+                let val_slot = (arr_ptr + 8 + (p * 16 + 8) as u64) as *mut u64;
+                let k = unsafe { *key_slot };
+                if k == 0 {
+                    continue;
+                }
+                if col.in_from(k) {
+                    if let Some(k_fwd) = unsafe { col.forwarded_addr(k) } {
+                        unsafe { *key_slot = k_fwd };
+                        let v = unsafe { *val_slot };
+                        if v != 0 && (v & 1) == 0 && col.in_from(v) {
+                            let was_fwd = unsafe { col.forwarded_addr(v).is_some() };
+                            let nv = unsafe { col.evacuate(v) };
+                            unsafe { *val_slot = nv };
+                            if !was_fwd {
+                                progress = true;
+                                unsafe { col.scan_to_completion() };
+                            }
+                        }
+                    }
+                } else {
+                    // Key is in Old Space or is an i31 (alive during Minor GC).
+                    let v = unsafe { *val_slot };
+                    if v != 0 && (v & 1) == 0 && col.in_from(v) {
+                        let was_fwd = unsafe { col.forwarded_addr(v).is_some() };
+                        let nv = unsafe { col.evacuate(v) };
+                        unsafe { *val_slot = nv };
+                        if !was_fwd {
+                            progress = true;
+                            unsafe { col.scan_to_completion() };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Finalize WeakMap tables, ephemerons, and weak refs (retiring dead Young entries).
+    for &arr_ptr in col.live_weak_tables.iter() {
+        let len = unsafe { *((arr_ptr + 4) as *const u32) } as usize;
+        let pairs = len / 2;
+        for p in 0..pairs {
+            let key_slot = (arr_ptr + 8 + (p * 16) as u64) as *mut u64;
+            let val_slot = (arr_ptr + 8 + (p * 16 + 8) as u64) as *mut u64;
+            let k = unsafe { *key_slot };
+            if k != 0 && col.in_from(k) {
+                unsafe {
+                    *key_slot = 0;
+                    *val_slot = 0;
+                }
+            }
+        }
+    }
+
+    for (idx, e) in store.gc.ephemerons.iter_mut().enumerate() {
+        if !e.live {
+            continue;
+        }
+        if e.activated {
+            if col.in_from(e.owner) {
+                e.owner = unsafe { col.forwarded_addr(e.owner).expect("activated young owner") };
+            }
+            if col.in_from(e.key) {
+                e.key = unsafe { col.forwarded_addr(e.key).expect("activated young key") };
+            }
+            e.activated = false;
+        } else {
+            e.live = false;
+            e.owner = 0;
+            e.key = 0;
+            e.value = 0;
+            store.gc.ephemerons_free.push(idx as u32);
+        }
+    }
+
+    let mut retired_any_weak = false;
+    for (idx, w) in store.gc.weak_refs.iter_mut().enumerate() {
+        if !w.live {
+            continue;
+        }
+        let o_new = if col.in_from(w.owner) {
+            unsafe { col.forwarded_addr(w.owner) }
+        } else {
+            Some(w.owner)
+        };
+        let t_new = if col.in_from(w.target) {
+            unsafe { col.forwarded_addr(w.target) }
+        } else {
+            Some(w.target)
+        };
+        if let (Some(o), Some(t)) = (o_new, t_new) {
+            w.owner = o;
+            w.target = t;
+        } else {
+            w.live = false;
+            w.owner = 0;
+            w.target = 0;
+            store.gc.weak_refs_free.push(idx as u32);
+            retired_any_weak = true;
+        }
+    }
+    if retired_any_weak {
+        store.gc.weak_retire_count = store.gc.weak_retire_count.wrapping_add(1);
+    }
+
+    debug_assert!(!col.oom, "Minor GC headroom precondition violated");
+    let final_old_alloc = col.to_alloc;
+    let _ = col;
+    drop(types_snap);
+
+    store.gc.old_card_first_obj = card_first_obj;
+    store.gc.old_alloc_ptr = final_old_alloc;
+    store.gc.weak_tables = live_weak_table_set;
+
+    // 6. Reset Young Nursery bump pointer & update dirty watermark (zero syscalls in steady state).
+    let nursery_used_pages =
+        ((nursery_end.saturating_sub(store.gc.nursery_start() as u64) as usize + 4095) & !4095)
+            .min(store.gc.nursery_commit);
+    store.gc.nursery_dirty = store
+        .gc
+        .nursery_dirty
+        .max(nursery_used_pages)
+        .min(store.gc.nursery_commit);
+    if store.gc.nursery_cap > store.gc.nursery_init_cap {
+        let cap = store.gc.nursery_init_cap;
+        store.gc.shrink_nursery(cap);
+        store.gc.nursery_cap = cap;
+    }
+    store.state.gc_alloc_ptr = nursery_base;
+    store.state.gc_alloc_limit = nursery_base + store.gc.nursery_cap as u64;
+    store.state.gc_count = store.state.gc_count.wrapping_add(1);
+    store.gc.minor_gc_count = store.gc.minor_gc_count.wrapping_add(1);
+}
+
+/// Full stop-the-world Cheney Major GC: evacuates all live objects from BOTH active Old Space
+/// and the Young Nursery into the inactive Old semi-space, sweeps unreachable `ExternRef`
+/// host payloads, flips `OLD_A <-> OLD_B`, and resizes Old Space + Young Nursery.
+unsafe fn collect_major_gc(
+    store: &mut StoreInner,
+    req_bytes: u64,
+    gc_call_ret_rsp: u64,
+    reclaim_old: bool,
+) -> std::result::Result<(), GcHeapOutOfMemory<()>> {
+    let old_is_b = store.gc.old_active_is_b;
+    let to_is_b = !old_is_b;
+    let from_old_base = store.gc.old_base(old_is_b);
+    let from_old_end = store.gc.old_alloc_ptr;
+    let nursery_base = store.gc.nursery_base();
+    let from_nursery_end = store.state.gc_alloc_ptr;
+    let heap_cap = store.gc.heap_cap as u64;
+
+    let total_from_bytes = (from_old_end - from_old_base) + (from_nursery_end - nursery_base);
+    let copy_cap = ((total_from_bytes as usize)
+        .max(store.gc.old_cap)
+        .max(64 * 1024)
+        + 4095)
+        & !4095;
+    let target_cap = copy_cap.min(heap_cap as usize);
+
+    let prev_to_card = *store.gc.old_card_commit_mut(to_is_b);
+    if !store.gc.ensure_old_committed(to_is_b, target_cap) {
+        return Err(GcHeapOutOfMemory::new((), req_bytes));
+    }
+    if prev_to_card > 0 {
+        let to_card_start = store.gc.card_table_start(to_is_b);
+        unsafe {
+            std::ptr::write_bytes(to_card_start as *mut u8, 0, prev_to_card);
+        }
+    }
+
+    let to_space_start = store.gc.old_space_start(to_is_b);
+    let to_base = store.gc.old_base(to_is_b);
+
+    store.sync_type_descs();
+    let types_snap = Arc::clone(&store.types_snapshot);
+    let code_ranges = store.sync_code_ranges();
+
+    let mut extern_live = vec![false; store.gc.extern_arena.len()];
+    let old_weak_tables = std::mem::take(&mut store.gc.weak_tables);
+    let mut live_weak_tables: Vec<u64> = Vec::new();
+    let mut live_weak_table_set: HashSet<u64> = HashSet::new();
+    let mut new_card_first_obj: Vec<u16> = Vec::new();
+
+    let mut col = Collector {
+        infos: &types_snap,
+        from_old_base,
+        from_old_end,
+        from_nursery_base: nursery_base,
+        from_nursery_end,
+        to_space_start,
+        to_alloc: to_base,
+        to_scan: to_base,
+        to_limit: to_base + target_cap as u64,
+        to_card_first_obj: &mut new_card_first_obj,
+        extern_live: Some(&mut extern_live),
+        from_weak_tables: &old_weak_tables,
+        live_weak_tables: &mut live_weak_tables,
+        live_weak_table_set: &mut live_weak_table_set,
+        oom: false,
+    };
+
+    // ---- 1. Trace ALL strong roots ----
+    unsafe {
+        trace_all_strong_roots(
+            &mut col,
+            &store.state,
+            &store.instances,
+            &mut store.standalone_globals,
+            &store.tables,
+            &mut store.gc.host_roots,
+            &store.gc.exn_objects,
+            &code_ranges,
+            gc_call_ret_rsp,
+        );
     }
 
     // ---- 2. Drain strong Cheney BFS ----
@@ -959,10 +1513,13 @@ pub(crate) unsafe fn collect_store_gc(
                         unsafe { *key_slot = k_fwd };
                         let v = unsafe { *val_slot };
                         if v != 0 && (v & 1) == 0 && col.in_from(v) {
+                            let was_fwd = unsafe { col.forwarded_addr(v).is_some() };
                             let nv = unsafe { col.evacuate(v) };
                             unsafe { *val_slot = nv };
-                            progress = true;
-                            unsafe { col.scan_to_completion() };
+                            if !was_fwd {
+                                progress = true;
+                                unsafe { col.scan_to_completion() };
+                            }
                         } else if v != 0 && (v & 1) == 0 {
                             col.mark_extern_word(v);
                         }
@@ -971,10 +1528,15 @@ pub(crate) unsafe fn collect_store_gc(
                     // Immediate i31 key (always alive if ever placed in a WeakMap table).
                     let v = unsafe { *val_slot };
                     if v != 0 && (v & 1) == 0 && col.in_from(v) {
+                        let was_fwd = unsafe { col.forwarded_addr(v).is_some() };
                         let nv = unsafe { col.evacuate(v) };
                         unsafe { *val_slot = nv };
-                        progress = true;
-                        unsafe { col.scan_to_completion() };
+                        if !was_fwd {
+                            progress = true;
+                            unsafe { col.scan_to_completion() };
+                        }
+                    } else if v != 0 && (v & 1) == 0 {
+                        col.mark_extern_word(v);
                     }
                 }
             }
@@ -983,28 +1545,12 @@ pub(crate) unsafe fn collect_store_gc(
 
     // ---- 4. Finalize weak tables, ephemerons, weak refs, and check OOM ----
     if col.oom {
-        let cur_to_commit = *store.gc.space_commit_mut(to_is_b);
-        if cur_to_commit > 0 {
-            store.interrupt.remove_region(to_space_page_start);
-            unsafe {
-                let _ = libc::madvise(
-                    to_space_page_start as *mut libc::c_void,
-                    cur_to_commit,
-                    libc::MADV_DONTNEED,
-                );
-                let _ = libc::mprotect(
-                    to_space_page_start as *mut libc::c_void,
-                    cur_to_commit,
-                    libc::PROT_NONE,
-                );
-            }
-            *store.gc.space_commit_mut(to_is_b) = 0;
-            *store.gc.space_dirty_mut(to_is_b) = 0;
-        }
+        let _ = col;
+        store.gc.weak_tables = old_weak_tables;
+        store.gc.shrink_old_space(to_is_b, 0);
         return Err(GcHeapOutOfMemory::new((), req_bytes));
     }
 
-    // Clear dead `(key, value)` slots inside surviving registered WeakMap arrays.
     for &arr_ptr in col.live_weak_tables.iter() {
         let len = unsafe { *((arr_ptr + 4) as *const u32) } as usize;
         let pairs = len / 2;
@@ -1021,7 +1567,6 @@ pub(crate) unsafe fn collect_store_gc(
         }
     }
 
-    // Update or retire `GcEphemeron` entries.
     for (idx, e) in store.gc.ephemerons.iter_mut().enumerate() {
         if !e.live {
             continue;
@@ -1039,7 +1584,6 @@ pub(crate) unsafe fn collect_store_gc(
         }
     }
 
-    // Update or retire `WeakAnyRef` entries.
     let mut retired_any_weak = false;
     for (idx, w) in store.gc.weak_refs.iter_mut().enumerate() {
         if !w.live {
@@ -1063,11 +1607,11 @@ pub(crate) unsafe fn collect_store_gc(
     }
 
     let final_alloc = col.to_alloc;
-    let final_limit = col.to_limit;
     let _ = col;
     drop(types_snap);
 
     store.gc.weak_tables = live_weak_table_set;
+    store.gc.old_card_first_obj = new_card_first_obj;
 
     // ---- 5. Sweep unreachable `ExternRef` host payloads (strictly AFTER ephemeron fixed-point!) ----
     let mut dropped_payloads: Vec<Box<dyn Any + Send + Sync>> = Vec::new();
@@ -1084,133 +1628,109 @@ pub(crate) unsafe fn collect_store_gc(
         }
     }
 
-    // ---- 6. Flip semi-spaces & return excess / reclaimed old pages to Linux ----
-    let old_space_page_start = if old_is_b {
-        store.gc.space_b_start()
-    } else {
-        store.gc.space_a_start()
-    };
-    let old_commit = *store.gc.space_commit_mut(old_is_b);
-    let old_used_pages =
-        ((old_alloc_ptr.saturating_sub(old_space_page_start as u64) as usize + 4095) & !4095)
-            .min(old_commit);
-    {
-        let old_dirty = store.gc.space_dirty_mut(old_is_b);
-        *old_dirty = (*old_dirty).max(old_used_pages).min(old_commit);
-    }
+    // ---- 6. Flip Old semi-spaces, reset Young Nursery, & return excess/reclaimed pages ----
+    let old_commit = *store.gc.old_commit_mut(old_is_b);
     let warm_commit = (SPACE_START_PAD + store.gc.init_cap.min(store.gc.heap_cap) + 4095) & !4095;
     let keep_old_commit = if reclaim_old {
         0
     } else {
         warm_commit.min(old_commit)
     };
-    if old_commit > keep_old_commit {
-        if keep_old_commit == 0 {
-            store.interrupt.remove_region(old_space_page_start);
-        }
-        let tail_ptr = (old_space_page_start + keep_old_commit) as *mut libc::c_void;
-        let tail_len = old_commit - keep_old_commit;
-        unsafe {
-            let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
-            let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
-        }
-        *store.gc.space_commit_mut(old_is_b) = keep_old_commit;
-        let old_dirty = store.gc.space_dirty_mut(old_is_b);
-        *old_dirty = (*old_dirty).min(keep_old_commit);
-        if keep_old_commit > 0 {
-            store
-                .interrupt
-                .set_region(old_space_page_start, keep_old_commit);
-        }
-    }
+    store.gc.shrink_old_space(old_is_b, keep_old_commit);
 
-    store.gc.active_is_b = to_is_b;
-    store.gc.from_cap = target_cap;
-    store.state.gc_from_base = to_base;
-    store.state.gc_from_cap = target_cap as u64;
-    store.state.gc_to_base = (old_space_page_start + SPACE_START_PAD) as u64;
-    store.state.gc_to_cap = 0;
-    store.state.gc_alloc_ptr = final_alloc;
-    store.state.gc_alloc_limit = final_limit;
+    store.gc.old_active_is_b = to_is_b;
+    store.gc.old_alloc_ptr = final_alloc;
+    store.gc.old_cap = target_cap;
+
+    let nursery_used_pages =
+        ((from_nursery_end.saturating_sub(store.gc.nursery_start() as u64) as usize + 4095)
+            & !4095)
+            .min(store.gc.nursery_commit);
+    store.gc.nursery_dirty = store
+        .gc
+        .nursery_dirty
+        .max(nursery_used_pages)
+        .min(store.gc.nursery_commit);
+    store.state.gc_alloc_ptr = nursery_base;
     store.state.gc_count = store.state.gc_count.wrapping_add(1);
+    store.gc.major_gc_count = store.gc.major_gc_count.wrapping_add(1);
 
     // Drop swept `ExternRef` payloads AFTER Store GC state is completely consistent!
     drop(dropped_payloads);
 
-    // ---- 7. Resize semi-space from actual post-GC live bytes (grow if >50% full or req_bytes
-    //         doesn't fit; shrink back toward `init_cap` after transient allocation bursts) ----
-    let live_bytes = store.state.gc_alloc_ptr - store.state.gc_from_base;
+    // ---- 7. Resize Old Space & Young Nursery from actual post-Major live bytes + req_bytes ----
+    let live_bytes = store.gc.old_alloc_ptr - to_base;
     let needed_total = live_bytes.saturating_add(req_bytes);
     if needed_total > heap_cap {
+        // Still release empty nursery burst pages if reclaiming/failing cleanly.
+        let reset_cap = store.gc.nursery_init_cap.min(store.gc.heap_cap);
+        store.gc.shrink_nursery(reset_cap);
+        store.gc.nursery_cap = reset_cap;
+        store.state.gc_alloc_limit = nursery_base + reset_cap as u64;
         return Err(GcHeapOutOfMemory::new((), req_bytes));
     }
-    let cur_cap = store.gc.from_cap;
+
     let live_usize = live_bytes as usize;
-    let needed_usize = needed_total as usize;
     let heap_cap_usize = heap_cap as usize;
-    if needed_total > (cur_cap as u64)
-        || (live_usize.saturating_mul(2) >= cur_cap && cur_cap < heap_cap_usize)
-    {
-        let goal = needed_usize.max(live_usize.saturating_mul(2));
-        let mut grown_cap = cur_cap.max(64 * 1024);
-        while grown_cap < goal && grown_cap < heap_cap_usize {
+    let nursery_init = store.gc.nursery_init_cap.min(heap_cap_usize);
+    let cur_old_cap = store.gc.old_cap;
+    let old_goal = live_usize
+        .saturating_mul(2)
+        .max(live_usize.saturating_add(nursery_init))
+        .max(store.gc.init_cap)
+        .min(heap_cap_usize);
+
+    if old_goal > cur_old_cap {
+        let mut grown_cap = cur_old_cap.max(64 * 1024);
+        while grown_cap < old_goal && grown_cap < heap_cap_usize {
             grown_cap = grown_cap.saturating_mul(2).min(heap_cap_usize);
         }
         grown_cap = ((grown_cap + 4095) & !4095).min(heap_cap_usize);
-        if grown_cap > cur_cap {
-            let grown_commit = (SPACE_START_PAD + grown_cap + 4095) & !4095;
-            let cur_to_commit = *store.gc.space_commit_mut(to_is_b);
-            if grown_commit > cur_to_commit {
-                let delta_ptr = (to_space_page_start + cur_to_commit) as *mut libc::c_void;
-                let delta_len = grown_commit - cur_to_commit;
-                let rc = unsafe {
-                    libc::mprotect(delta_ptr, delta_len, libc::PROT_READ | libc::PROT_WRITE)
-                };
-                if rc != 0 {
-                    return Err(GcHeapOutOfMemory::new((), req_bytes));
-                }
-                *store.gc.space_commit_mut(to_is_b) = grown_commit;
-                store
-                    .interrupt
-                    .set_region(to_space_page_start, grown_commit);
+        if grown_cap > cur_old_cap {
+            if !store.gc.ensure_old_committed(to_is_b, grown_cap) {
+                return Err(GcHeapOutOfMemory::new((), req_bytes));
             }
-            store.gc.from_cap = grown_cap;
-            store.state.gc_from_cap = grown_cap as u64;
-            store.state.gc_alloc_limit = store.state.gc_from_base + grown_cap as u64;
+            store.gc.old_cap = grown_cap;
         }
-    } else if cur_cap > store.gc.init_cap
-        && live_usize.saturating_mul(4) < cur_cap
-        && needed_usize <= cur_cap / 2
+    } else if cur_old_cap > store.gc.init_cap
+        && live_usize.saturating_mul(4) < cur_old_cap
+        && old_goal <= cur_old_cap / 2
     {
-        let shrunk_cap = ((live_usize
-            .saturating_mul(2)
-            .max(needed_usize)
-            .max(store.gc.init_cap)
-            + 4095)
-            & !4095)
-            .min(cur_cap);
-        if shrunk_cap < cur_cap {
+        let shrunk_cap = ((old_goal + 4095) & !4095).min(cur_old_cap);
+        if shrunk_cap < cur_old_cap {
             let shrunk_commit = (SPACE_START_PAD + shrunk_cap + 4095) & !4095;
-            let cur_to_commit = *store.gc.space_commit_mut(to_is_b);
-            if shrunk_commit < cur_to_commit {
-                let tail_ptr = (to_space_page_start + shrunk_commit) as *mut libc::c_void;
-                let tail_len = cur_to_commit - shrunk_commit;
-                unsafe {
-                    let _ = libc::madvise(tail_ptr, tail_len, libc::MADV_DONTNEED);
-                    let _ = libc::mprotect(tail_ptr, tail_len, libc::PROT_NONE);
-                }
-                *store.gc.space_commit_mut(to_is_b) = shrunk_commit;
-                let to_dirty = store.gc.space_dirty_mut(to_is_b);
-                *to_dirty = (*to_dirty).min(shrunk_commit);
-                store
-                    .interrupt
-                    .set_region(to_space_page_start, shrunk_commit);
-            }
-            store.gc.from_cap = shrunk_cap;
-            store.state.gc_from_cap = shrunk_cap as u64;
-            store.state.gc_alloc_limit = store.state.gc_from_base + shrunk_cap as u64;
+            store.gc.shrink_old_space(to_is_b, shrunk_commit);
+            store.gc.old_cap = shrunk_cap;
         }
     }
+
+    let req_usize = usize::try_from(req_bytes).unwrap_or(usize::MAX);
+    let max_nursery = (NURSERY_RESERVE_BYTES - 4096).min(heap_cap_usize);
+    if req_usize > max_nursery {
+        return Err(GcHeapOutOfMemory::new((), req_bytes));
+    }
+    let desired_nursery = ((req_usize.max(nursery_init) + 4095) & !4095).min(max_nursery);
+    if desired_nursery > store.gc.nursery_cap {
+        if !store.gc.ensure_nursery_committed(desired_nursery) {
+            return Err(GcHeapOutOfMemory::new((), req_bytes));
+        }
+        store.gc.nursery_cap = desired_nursery;
+    } else if desired_nursery < store.gc.nursery_cap {
+        store.gc.shrink_nursery(desired_nursery);
+        store.gc.nursery_cap = desired_nursery;
+    }
+    if reclaim_old && req_bytes == 0 && store.gc.nursery_dirty > 0 {
+        let len = store.gc.nursery_dirty.min(store.gc.nursery_commit);
+        unsafe {
+            let _ = libc::madvise(
+                store.gc.nursery_start() as *mut libc::c_void,
+                len,
+                libc::MADV_DONTNEED,
+            );
+        }
+        store.gc.nursery_dirty = 0;
+    }
+    store.state.gc_alloc_limit = nursery_base + store.gc.nursery_cap as u64;
 
     Ok(())
 }
@@ -1351,6 +1871,24 @@ impl<T: GcRefType> std::fmt::Debug for OwnedRooted<T> {
 }
 
 impl<T: GcRefType> OwnedRooted<T> {
+    pub(crate) fn from_abi_word(
+        store: &mut StoreInner,
+        word: u64,
+        is_extern: bool,
+        is_exn: bool,
+    ) -> Self {
+        let (idx, gen_id) = store.gc.alloc_host_root(word, is_extern, is_exn, true);
+        Self {
+            store_id: store.id,
+            token: Arc::new(OwnedRootToken {
+                slot_idx: idx,
+                generation: gen_id,
+                cleanup: Arc::clone(&store.dropped_owned_roots),
+            }),
+            _marker: PhantomData,
+        }
+    }
+
     pub fn to_rooted(&self, mut store: impl AsContextMut) -> Rooted<T> {
         let inner = store.as_store_inner_mut();
         assert_eq!(
@@ -1636,7 +2174,15 @@ impl Rooted<StructRef> {
         if !mutable {
             return Err(Error::msg("cannot mutate immutable struct field"));
         }
-        unsafe { write_gc_storage(inner, (word + u64::from(offset)) as *mut u8, storage, &val) }
+        unsafe {
+            write_gc_storage(
+                inner,
+                word,
+                (word + u64::from(offset)) as *mut u8,
+                storage,
+                &val,
+            )
+        }
     }
 }
 
@@ -1738,7 +2284,7 @@ impl Rooted<ArrayRef> {
             return Err(Error::msg("cannot mutate immutable array element"));
         }
         let off = 8u64 + u64::from(index) * u64::from(elem.byte_size());
-        unsafe { write_gc_storage(inner, (word + off) as *mut u8, elem, &val) }
+        unsafe { write_gc_storage(inner, word, (word + off) as *mut u8, elem, &val) }
     }
 
     /// Bulk-copies `[start..start + dst.len()]` of an `i8`-packed GC array into `dst`.
@@ -1971,10 +2517,7 @@ impl AnyRef {
                 false,
             ));
         }
-        if inner
-            .gc
-            .is_in_from_space(word, inner.state.gc_from_base, inner.state.gc_from_cap)
-        {
+        if inner.gc.is_in_gc_arena(word) {
             return Ok(Rooted::from_abi_word(inner, word, false, false));
         }
         // Box host externref into a 16-byte `InternalExternBox` on the GC heap!
@@ -2079,7 +2622,7 @@ impl StructRef {
         // Write fields AFTER allocation (values are already rooted in `Val`, so `read_abi_word` reads
         // post-GC moved pointers if `gc_bump_alloc` triggered a collection!).
         for ((off, sk), val) in field_specs.into_iter().zip(fields.iter()) {
-            unsafe { write_gc_storage(inner, (ptr + u64::from(off)) as *mut u8, sk, val)? };
+            unsafe { write_gc_storage(inner, ptr, (ptr + u64::from(off)) as *mut u8, sk, val)? };
         }
         Ok(Rooted::from_abi_word(inner, ptr, false, false))
     }
@@ -2143,8 +2686,7 @@ impl ArrayRef {
                 // warm-reuse dirty watermark; pages strictly beyond both are freshly committed /
                 // `MADV_DONTNEED`ed anonymous memory guaranteed OS-zeroed (avoiding faulting
                 // multi-GiB zero arrays while remaining sound across warm semi-space reuse).
-                let active_dirty_addr =
-                    (inner.gc.active_space_start() + inner.gc.active_dirty()) as u64;
+                let active_dirty_addr = (inner.gc.nursery_start() + inner.gc.nursery_dirty) as u64;
                 let first_page_end = (data_start + 4095) & !4095;
                 let must_zero_end = first_page_end
                     .max(active_dirty_addr)
@@ -2158,7 +2700,7 @@ impl ArrayRef {
             } else {
                 for i in 0..len {
                     let off = 8u64 + u64::from(i) * elem_sz;
-                    unsafe { write_gc_storage(inner, (ptr + off) as *mut u8, elem, init)? };
+                    unsafe { write_gc_storage(inner, ptr, (ptr + off) as *mut u8, elem, init)? };
                 }
             }
         }
@@ -2199,7 +2741,7 @@ impl ArrayRef {
         }
         for (i, val) in elems.iter().enumerate() {
             let off = 8u64 + (i as u64) * elem_sz;
-            unsafe { write_gc_storage(inner, (ptr + off) as *mut u8, elem, val)? };
+            unsafe { write_gc_storage(inner, ptr, (ptr + off) as *mut u8, elem, val)? };
         }
         Ok(Rooted::from_abi_word(inner, ptr, false, false))
     }
@@ -2438,9 +2980,9 @@ impl Rooted<ExnRef> {
 /// Weak reference to a GC heap object owned by an `owner` object; clears if either dies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WeakAnyRef {
-    store_id: u64,
-    slot_idx: u32,
-    generation: u32,
+    pub(crate) store_id: u64,
+    pub(crate) slot_idx: u32,
+    pub(crate) generation: u32,
 }
 
 impl WeakAnyRef {
@@ -2534,9 +3076,9 @@ pub enum GcEphemeronUpdate {
 /// Collector-managed ephemeron edge `(owner, key) -> Option<value>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GcEphemeron {
-    store_id: u64,
-    slot_idx: u32,
-    generation: u32,
+    pub(crate) store_id: u64,
+    pub(crate) slot_idx: u32,
+    pub(crate) generation: u32,
 }
 
 /// Borrowed non-collecting view of a Store's ephemeron table (passed to `GcEphemeron::with_raw_access`).
@@ -3166,6 +3708,7 @@ unsafe fn read_gc_storage(
 
 unsafe fn write_gc_storage(
     store: &StoreInner,
+    obj_ptr: u64,
     ptr: *mut u8,
     sk: GcStorageKind,
     val: &Val,
@@ -3214,7 +3757,12 @@ unsafe fn write_gc_storage(
                 };
                 *(ptr as *mut u128) = v;
             }
-            GcStorageKind::GcRef | GcStorageKind::ExternRef | GcStorageKind::OtherRef => {
+            GcStorageKind::GcRef | GcStorageKind::ExternRef => {
+                let word = val.to_abi_word(store)?;
+                *(ptr as *mut u64) = word;
+                store.gc.write_barrier(obj_ptr, word);
+            }
+            GcStorageKind::OtherRef => {
                 *(ptr as *mut u64) = val.to_abi_word(store)?;
             }
         }

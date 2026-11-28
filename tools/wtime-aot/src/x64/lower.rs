@@ -2142,12 +2142,73 @@ impl<'a> Lower<'a> {
                     self.ir.func_index, self.cur_bb
                 )
             })?;
+        if !plan.gc_regs.is_empty() || !plan.ext_regs.is_empty() {
+            return Err(format!(
+                "x64: unexpected live GC regs at call safepoint fn {} bb{} inst {inst_idx}",
+                self.ir.func_index, self.cur_bb
+            ));
+        }
         self.asm.record_safepoint(
             self.frame_caller_ret_off(),
             plan.gc_slots.clone(),
             plan.ext_slots.clone(),
         );
         Ok(())
+    }
+
+    /// Emits the generational GC card-marking write barrier for `StoreCdylib` when storing a
+    /// traced reference (`GcRef`/`ExternRef`) into a GC struct or array.
+    ///
+    /// Fast path (Young target `obj >= nursery_base`): 3 instructions, zero memory writes.
+    /// Slow path (Old target `< nursery_base` receiving a Young/extern ref): marks 512-byte card
+    /// `card_table[(obj - arena_base) >> 9] = 1` using only `SCRATCH_GP1` + `[R15 + OFF_SCRATCH_TMP]`.
+    fn emit_store_gc_write_barrier(&mut self, obj_reg: Gp, val_reg: Option<Gp>, check_null: bool) {
+        if !self.layout.is_store {
+            return;
+        }
+        debug_assert_ne!(obj_reg, SCRATCH_GP1);
+        let lbl_done = self.asm.new_label();
+        if check_null {
+            self.asm.test_rr(true, obj_reg, obj_reg);
+            self.asm.jcc(Cond::E, lbl_done);
+        }
+        self.asm
+            .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
+        self.asm.cmp_rm(
+            true,
+            obj_reg,
+            Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_TO_CAP),
+        );
+        self.asm.jcc(Cond::Ae, lbl_done);
+        if let Some(vr) = val_reg
+            && vr != SCRATCH_GP1
+        {
+            self.asm
+                .cmp_rm(true, vr, Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_TO_CAP));
+            self.asm.jcc(Cond::B, lbl_done);
+        }
+        // Rare Old -> Young store: compute card index `(obj_reg - arena_base) >> 9` into SCRATCH_GP1.
+        self.asm.mov_rm(
+            true,
+            SCRATCH_GP1,
+            Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_FROM_BASE),
+        );
+        self.asm.neg(true, SCRATCH_GP1);
+        self.asm.add_rr(true, SCRATCH_GP1, obj_reg);
+        self.asm.shr_imm(true, SCRATCH_GP1, 9);
+        self.asm
+            .mov_mr(true, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), SCRATCH_GP1);
+        self.asm
+            .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
+        self.asm.mov_rm(
+            true,
+            SCRATCH_GP1,
+            Mem::base_disp(SCRATCH_GP1, gc_rt::GC_OFF_TO_BASE),
+        );
+        self.asm
+            .add_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+        self.asm.mov_mi8(Mem::base(SCRATCH_GP1), 1);
+        self.asm.bind(lbl_done);
     }
 
     /// Writes the 32-bit (or zero-extended 64-bit for structs) GC object header word to `[obj_reg + 0]`.
@@ -10389,6 +10450,9 @@ impl<'a> Lower<'a> {
                     | GcStorageKind::OtherRef => {
                         let vr = self.gp_read(val, SCRATCH_GP1);
                         self.asm.mov_mr(true, mem, vr);
+                        if matches!(fd.storage, GcStorageKind::GcRef | GcStorageKind::ExternRef) {
+                            self.emit_store_gc_write_barrier(or, Some(vr), false);
+                        }
                     }
                     GcStorageKind::F32 => {
                         let fx = self.fp_read(val, SCRATCH_FP1);
@@ -10846,6 +10910,12 @@ impl<'a> Lower<'a> {
                     | GcStorageKind::OtherRef => {
                         let vr = self.gp_read(val, SCRATCH_GP1);
                         self.asm.mov_mr(true, dst, vr);
+                        if self.layout.is_store
+                            && matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef)
+                        {
+                            let ar_wb = self.gp_read(arr, SCRATCH_GP2);
+                            self.emit_store_gc_write_barrier(ar_wb, Some(vr), false);
+                        }
                     }
                     GcStorageKind::F32 => {
                         let fx = self.fp_read(val, SCRATCH_FP1);
@@ -10924,6 +10994,9 @@ impl<'a> Lower<'a> {
                         emit_parallel_moves(&mut self.asm, &moves);
                     }
                 }
+                if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef) {
+                    self.emit_store_gc_write_barrier(Gp::Rdi, Some(Gp::Rdx), true);
+                }
                 self.asm.mov_ri32(Gp::R8, elem_sz);
                 self.asm
                     .call_reloc(RelocTarget::Helper(HELPER_GC_ARRAY_FILL));
@@ -10941,8 +11014,8 @@ impl<'a> Lower<'a> {
                 ..
             } => {
                 let gt = self.module.gc_type(dst_ty);
-                let elem_sz = match gt.composite {
-                    GcCompositeInfo::Array { elem, .. } => elem.byte_size(),
+                let (elem, elem_sz) = match gt.composite {
+                    GcCompositeInfo::Array { elem, .. } => (elem, elem.byte_size()),
                     _ => return Err("x64: ArrayCopy on non-array type".into()),
                 };
                 let moves = [
@@ -10961,6 +11034,9 @@ impl<'a> Lower<'a> {
                     (MoveLoc::Gp(Gp::R8), MoveLoc::from(self.loc(len)), Ty::I32),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
+                if matches!(elem, GcStorageKind::GcRef | GcStorageKind::ExternRef) {
+                    self.emit_store_gc_write_barrier(Gp::Rdi, None, true);
+                }
                 self.asm.mov_ri32(Gp::R9, elem_sz);
                 self.asm
                     .call_reloc(RelocTarget::Helper(HELPER_GC_ARRAY_COPY));
@@ -10997,13 +11073,17 @@ impl<'a> Lower<'a> {
                 self.asm.jcc(Cond::Ne, prop);
             }
             Op::ArrayInitElem {
+                ty,
                 elem,
                 arr,
                 dst,
                 src,
                 len,
-                ..
             } => {
+                let elem_storage = match self.module.gc_type(ty).composite {
+                    GcCompositeInfo::Array { elem, .. } => elem,
+                    _ => return Err("x64: ArrayInitElem on non-array type".into()),
+                };
                 let moves = [
                     (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(arr)), Ty::I64),
                     (MoveLoc::Gp(Gp::Rsi), MoveLoc::from(self.loc(dst)), Ty::I32),
@@ -11011,6 +11091,12 @@ impl<'a> Lower<'a> {
                     (MoveLoc::Gp(Gp::Rcx), MoveLoc::from(self.loc(len)), Ty::I32),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
+                if matches!(
+                    elem_storage,
+                    GcStorageKind::GcRef | GcStorageKind::ExternRef
+                ) {
+                    self.emit_store_gc_write_barrier(Gp::Rdi, None, true);
+                }
                 self.asm.mov_ri32(Gp::R8, elem);
                 self.asm
                     .call_reloc(RelocTarget::Helper(HELPER_GC_ARRAY_INIT_ELEM));
@@ -12995,9 +13081,20 @@ pub fn lower_ir_to_x64_with_budget(
         let lbl = l.asm.new_label();
         let push_bytes =
             i32::try_from(alloc.used_callee_gp.len() * 8).map_err(|_| "callee save overflow")?;
+        let max_cold_gc_spill: i32 = if ir.uses_gc {
+            alloc
+                .safepoints
+                .iter()
+                .map(|sp| (((sp.gc_regs.len() + sp.ext_regs.len()) * 8) + 15) & !15)
+                .max()
+                .unwrap_or(0) as i32
+        } else {
+            0
+        };
         let total_push_and_frame = alloc
             .frame_size
             .checked_add(push_bytes)
+            .and_then(|v| v.checked_add(max_cold_gc_spill))
             .and_then(|v| v.checked_add(ir.elided_callee_stack_bytes))
             .ok_or("x64: stack check frame size overflow")?;
         l.asm
@@ -13369,13 +13466,76 @@ pub fn lower_ir_to_x64_with_budget(
             l.asm.bind(stub.slow_lbl);
             l.cur_bb = stub.bb;
             l.cur_inst = stub.inst;
+            let caller_ret_off = l.frame_caller_ret_off();
+            let plan = l.alloc.safepoint_for(stub.bb, stub.inst).ok_or_else(|| {
+                format!(
+                    "x64: missing SafepointPlan for cold GC stub fn {} bb{} inst {}",
+                    l.ir.func_index, stub.bb, stub.inst
+                )
+            })?;
+            let n_regs = plan.gc_regs.len() + plan.ext_regs.len();
+            let pad = if n_regs > 0 {
+                (((n_regs * 8) + 15) & !15) as i32
+            } else {
+                0
+            };
+            let (stub_gc_slots, stub_ext_slots) = if pad > 0 {
+                l.asm.sub_ri(true, Gp::Rsp, pad);
+                let mut slot_i = 0i32;
+                let mut gslots = Vec::with_capacity(plan.gc_regs.len() + plan.gc_slots.len());
+                let mut eslots = Vec::with_capacity(plan.ext_regs.len() + plan.ext_slots.len());
+                for &g in &plan.gc_regs {
+                    l.asm.mov_mr(true, Mem::base_disp(Gp::Rsp, slot_i), g);
+                    gslots.push(slot_i);
+                    slot_i += 8;
+                }
+                for &g in &plan.ext_regs {
+                    l.asm.mov_mr(true, Mem::base_disp(Gp::Rsp, slot_i), g);
+                    eslots.push(slot_i);
+                    slot_i += 8;
+                }
+                for &off in &plan.gc_slots {
+                    gslots.push(off + pad);
+                }
+                for &off in &plan.ext_slots {
+                    eslots.push(off + pad);
+                }
+                (gslots, eslots)
+            } else {
+                (plan.gc_slots.clone(), plan.ext_slots.clone())
+            };
             match stub.kind {
                 ColdGcAllocKind::FixedStore(sz_i32) => {
                     l.asm.mov_ri64(SCRATCH_GP2, sz_i32 as u64);
-                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-                    l.record_gc_safepoint(stub.inst)?;
-                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-                    l.asm.jcc(Cond::Ne, trap_alloc);
+                }
+                ColdGcAllocKind::FixedStandalone(size_bytes) => {
+                    l.asm.mov_ri64(SCRATCH_GP2, u64::from(size_bytes));
+                }
+                ColdGcAllocKind::DynStore => {
+                    l.asm
+                        .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+                }
+                ColdGcAllocKind::DynStandalone => {}
+            }
+            l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
+            l.asm
+                .record_safepoint(caller_ret_off + (pad as u32), stub_gc_slots, stub_ext_slots);
+            if pad > 0 {
+                let mut reload_i = 0i32;
+                for &g in &plan.gc_regs {
+                    l.asm.mov_rm(true, g, Mem::base_disp(Gp::Rsp, reload_i));
+                    reload_i += 8;
+                }
+                for &g in &plan.ext_regs {
+                    l.asm.mov_rm(true, g, Mem::base_disp(Gp::Rsp, reload_i));
+                    reload_i += 8;
+                }
+                l.asm.add_ri(true, Gp::Rsp, pad);
+            }
+            l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+            l.asm.jcc(Cond::Ne, trap_alloc);
+            match stub.kind {
+                ColdGcAllocKind::FixedStore(sz_i32) => {
                     l.asm
                         .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
                     l.asm.mov_rm(
@@ -13387,11 +13547,6 @@ pub fn lower_ir_to_x64_with_budget(
                     l.asm.jmp(stub.ret_lbl);
                 }
                 ColdGcAllocKind::FixedStandalone(size_bytes) => {
-                    l.asm.mov_ri64(SCRATCH_GP2, u64::from(size_bytes));
-                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-                    l.record_gc_safepoint(stub.inst)?;
-                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-                    l.asm.jcc(Cond::Ne, trap_alloc);
                     l.asm.mov_rm(
                         true,
                         SCRATCH_GP2,
@@ -13408,12 +13563,6 @@ pub fn lower_ir_to_x64_with_budget(
                 }
                 ColdGcAllocKind::DynStore => {
                     l.asm
-                        .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
-                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-                    l.record_gc_safepoint(stub.inst)?;
-                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-                    l.asm.jcc(Cond::Ne, trap_alloc);
-                    l.asm
                         .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STORE_PTR));
                     l.asm.mov_rm(
                         true,
@@ -13425,10 +13574,6 @@ pub fn lower_ir_to_x64_with_budget(
                     l.asm.jmp(stub.ret_lbl);
                 }
                 ColdGcAllocKind::DynStandalone => {
-                    l.asm.call_reloc(RelocTarget::Helper(HELPER_GC_COLLECT));
-                    l.record_gc_safepoint(stub.inst)?;
-                    l.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
-                    l.asm.jcc(Cond::Ne, trap_alloc);
                     l.asm.mov_rm(
                         true,
                         SCRATCH_GP1,

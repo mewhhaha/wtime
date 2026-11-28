@@ -9,6 +9,7 @@ pub mod instance;
 pub mod memory;
 pub mod module;
 pub mod signal;
+pub mod snapshot;
 pub mod store;
 pub mod types;
 
@@ -30,6 +31,7 @@ pub use instance::{
 pub use memory::SharedMemory;
 pub use module::Module;
 pub use signal::InterruptHandle;
+pub use snapshot::StoreSnapshot;
 pub use store::{
     AsContext, AsContextMut, Store, StoreContext, StoreContextMut, StoreLimits, StoreLimitsBuilder,
 };

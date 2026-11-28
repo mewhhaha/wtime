@@ -3345,6 +3345,7 @@ pub fn verify_alloc_with_config(
             expected_remat: &[Option<RematConst>],
             bb: u32,
             inst_idx: u32,
+            allow_regs: bool,
         ) -> Result<(), String> {
             let Some(plan) = alloc.safepoint_for(bb, inst_idx) else {
                 return Err(format!(
@@ -3352,16 +3353,25 @@ pub fn verify_alloc_with_config(
                     self.func_index
                 ));
             };
-            // Verify zero live non-remat traced values reside in any GP register or RematAddr.
+            let mut exp_gc_regs: Vec<super::asm::Gp> = Vec::new();
+            let mut exp_ext_regs: Vec<super::asm::Gp> = Vec::new();
             for gid in 0..16 {
                 if let Some(vi) = self.gp_owner[gid]
                     && ir.val_ref_kind(Val(vi)).is_traced()
                     && expected_remat[vi as usize].is_none()
                 {
-                    return Err(format!(
-                        "verify_alloc fn {} bb{bb} inst {inst_idx}: live traced v{vi} in GP id {gid} at GC safepoint",
-                        self.func_index
-                    ));
+                    if allow_regs && let Loc::Gp(g) = alloc.locs[vi as usize] {
+                        match ir.val_ref_kind(Val(vi)) {
+                            ValRefKind::GcRef => exp_gc_regs.push(g),
+                            ValRefKind::ExternRef => exp_ext_regs.push(g),
+                            ValRefKind::None => {}
+                        }
+                    } else {
+                        return Err(format!(
+                            "verify_alloc fn {} bb{bb} inst {inst_idx}: live traced v{vi} in GP id {gid} at GC safepoint",
+                            self.func_index
+                        ));
+                    }
                 }
                 if self.remat_gp_refs[gid] > 0
                     && let Some(vi) = self.remat_gp_base[gid]
@@ -3374,6 +3384,10 @@ pub fn verify_alloc_with_config(
                     ));
                 }
             }
+            exp_gc_regs.sort_unstable_by_key(|g| g.id());
+            exp_gc_regs.dedup();
+            exp_ext_regs.sort_unstable_by_key(|g| g.id());
+            exp_ext_regs.dedup();
             // Collect exact expected spilled GC / Extern root offsets from live spill slots.
             let mut exp_gc: Vec<i32> = Vec::new();
             let mut exp_ext: Vec<i32> = Vec::new();
@@ -3394,10 +3408,22 @@ pub fn verify_alloc_with_config(
             exp_gc.dedup();
             exp_ext.sort_unstable();
             exp_ext.dedup();
-            if plan.gc_slots != exp_gc || plan.ext_slots != exp_ext {
+            if plan.gc_slots != exp_gc
+                || plan.ext_slots != exp_ext
+                || plan.gc_regs != exp_gc_regs
+                || plan.ext_regs != exp_ext_regs
+            {
                 return Err(format!(
-                    "verify_alloc fn {} bb{bb} inst {inst_idx}: SafepointPlan mismatch: got gc={:?} ext={:?}, expected gc={:?} ext={:?}",
-                    self.func_index, plan.gc_slots, plan.ext_slots, exp_gc, exp_ext
+                    "verify_alloc fn {} bb{bb} inst {inst_idx}: SafepointPlan mismatch: got gc={:?} ext={:?} gc_regs={:?} ext_regs={:?}, expected gc={:?} ext={:?} gc_regs={:?} ext_regs={:?}",
+                    self.func_index,
+                    plan.gc_slots,
+                    plan.ext_slots,
+                    plan.gc_regs,
+                    plan.ext_regs,
+                    exp_gc,
+                    exp_ext,
+                    exp_gc_regs,
+                    exp_ext_regs
                 ));
             }
             Ok(())
@@ -3661,7 +3687,7 @@ pub fn verify_alloc_with_config(
                 }
                 if ir.uses_gc {
                     expected_safepoint_count += 1;
-                    tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX)?;
+                    tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX, false)?;
                 }
                 for &v in ir.pool_slice(args) {
                     tracker.insert(v.0, ir, alloc, b, "term.args", None)?;
@@ -3698,7 +3724,7 @@ pub fn verify_alloc_with_config(
                 }
                 if ir.uses_gc {
                     expected_safepoint_count += 1;
-                    tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX)?;
+                    tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX, false)?;
                 }
                 tracker.insert(idx.0, ir, alloc, b, "term.idx", None)?;
                 for &v in ir.pool_slice(args) {
@@ -3722,7 +3748,14 @@ pub fn verify_alloc_with_config(
                         || store_forced_fallback
                     {
                         expected_safepoint_count += 1;
-                        tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, u32::MAX)?;
+                        tracker.check_gc_safepoint(
+                            ir,
+                            alloc,
+                            &expected_remat,
+                            b,
+                            u32::MAX,
+                            false,
+                        )?;
                     }
                 }
                 let mut term_err: Option<String> = None;
@@ -3893,7 +3926,7 @@ pub fn verify_alloc_with_config(
             }
             if ir.uses_gc && matches!(inst.op, Op::Call { .. } | Op::CallIndirect { .. }) {
                 expected_safepoint_count += 1;
-                tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, ii as u32)?;
+                tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, ii as u32, false)?;
             }
             let mut use_err: Option<String> = None;
             inst.op.for_each_use(&ir.val_pool, |v| {
@@ -3908,7 +3941,7 @@ pub fn verify_alloc_with_config(
             }
             if ir.uses_gc && inst.op.is_gc_alloc() {
                 expected_safepoint_count += 1;
-                tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, ii as u32)?;
+                tracker.check_gc_safepoint(ir, alloc, &expected_remat, b, ii as u32, true)?;
             }
         }
         // At block entry, all params + live_in must be mutually disjoint.

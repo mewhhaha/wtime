@@ -32,7 +32,7 @@ use super::{
 };
 
 /// Current `StoreCdylib` binary ABI version verified by `wtime-aot-host`.
-pub const STORE_ABI_VERSION: u32 = 1;
+pub const STORE_ABI_VERSION: u32 = 2;
 
 /// Single exported ELF symbol for every `X64Target::StoreCdylib` `.so` image.
 pub const STORE_EXPORT_NAMES: [&str; 1] = ["wt_store_get_desc"];
