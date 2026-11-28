@@ -2,6 +2,42 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.16] - 2026-11-28
+
+Unified `main` release combining `v0.1.14` (per-function x64 `StoreCdylib`
+incremental cache, x64 loop/SIMD/FP optimizations, and standalone Goose
+OS/math/sandbox imports) and `v0.1.15` (GC-aware SSA optimization, live GC-ref
+register allocation across bump-alloc safepoints, generational nursery + 512 B
+card-table Minor GC, and binary `StoreSnapshot` heap snapshots), plus sandboxed
+`env::gs_os_realpath` support across both `x64` and `aarch64`. Core crates
+(`wtime-types`, `wtime-decode`, `wtime-validate`, `wtime-runtime`) and
+`wtime-cli` remain `#![forbid(unsafe_code)]` with zero external production
+dependencies, and `tools/wtime-aot` remains `#![forbid(unsafe_code)]` with zero
+external production dependencies.
+
+### Ahead-of-time compiler (`tools/wtime-aot`)
+- **Sandboxed `env::gs_os_realpath` (`x64` & `aarch64`)**:
+  - Added `env::gs_os_realpath` for standalone executables
+    (`src/x64/{module,runtime,standalone_rt}.rs`,
+    `src/aarch64/{mod,standalone_rt}.rs`, `docs/wtime-aot/x64-abi.md`),
+    opening the target path with `O_PATH | O_CLOEXEC` beneath a `--allow-files`
+    grant via `openat2(RESOLVE_BENEATH)` before resolving its canonical path
+    through `/proc/self/fd/<fd>`.
+- **Unified `v0.1.14` + `v0.1.15` compiler & cache contract**:
+  - Merged `v0.1.15`'s GC-aware helper inlining, alias separation, read-only GC
+    GVN/CSE, live-across-alloc GC-ref register allocation, and generational
+    card-marking write barriers (`STORE_ABI_VERSION = 2`) onto `main`'s
+    `v0.1.14` loop/SIMD/FP and per-function incremental x64 cache pipeline,
+    bumping `inc_cache::FORMAT_VERSION` to `24`.
+
+### Multi-module Store host runtime (`tools/wtime-aot/host`)
+- **Unified generational GC, `StoreSnapshot`, and incremental x64 cache**:
+  - Combined `v0.1.15`'s 16 GiB generational nursery + 512 B card-table Minor
+    GC and `StoreSnapshot` (`capture_snapshot` / `restore_snapshot`) with
+    `v0.1.14`'s `Config::cache` per-function x64 incremental compilation cache
+    and raised memory64 host page cap, verified clean across `x86_64` and
+    `aarch64` builds.
+
 ## [0.1.15] - 2026-11-28
 
 `wtime-aot` GC-aware SSA optimization, live GC-ref register allocation across
