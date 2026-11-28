@@ -3146,11 +3146,32 @@ impl Builder {
             };
             return self.const_i32(i32::from(r));
         }
+        if a == b {
+            let r = matches!(
+                op,
+                CmpOp::Eq | CmpOp::LeS | CmpOp::LeU | CmpOp::GeS | CmpOp::GeU
+            );
+            return self.const_i32(i32::from(r));
+        }
         if self.as_i32(a).is_some() && self.as_i32(b).is_none() {
             std::mem::swap(&mut a, &mut b);
             op = op.swap();
         }
         if let Some(cb) = self.as_i32(b) {
+            let taut = match (op, cb) {
+                (CmpOp::LtU, 0)
+                | (CmpOp::GtU, -1)
+                | (CmpOp::LtS, i32::MIN)
+                | (CmpOp::GtS, i32::MAX) => Some(false),
+                (CmpOp::GeU, 0)
+                | (CmpOp::LeU, -1)
+                | (CmpOp::GeS, i32::MIN)
+                | (CmpOp::LeS, i32::MAX) => Some(true),
+                _ => None,
+            };
+            if let Some(r) = taut {
+                return self.const_i32(i32::from(r));
+            }
             return self.emit(Ty::I32, Op::I32CmpImm(op, a, cb));
         }
         self.emit(Ty::I32, Op::I32Cmp(op, a, b))
@@ -3172,14 +3193,35 @@ impl Builder {
             };
             return self.const_i32(i32::from(r));
         }
+        if a == b {
+            let r = matches!(
+                op,
+                CmpOp::Eq | CmpOp::LeS | CmpOp::LeU | CmpOp::GeS | CmpOp::GeU
+            );
+            return self.const_i32(i32::from(r));
+        }
         if self.as_i64(a).is_some() && self.as_i64(b).is_none() {
             std::mem::swap(&mut a, &mut b);
             op = op.swap();
         }
-        if let Some(cb) = self.as_i64(b)
-            && let Ok(imm32) = i32::try_from(cb)
-        {
-            return self.emit(Ty::I32, Op::I64CmpImm(op, a, imm32));
+        if let Some(cb) = self.as_i64(b) {
+            let taut = match (op, cb) {
+                (CmpOp::LtU, 0)
+                | (CmpOp::GtU, -1)
+                | (CmpOp::LtS, i64::MIN)
+                | (CmpOp::GtS, i64::MAX) => Some(false),
+                (CmpOp::GeU, 0)
+                | (CmpOp::LeU, -1)
+                | (CmpOp::GeS, i64::MIN)
+                | (CmpOp::LeS, i64::MAX) => Some(true),
+                _ => None,
+            };
+            if let Some(r) = taut {
+                return self.const_i32(i32::from(r));
+            }
+            if let Ok(imm32) = i32::try_from(cb) {
+                return self.emit(Ty::I32, Op::I64CmpImm(op, a, imm32));
+            }
         }
         self.emit(Ty::I32, Op::I64Cmp(op, a, b))
     }

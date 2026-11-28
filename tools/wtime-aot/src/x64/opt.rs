@@ -6575,7 +6575,7 @@ impl<'a> GvnState<'a> {
     }
 
     #[inline]
-    fn eval_rel_i32(&self, cop: CmpOp, a: Val, b: Val) -> Option<bool> {
+    fn eval_rel_u(&self, cop: CmpOp, a: Val, b: Val) -> Option<bool> {
         for &(rx, ry, strict) in &self.rel_facts {
             if rx == a
                 && ry == b
@@ -7702,22 +7702,26 @@ fn run_dom_gvn_and_bce_with_scratch(
                     EdgeFact::LtU(x, y) => {
                         st.mark_non_zero(y);
                         st.push_rel_fact(x, y, true);
-                        if let Some(by) = st.non_wrap_bound[y.0 as usize]
-                            && by > 0
-                        {
-                            st.tighten_bound(x, by - 1);
-                        }
-                        if let Some(cy) = st.checked_max[y.0 as usize] {
-                            st.record_checked(x, cy.saturating_add(1));
+                        if ir.val_tys[x.0 as usize] == Ty::I32 {
+                            if let Some(by) = st.non_wrap_bound[y.0 as usize]
+                                && by > 0
+                            {
+                                st.tighten_bound(x, by - 1);
+                            }
+                            if let Some(cy) = st.checked_max[y.0 as usize] {
+                                st.record_checked(x, cy.saturating_add(1));
+                            }
                         }
                     }
                     EdgeFact::LeU(x, y) => {
                         st.push_rel_fact(x, y, false);
-                        if let Some(by) = st.non_wrap_bound[y.0 as usize] {
-                            st.tighten_bound(x, by);
-                        }
-                        if let Some(cy) = st.checked_max[y.0 as usize] {
-                            st.record_checked(x, cy);
+                        if ir.val_tys[x.0 as usize] == Ty::I32 {
+                            if let Some(by) = st.non_wrap_bound[y.0 as usize] {
+                                st.tighten_bound(x, by);
+                            }
+                            if let Some(cy) = st.checked_max[y.0 as usize] {
+                                st.record_checked(x, cy);
+                            }
                         }
                     }
                     EdgeFact::NonZero(v) => st.mark_non_zero(v),
@@ -8880,7 +8884,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     inst.op =
                                         Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, imm)));
                                     ir_mutated = true;
-                                } else if let Some(bval) = st.eval_bound_i32(cop, a, imm) {
+                                } else if let Some(bval) = fold_taut_i32_cmp_imm(cop, imm)
+                                    .or_else(|| st.eval_bound_i32(cop, a, imm))
+                                {
                                     inst.op = Op::ConstI32(i32::from(bval));
                                     ir_mutated = true;
                                 }
@@ -8892,7 +8898,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     inst.op =
                                         Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, cb)));
                                     ir_mutated = true;
-                                } else if let Some(bval) = st.eval_rel_i32(cop, a, b) {
+                                } else if a == b {
+                                    inst.op = Op::ConstI32(i32::from(fold_taut_cmp_same(cop)));
+                                    ir_mutated = true;
+                                } else if let Some(bval) = st.eval_rel_u(cop, a, b) {
                                     inst.op = Op::ConstI32(i32::from(bval));
                                     ir_mutated = true;
                                 } else {
@@ -8903,7 +8912,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         cop = cop.swap();
                                     }
                                     if let Some(cb) = st.const32[b.0 as usize] {
-                                        if let Some(bval) = st.eval_bound_i32(cop, a, cb) {
+                                        if let Some(bval) = fold_taut_i32_cmp_imm(cop, cb)
+                                            .or_else(|| st.eval_bound_i32(cop, a, cb))
+                                        {
                                             inst.op = Op::ConstI32(i32::from(bval));
                                         } else {
                                             inst.op = Op::I32CmpImm(cop, a, cb);
@@ -8920,6 +8931,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         i64::from(imm),
                                     )));
                                     ir_mutated = true;
+                                } else if let Some(bval) =
+                                    fold_taut_i64_cmp_imm(cop, i64::from(imm))
+                                {
+                                    inst.op = Op::ConstI32(i32::from(bval));
+                                    ir_mutated = true;
                                 }
                             }
                             Op::I64Cmp(mut cop, mut a, mut b) => {
@@ -8929,6 +8945,12 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     inst.op =
                                         Op::ConstI32(i32::from(fold_i64_cmp_const(cop, ca, cb)));
                                     ir_mutated = true;
+                                } else if a == b {
+                                    inst.op = Op::ConstI32(i32::from(fold_taut_cmp_same(cop)));
+                                    ir_mutated = true;
+                                } else if let Some(bval) = st.eval_rel_u(cop, a, b) {
+                                    inst.op = Op::ConstI32(i32::from(bval));
+                                    ir_mutated = true;
                                 } else {
                                     let eff_cb = if ca_opt.is_some() && cb_opt.is_none() {
                                         std::mem::swap(&mut a, &mut b);
@@ -8937,11 +8959,14 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     } else {
                                         cb_opt
                                     };
-                                    if let Some(cb) = eff_cb
-                                        && let Ok(imm32) = i32::try_from(cb)
-                                    {
-                                        inst.op = Op::I64CmpImm(cop, a, imm32);
-                                        ir_mutated = true;
+                                    if let Some(cb) = eff_cb {
+                                        if let Some(bval) = fold_taut_i64_cmp_imm(cop, cb) {
+                                            inst.op = Op::ConstI32(i32::from(bval));
+                                            ir_mutated = true;
+                                        } else if let Ok(imm32) = i32::try_from(cb) {
+                                            inst.op = Op::I64CmpImm(cop, a, imm32);
+                                            ir_mutated = true;
+                                        }
                                     }
                                 }
                             }
@@ -9595,25 +9620,43 @@ fn run_dom_gvn_and_bce_with_scratch(
                             CmpBranchKind::I32(cop) => st.const32[a.0 as usize]
                                 .zip(st.const32[b.0 as usize])
                                 .map(|(ca, cb)| fold_i32_cmp_const(cop, ca, cb))
-                                .or_else(|| st.eval_rel_i32(cop, a, b))
+                                .or_else(|| (a == b).then(|| fold_taut_cmp_same(cop)))
+                                .or_else(|| st.eval_rel_u(cop, a, b))
                                 .or_else(|| {
-                                    st.const32[b.0 as usize]
-                                        .and_then(|cb| st.eval_bound_i32(cop, a, cb))
+                                    st.const32[b.0 as usize].and_then(|cb| {
+                                        fold_taut_i32_cmp_imm(cop, cb)
+                                            .or_else(|| st.eval_bound_i32(cop, a, cb))
+                                    })
                                 })
                                 .or_else(|| {
-                                    st.const32[a.0 as usize]
-                                        .and_then(|ca| st.eval_bound_i32(cop.swap(), b, ca))
+                                    st.const32[a.0 as usize].and_then(|ca| {
+                                        let sc = cop.swap();
+                                        fold_taut_i32_cmp_imm(sc, ca)
+                                            .or_else(|| st.eval_bound_i32(sc, b, ca))
+                                    })
                                 }),
                             CmpBranchKind::I32Imm(cop, imm) => st.const32[a.0 as usize]
                                 .map(|ca| fold_i32_cmp_const(cop, ca, imm))
+                                .or_else(|| fold_taut_i32_cmp_imm(cop, imm))
                                 .or_else(|| st.eval_bound_i32(cop, a, imm)),
                             CmpBranchKind::I64(cop) => st
                                 .get_const64(a)
                                 .zip(st.get_const64(b))
-                                .map(|(ca, cb)| fold_i64_cmp_const(cop, ca, cb)),
+                                .map(|(ca, cb)| fold_i64_cmp_const(cop, ca, cb))
+                                .or_else(|| (a == b).then(|| fold_taut_cmp_same(cop)))
+                                .or_else(|| st.eval_rel_u(cop, a, b))
+                                .or_else(|| {
+                                    st.get_const64(b)
+                                        .and_then(|cb| fold_taut_i64_cmp_imm(cop, cb))
+                                })
+                                .or_else(|| {
+                                    st.get_const64(a)
+                                        .and_then(|ca| fold_taut_i64_cmp_imm(cop.swap(), ca))
+                                }),
                             CmpBranchKind::I64Imm(cop, imm) => st
                                 .get_const64(a)
-                                .map(|ca| fold_i64_cmp_const(cop, ca, i64::from(imm))),
+                                .map(|ca| fold_i64_cmp_const(cop, ca, i64::from(imm)))
+                                .or_else(|| fold_taut_i64_cmp_imm(cop, i64::from(imm))),
                             _ => None,
                         };
                         if let Some(take_then) = known {
@@ -9738,8 +9781,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 CmpBranchKind::I64(cop) => {
                                     let eff = if on_then { cop } else { cop.invert_int() };
                                     match eff {
-                                        CmpOp::LtU => ef = EdgeFact::NonZero(b),
-                                        CmpOp::GtU => ef = EdgeFact::NonZero(a),
+                                        CmpOp::LtU => ef = EdgeFact::LtU(a, b),
+                                        CmpOp::GtU => ef = EdgeFact::LtU(b, a),
+                                        CmpOp::LeU => ef = EdgeFact::LeU(a, b),
+                                        CmpOp::GeU => ef = EdgeFact::LeU(b, a),
                                         _ => {}
                                     }
                                 }
@@ -15945,8 +15990,25 @@ fn rotate_counted_loops(
 
         // Check outside uses of values defined inside `body_set`:
         // - If any value defined in `body \ {hdr}` escapes, skip.
-        // - Any escaping `hdr.params` value must be used only under `exit_bb` with `preds[exit_bb] == [hdr]`
-        //   so we can promote it to `exit_bb.params` (receiving `p_i` from `hdr` and `back_i` from each latch).
+        // - Any escaping `hdr.params` value must be used only under `exit_bb` where EVERY
+        //   predecessor of `exit_bb` lies in `body_set` with a patchable branch/jump terminator,
+        //   so we can promote it to `exit_bb.params` (receiving `p_i` from `hdr`, `body_p_i` from
+        //   inner early-exit preds in `body \ {hdr}`, and `back_i` from each rotated latch).
+        let other_exit_preds: Vec<u32> = dom
+            .preds(exit_bb.0)
+            .iter()
+            .copied()
+            .filter(|&p| p != hdr)
+            .collect();
+        let exit_preds_ok = !dom.preds(exit_bb.0).is_empty()
+            && dom.preds(exit_bb.0).contains(&hdr)
+            && other_exit_preds.iter().all(|&p| {
+                body_set.contains(&p)
+                    && matches!(
+                        ir.blocks[p as usize].term,
+                        Term::Jump { .. } | Term::BranchIf { .. } | Term::CmpBranch { .. }
+                    )
+            });
         let mut promoted_hdr_vals: Vec<Val> = Vec::new();
         let mut rewrite_blocks: Vec<usize> = Vec::new();
         let mut outside_ok = true;
@@ -15971,11 +16033,7 @@ fn rotate_counted_loops(
                 }
                 let db = def_block[v.0 as usize];
                 if db != u32::MAX && body_set.contains(&db) {
-                    if db != hdr
-                        || dom.preds(exit_bb.0).len() != 1
-                        || dom.preds(exit_bb.0)[0] != hdr
-                        || !dom.dominates(exit_bb.0, b_idx as u32)
-                    {
+                    if db != hdr || !exit_preds_ok || !dom.dominates(exit_bb.0, b_idx as u32) {
                         *outside_ok = false;
                         return;
                     }
@@ -16024,8 +16082,14 @@ fn rotate_counted_loops(
         // Pre-check IR caps before allocating vals or pool slices.
         let added_vals = hdr_params_len + promoted_hdr_vals.len();
         let exit_extra_len = (exit_args.len as usize) + promoted_hdr_vals.len();
-        let needed_pool =
-            hdr_params_len * (1 + latches.len()) + exit_extra_len * (1 + latches.len());
+        let other_exit_pool = if promoted_hdr_vals.is_empty() {
+            0
+        } else {
+            other_exit_preds.len() * exit_extra_len * 2
+        };
+        let needed_pool = hdr_params_len * (1 + latches.len())
+            + exit_extra_len * (1 + latches.len())
+            + other_exit_pool;
         if ir.val_tys.len() + added_vals > MAX_IR_VALS_PER_FN
             || ir.val_pool.len() + needed_pool > MAX_VAL_POOL_PER_FN
         {
@@ -16187,6 +16251,78 @@ fn rotate_counted_loops(
 
         // Promote escaping `hdr.params` values to `exit_bb.params` and rewrite outside uses.
         if !promoted_hdr_vals.is_empty() {
+            if !other_exit_preds.is_empty() {
+                let promoted_body_vals: Vec<Val> = promoted_hdr_vals
+                    .iter()
+                    .map(|hp| body_val_map[hp])
+                    .collect();
+                for &ep in &other_exit_preds {
+                    let term = ir.blocks[ep as usize].term;
+                    match term {
+                        Term::Jump { target, args } if target == exit_bb => {
+                            let mut v = ir.pool_slice(args).to_vec();
+                            v.extend_from_slice(&promoted_body_vals);
+                            let nr = ir.push_pool(&v)?;
+                            ir.blocks[ep as usize].term = Term::Jump { target, args: nr };
+                        }
+                        Term::BranchIf {
+                            cond,
+                            then_bb,
+                            mut then_args,
+                            else_bb,
+                            mut else_args,
+                        } => {
+                            if then_bb == exit_bb {
+                                let mut v = ir.pool_slice(then_args).to_vec();
+                                v.extend_from_slice(&promoted_body_vals);
+                                then_args = ir.push_pool(&v)?;
+                            }
+                            if else_bb == exit_bb {
+                                let mut v = ir.pool_slice(else_args).to_vec();
+                                v.extend_from_slice(&promoted_body_vals);
+                                else_args = ir.push_pool(&v)?;
+                            }
+                            ir.blocks[ep as usize].term = Term::BranchIf {
+                                cond,
+                                then_bb,
+                                then_args,
+                                else_bb,
+                                else_args,
+                            };
+                        }
+                        Term::CmpBranch {
+                            kind,
+                            a,
+                            b,
+                            then_bb,
+                            mut then_args,
+                            else_bb,
+                            mut else_args,
+                        } => {
+                            if then_bb == exit_bb {
+                                let mut v = ir.pool_slice(then_args).to_vec();
+                                v.extend_from_slice(&promoted_body_vals);
+                                then_args = ir.push_pool(&v)?;
+                            }
+                            if else_bb == exit_bb {
+                                let mut v = ir.pool_slice(else_args).to_vec();
+                                v.extend_from_slice(&promoted_body_vals);
+                                else_args = ir.push_pool(&v)?;
+                            }
+                            ir.blocks[ep as usize].term = Term::CmpBranch {
+                                kind,
+                                a,
+                                b,
+                                then_bb,
+                                then_args,
+                                else_bb,
+                                else_args,
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
             let mut subst: Vec<Val> = (0..ir.val_tys.len() as u32).map(Val).collect();
             for &hp in &promoted_hdr_vals {
                 let np = ir.push_val(ir.val_tys[hp.0 as usize]);
@@ -16627,6 +16763,9 @@ pub fn optimize_func_stage2_with_options(
         }
         if fold_add_scaled(ir, scratch) {
             late_folded = true;
+            if strength_reduce_loop_add_scaled(ir, &dom)? {
+                late_folded = true;
+            }
         }
         if late_folded {
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
@@ -16638,6 +16777,7 @@ pub fn optimize_func_stage2_with_options(
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
         }
+        let _ = schedule_loop_fp_chains(ir, &dom);
         let _ = split_live_ranges_for_regalloc(ir, &dom, budget)?;
         let _ = post_rot_changed;
         Ok(())
@@ -16650,6 +16790,738 @@ pub fn optimize_func_stage2_with_options(
         ir.recompute_val_ref_kinds(module);
     }
     res
+}
+
+#[inline]
+fn fold_taut_cmp_same(op: CmpOp) -> bool {
+    matches!(
+        op,
+        CmpOp::Eq | CmpOp::LeS | CmpOp::LeU | CmpOp::GeS | CmpOp::GeU
+    )
+}
+
+#[inline]
+fn fold_taut_i32_cmp_imm(op: CmpOp, imm: i32) -> Option<bool> {
+    match (op, imm) {
+        (CmpOp::LtU, 0) | (CmpOp::GtU, -1) | (CmpOp::LtS, i32::MIN) | (CmpOp::GtS, i32::MAX) => {
+            Some(false)
+        }
+        (CmpOp::GeU, 0) | (CmpOp::LeU, -1) | (CmpOp::GeS, i32::MIN) | (CmpOp::LeS, i32::MAX) => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+fn fold_taut_i64_cmp_imm(op: CmpOp, imm: i64) -> Option<bool> {
+    match (op, imm) {
+        (CmpOp::LtU, 0) | (CmpOp::GtU, -1) | (CmpOp::LtS, i64::MIN) | (CmpOp::GtS, i64::MAX) => {
+            Some(false)
+        }
+        (CmpOp::GeU, 0) | (CmpOp::LeU, -1) | (CmpOp::GeS, i64::MIN) | (CmpOp::LeS, i64::MAX) => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+/// Exact modular 32-bit IV strength reduction for repeated `AddScaled { is64: false, base, idx,
+/// shift, disp }` expressions inside call-free natural loops.
+///
+/// For any loop-carried `iv` with constant per-iteration step `step` (I32 or I64), loop-invariant
+/// `base`, and `shift in 1..=3` (`scale = 1 << shift`), the 32-bit wrapping identity
+///   `(base + (iv + c) * scale + disp) mod 2^32 == (p + c * scale + disp) mod 2^32`
+/// holds unconditionally for `p_0 = (base + iv_0 * scale) mod 2^32` and `p_{k+1} = p_k + step*scale`,
+/// replacing multiple 3-component scaled LEAs (slow LEA on Zen 4) with 0-cost copies / fast 1-cycle
+/// `lea disp(p)` displacements and reusing `p + step*scale` as the backedge update when it dominates
+/// the latch (e.g. `insertion_sort`'s `xs[j - 1]` / `xs[j]` inner loop).
+fn strength_reduce_loop_add_scaled(ir: &mut IrFunc, dom: &CfgDom) -> Res<bool> {
+    let n_blocks = ir.blocks.len();
+    if n_blocks <= 1 || !ir.blocks.iter().any(|b| b.is_loop_header) {
+        return Ok(false);
+    }
+    let has_add_scaled = ir.blocks.iter().any(|bb| {
+        bb.insts.iter().any(|ins| {
+            matches!(
+                ins.op,
+                Op::AddScaled {
+                    is64: false,
+                    shift: 1..=3,
+                    ..
+                }
+            )
+        })
+    });
+    if !has_add_scaled {
+        return Ok(false);
+    }
+
+    let n_vals = ir.val_tys.len();
+    let mut def_block: Vec<u32> = vec![u32::MAX; n_vals];
+    let mut def_op: Vec<Option<Op>> = vec![None; n_vals];
+    for &p in &ir.params {
+        def_block[p.0 as usize] = 0;
+    }
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        for &p in &bb.params {
+            def_block[p.0 as usize] = bi as u32;
+        }
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                def_block[r.0 as usize] = bi as u32;
+                def_op[r.0 as usize] = Some(inst.op);
+            }
+            match inst.op {
+                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                    for &rv in ir.pool_slice(rets) {
+                        def_block[rv.0 as usize] = bi as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let match_iv_offset = |v: Val, iv: Val, def_op: &[Option<Op>]| -> Option<i32> {
+        let u = if let Some(Op::I32WrapI64(inner)) = def_op[v.0 as usize] {
+            inner
+        } else {
+            v
+        };
+        if u == iv {
+            return Some(0);
+        }
+        match def_op[u.0 as usize] {
+            Some(Op::I32BinImm(IntBinOp::Add, x, c)) | Some(Op::I64BinImm(IntBinOp::Add, x, c))
+                if x == iv =>
+            {
+                Some(c)
+            }
+            Some(Op::I32BinImm(IntBinOp::Sub, x, c)) | Some(Op::I64BinImm(IntBinOp::Sub, x, c))
+                if x == iv =>
+            {
+                c.checked_neg()
+            }
+            _ => None,
+        }
+    };
+
+    let edge_arg_for = |ir: &IrFunc, pred: u32, hdr: BlockId, pi: usize| -> Option<Val> {
+        match ir.blocks[pred as usize].term {
+            Term::Jump { target, args } if target == hdr => ir.pool_slice(args).get(pi).copied(),
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                if then_bb == hdr && else_bb != hdr {
+                    ir.pool_slice(then_args).get(pi).copied()
+                } else if else_bb == hdr && then_bb != hdr {
+                    ir.pool_slice(else_args).get(pi).copied()
+                } else if then_bb == hdr && else_bb == hdr {
+                    let ta = ir.pool_slice(then_args).get(pi).copied()?;
+                    let ea = ir.pool_slice(else_args).get(pi).copied()?;
+                    (ta == ea).then_some(ta)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+
+    let mut changed = false;
+    let mut in_loop = vec![false; n_blocks];
+    let mut loop_blocks: Vec<u32> = Vec::new();
+
+    for h in 1..n_blocks {
+        if !ir.blocks[h].is_loop_header
+            || ir.blocks[h].params.is_empty()
+            || ir.blocks[h].params.len() > 10
+        {
+            continue;
+        }
+        if ir.val_tys.len() + 32 >= MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + 128 >= MAX_VAL_POOL_PER_FN
+        {
+            break;
+        }
+        let h_u32 = h as u32;
+        let hdr_id = BlockId(h_u32);
+        let preds = dom.preds(h_u32);
+        let mut entry_preds: Vec<u32> = Vec::new();
+        let mut latch_preds: Vec<u32> = Vec::new();
+        let mut unsupported_pred = false;
+        for &p in preds {
+            if !matches!(
+                ir.blocks[p as usize].term,
+                Term::Jump { .. } | Term::BranchIf { .. } | Term::CmpBranch { .. }
+            ) {
+                unsupported_pred = true;
+                break;
+            }
+            if dom.dominates(h_u32, p) {
+                latch_preds.push(p);
+            } else {
+                entry_preds.push(p);
+            }
+        }
+        if unsupported_pred || entry_preds.is_empty() || latch_preds.len() != 1 {
+            continue;
+        }
+        let latch = latch_preds[0];
+
+        // Collect natural loop blocks for `(h, latch)`.
+        in_loop.fill(false);
+        loop_blocks.clear();
+        in_loop[h] = true;
+        loop_blocks.push(h_u32);
+        if latch != h_u32 {
+            in_loop[latch as usize] = true;
+            loop_blocks.push(latch);
+            let mut idx = 1usize;
+            while idx < loop_blocks.len() {
+                let cur = loop_blocks[idx];
+                idx += 1;
+                for &p in dom.preds(cur) {
+                    if !in_loop[p as usize] && dom.dominates(h_u32, p) {
+                        in_loop[p as usize] = true;
+                        loop_blocks.push(p);
+                    }
+                }
+            }
+        }
+
+        // Only optimize call-free inner loops so extra GP registers never spill across calls.
+        let has_call = loop_blocks.iter().any(|&bi| {
+            let bb = &ir.blocks[bi as usize];
+            matches!(
+                bb.term,
+                Term::CallCatch { .. }
+                    | Term::CallIndirectCatch { .. }
+                    | Term::ReturnCall { .. }
+                    | Term::ReturnCallIndirect { .. }
+            ) || bb.insts.iter().any(|ins| {
+                matches!(
+                    ins.op,
+                    Op::Call { .. }
+                        | Op::CallIndirect { .. }
+                        | Op::MemGrow(_)
+                        | Op::MemGrowIdx { .. }
+                )
+            })
+        });
+        if has_call {
+            continue;
+        }
+
+        // Identify constant-step loop-carried IVs on header `h`.
+        let n_params = ir.blocks[h].params.len();
+        let mut iv_steps: Vec<(usize, Val, i32)> = Vec::new();
+        for pi in 0..n_params {
+            let iv = ir.blocks[h].params[pi];
+            if !matches!(ir.val_tys[iv.0 as usize], Ty::I32 | Ty::I64) {
+                continue;
+            }
+            let Some(latch_arg) = edge_arg_for(ir, latch, hdr_id, pi) else {
+                continue;
+            };
+            if let Some(step) = match_iv_offset(latch_arg, iv, &def_op)
+                && step != 0
+            {
+                iv_steps.push((pi, iv, step));
+            }
+        }
+        if iv_steps.is_empty() {
+            continue;
+        }
+
+        // Group `AddScaled { is64: false, base, idx, shift: 1..=3, disp }` sites by `(base, pi, shift)`.
+        #[derive(Clone, Copy)]
+        struct Site {
+            bb: u32,
+            inst_idx: usize,
+            res: Val,
+            total_disp: i32,
+        }
+        let mut groups: HashMap<(Val, usize, u8), (i32, Vec<Site>)> = HashMap::default();
+        for &bi in &loop_blocks {
+            for (ii, inst) in ir.blocks[bi as usize].insts.iter().enumerate() {
+                let (
+                    Some(res),
+                    Op::AddScaled {
+                        is64: false,
+                        base,
+                        idx,
+                        shift: shift @ 1..=3,
+                        disp,
+                    },
+                ) = (inst.res, inst.op)
+                else {
+                    continue;
+                };
+                let base_db = def_block[base.0 as usize];
+                if base_db == u32::MAX
+                    || in_loop[base_db as usize]
+                    || !dom.dominates(base_db, h_u32)
+                {
+                    continue;
+                }
+                for &(pi, iv, step) in &iv_steps {
+                    if let Some(c) = match_iv_offset(idx, iv, &def_op) {
+                        let scale = 1i32 << shift;
+                        let total_disp = c.wrapping_mul(scale).wrapping_add(disp);
+                        groups
+                            .entry((base, pi, shift))
+                            .or_insert_with(|| (step, Vec::new()))
+                            .1
+                            .push(Site {
+                                bb: bi,
+                                inst_idx: ii,
+                                res,
+                                total_disp,
+                            });
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Deterministic sort of candidate groups with >= 2 scaled address sites in this loop.
+        let mut cand_keys: Vec<(Val, usize, u8)> = groups
+            .iter()
+            .filter(|&(_, (_, sites))| sites.len() >= 2)
+            .map(|(&k, _)| k)
+            .collect();
+        cand_keys.sort_unstable_by_key(|&(base, pi, shift)| (pi, base.0, shift));
+
+        for key in cand_keys {
+            if ir.blocks[h].params.len() >= 12
+                || ir.val_tys.len() + 16 >= MAX_IR_VALS_PER_FN
+                || ir.val_pool.len() + 64 >= MAX_VAL_POOL_PER_FN
+            {
+                break;
+            }
+            let (base, pi, shift) = key;
+            let (step, sites) = &groups[&key];
+            let scale = 1i32 << shift;
+            let byte_step = step.wrapping_mul(scale);
+            if byte_step == 0 {
+                continue;
+            }
+            // Verify every entry pred provides a valid initial IV value.
+            let mut entry_inits: Vec<(u32, Val)> = Vec::with_capacity(entry_preds.len());
+            let mut all_entries_ok = true;
+            for &ep in &entry_preds {
+                let Some(iv_init) = edge_arg_for(ir, ep, hdr_id, pi) else {
+                    all_entries_ok = false;
+                    break;
+                };
+                entry_inits.push((ep, iv_init));
+            }
+            if !all_entries_ok {
+                continue;
+            }
+
+            let p_val = ir.push_val(Ty::I32);
+            ir.blocks[h].params.push(p_val);
+
+            // Rewrite all matched `AddScaled` sites in the loop to `Copy(p_val)` or `p_val + disp`,
+            // tracking if any dominating site already computes `p_val + byte_step`!
+            let mut reuse_p_next: Option<Val> = None;
+            for s in sites {
+                let new_op = if s.total_disp == 0 {
+                    Op::Copy(p_val)
+                } else {
+                    if s.total_disp == byte_step
+                        && reuse_p_next.is_none()
+                        && dom.dominates(s.bb, latch)
+                    {
+                        reuse_p_next = Some(s.res);
+                    }
+                    Op::I32BinImm(IntBinOp::Add, p_val, s.total_disp)
+                };
+                ir.blocks[s.bb as usize].insts[s.inst_idx].op = new_op;
+            }
+
+            let p_next = if let Some(rv) = reuse_p_next {
+                rv
+            } else {
+                let nv = ir.push_val(Ty::I32);
+                ir.blocks[latch as usize].insts.push(Inst {
+                    res: Some(nv),
+                    op: Op::I32BinImm(IntBinOp::Add, p_val, byte_step),
+                });
+                nv
+            };
+
+            let append_edge_arg =
+                |ir: &mut IrFunc, pred: u32, target_hdr: BlockId, arg: Val| -> Res<()> {
+                    let term = ir.blocks[pred as usize].term;
+                    match term {
+                        Term::Jump { target, args } if target == target_hdr => {
+                            let mut v = ir.pool_slice(args).to_vec();
+                            v.push(arg);
+                            let nr = ir.push_pool(&v)?;
+                            ir.blocks[pred as usize].term = Term::Jump { target, args: nr };
+                        }
+                        Term::BranchIf {
+                            cond,
+                            then_bb,
+                            mut then_args,
+                            else_bb,
+                            mut else_args,
+                        } => {
+                            if then_bb == target_hdr {
+                                let mut v = ir.pool_slice(then_args).to_vec();
+                                v.push(arg);
+                                then_args = ir.push_pool(&v)?;
+                            }
+                            if else_bb == target_hdr {
+                                let mut v = ir.pool_slice(else_args).to_vec();
+                                v.push(arg);
+                                else_args = ir.push_pool(&v)?;
+                            }
+                            ir.blocks[pred as usize].term = Term::BranchIf {
+                                cond,
+                                then_bb,
+                                then_args,
+                                else_bb,
+                                else_args,
+                            };
+                        }
+                        Term::CmpBranch {
+                            kind,
+                            a,
+                            b,
+                            then_bb,
+                            mut then_args,
+                            else_bb,
+                            mut else_args,
+                        } => {
+                            if then_bb == target_hdr {
+                                let mut v = ir.pool_slice(then_args).to_vec();
+                                v.push(arg);
+                                then_args = ir.push_pool(&v)?;
+                            }
+                            if else_bb == target_hdr {
+                                let mut v = ir.pool_slice(else_args).to_vec();
+                                v.push(arg);
+                                else_args = ir.push_pool(&v)?;
+                            }
+                            ir.blocks[pred as usize].term = Term::CmpBranch {
+                                kind,
+                                a,
+                                b,
+                                then_bb,
+                                then_args,
+                                else_bb,
+                                else_args,
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                };
+
+            // Emit (or reuse existing identical) `p_init = AddScaled(base, iv_init, shift, 0)` on each entry pred.
+            for (ep, iv_init) in entry_inits {
+                let want_op = Op::AddScaled {
+                    is64: false,
+                    base,
+                    idx: iv_init,
+                    shift,
+                    disp: 0,
+                };
+                let existing = ir.blocks[ep as usize].insts.iter().find_map(|ins| {
+                    matches!(
+                        ins.op,
+                        Op::AddScaled {
+                            is64: false,
+                            base: b,
+                            idx: x,
+                            shift: sh,
+                            disp: 0,
+                        } if b == base && x == iv_init && sh == shift
+                    )
+                    .then_some(ins.res)
+                    .flatten()
+                });
+                let p_init = if let Some(ev) = existing {
+                    ev
+                } else {
+                    let nv = ir.push_val(Ty::I32);
+                    ir.blocks[ep as usize].insts.push(Inst {
+                        res: Some(nv),
+                        op: want_op,
+                    });
+                    nv
+                };
+                append_edge_arg(ir, ep, hdr_id, p_init)?;
+            }
+            append_edge_arg(ir, latch, hdr_id, p_next)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Intra-block pure FP/integer list scheduler for hot loop bodies.
+///
+/// Inside pure arithmetic loop blocks that contain both FP multiplies and independent external-input
+/// FP add/sub chains (e.g. Mandelbrot's `zi = 2*zr*zi + ci; zr = zr2 - zi2 + cr; iter += 1`),
+/// scheduling independent integer increments first (prio 0) and external-input FP add/sub chains
+/// second (prio 1) ahead of independent FP mul-rooted chains (prio 2) kills live-in FP temps
+/// immediately, runs FP ADD and MUL pipes concurrently, and resolves the loop counter early —
+/// strictly preserving IEEE-754 semantics and all intra-block data dependencies.
+fn schedule_loop_fp_chains(ir: &mut IrFunc, dom: &CfgDom) -> bool {
+    let n_blocks = ir.blocks.len();
+    if n_blocks <= 1 || !ir.blocks.iter().any(|b| b.is_loop_header) {
+        return false;
+    }
+
+    // Mark blocks belonging to any natural loop.
+    let mut in_any_loop = vec![false; n_blocks];
+    let mut wl: Vec<u32> = Vec::new();
+    for h in 0..n_blocks {
+        if !ir.blocks[h].is_loop_header {
+            continue;
+        }
+        let h_u32 = h as u32;
+        for &p in dom.preds(h_u32) {
+            if dom.dominates(h_u32, p) {
+                if !in_any_loop[h] {
+                    in_any_loop[h] = true;
+                }
+                if !in_any_loop[p as usize] {
+                    in_any_loop[p as usize] = true;
+                    wl.push(p);
+                }
+            }
+        }
+        while let Some(cur) = wl.pop() {
+            if cur == h_u32 {
+                continue;
+            }
+            for &p in dom.preds(cur) {
+                if !in_any_loop[p as usize] && dom.dominates(h_u32, p) {
+                    in_any_loop[p as usize] = true;
+                    wl.push(p);
+                }
+            }
+        }
+    }
+
+    let is_pure_sched_op = |op: Op| -> bool {
+        match op {
+            Op::ConstI32(_) | Op::ConstI64(_) | Op::ConstF32(_) | Op::ConstF64(_) | Op::Copy(_) => {
+                true
+            }
+            Op::I32Bin(bop, ..)
+            | Op::I32BinImm(bop, ..)
+            | Op::I64Bin(bop, ..)
+            | Op::I64BinImm(bop, ..) => matches!(
+                bop,
+                IntBinOp::Add
+                    | IntBinOp::Sub
+                    | IntBinOp::Mul
+                    | IntBinOp::And
+                    | IntBinOp::Or
+                    | IntBinOp::Xor
+                    | IntBinOp::Shl
+                    | IntBinOp::ShrS
+                    | IntBinOp::ShrU
+                    | IntBinOp::Rotl
+                    | IntBinOp::Rotr
+            ),
+            Op::F32Bin(fop, ..) | Op::F64Bin(fop, ..) => matches!(
+                fop,
+                FloatBinOp::Add
+                    | FloatBinOp::Sub
+                    | FloatBinOp::Mul
+                    | FloatBinOp::Min
+                    | FloatBinOp::Max
+                    | FloatBinOp::Copysign
+            ),
+            Op::F32Un(uop, ..) | Op::F64Un(uop, ..) => {
+                matches!(uop, FloatUnOp::Abs | FloatUnOp::Neg)
+            }
+            _ => false,
+        }
+    };
+
+    let mut changed = false;
+    let pool = &ir.val_pool;
+    for (bi, bb) in ir.blocks.iter_mut().enumerate() {
+        if !in_any_loop[bi] {
+            continue;
+        }
+        let n = bb.insts.len();
+        if !(4..=64).contains(&n) {
+            continue;
+        }
+        let mut has_fp_mul = false;
+        let mut has_fp_add_sub = false;
+        let mut all_pure = true;
+        for inst in &bb.insts {
+            if inst.res.is_none() || !is_pure_sched_op(inst.op) {
+                all_pure = false;
+                break;
+            }
+            match inst.op {
+                Op::F32Bin(FloatBinOp::Mul, ..) | Op::F64Bin(FloatBinOp::Mul, ..) => {
+                    has_fp_mul = true;
+                }
+                Op::F32Bin(FloatBinOp::Add | FloatBinOp::Sub, ..)
+                | Op::F64Bin(FloatBinOp::Add | FloatBinOp::Sub, ..) => {
+                    has_fp_add_sub = true;
+                }
+                _ => {}
+            }
+        }
+        if !all_pure || !has_fp_mul || !has_fp_add_sub {
+            continue;
+        }
+
+        // Build intra-block def-use DAG (`n <= 64`, fits cleanly in u64 bitmasks).
+        let mut res_vals: [Val; 64] = [Val(0); 64];
+        for (i, inst) in bb.insts.iter().enumerate() {
+            res_vals[i] = inst.res.unwrap();
+        }
+        let mut preds_mask = [0u64; 64];
+        let mut succs_mask = [0u64; 64];
+        let mut in_deg = [0u8; 64];
+        for (i, inst) in bb.insts.iter().enumerate() {
+            inst.op.for_each_use(pool, |u| {
+                for j in 0..i {
+                    if res_vals[j] == u {
+                        let bit = 1u64 << j;
+                        if (preds_mask[i] & bit) == 0 {
+                            preds_mask[i] |= bit;
+                            succs_mask[j] |= 1u64 << i;
+                            in_deg[i] += 1;
+                        }
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Assign priorities:
+        //   0: pure integer ops (e.g. loop counter increment) with no FP/non-int intra-block preds
+        //   1: external-input FP add/sub roots and FP ops whose intra-block preds are all prio 1
+        //   2: FP mul-rooted chains and everything else
+        let mut prio = [2u8; 64];
+        let mut has_ext_fp_add_sub = false;
+        for i in 0..n {
+            let op = bb.insts[i].op;
+            let pm = preds_mask[i];
+            match op {
+                Op::I32Bin(..) | Op::I32BinImm(..) | Op::I64Bin(..) | Op::I64BinImm(..) => {
+                    let mut all_p0 = true;
+                    let mut m = pm;
+                    while m != 0 {
+                        let j = m.trailing_zeros() as usize;
+                        m &= m - 1;
+                        if prio[j] != 0 {
+                            all_p0 = false;
+                            break;
+                        }
+                    }
+                    if all_p0 {
+                        prio[i] = 0;
+                    }
+                }
+                Op::F32Bin(FloatBinOp::Add | FloatBinOp::Sub, ..)
+                | Op::F64Bin(FloatBinOp::Add | FloatBinOp::Sub, ..) => {
+                    if pm == 0 {
+                        prio[i] = 1;
+                        has_ext_fp_add_sub = true;
+                    } else {
+                        let mut all_p1 = true;
+                        let mut m = pm;
+                        while m != 0 {
+                            let j = m.trailing_zeros() as usize;
+                            m &= m - 1;
+                            if prio[j] != 1 {
+                                all_p1 = false;
+                                break;
+                            }
+                        }
+                        if all_p1 {
+                            prio[i] = 1;
+                        }
+                    }
+                }
+                Op::ConstI32(_) | Op::ConstI64(_) => {
+                    prio[i] = 0;
+                }
+                _ => {}
+            }
+        }
+        if !has_ext_fp_add_sub {
+            continue;
+        }
+        // Pull constants to the minimum priority of their intra-block consumers so constants stay
+        // adjacent to their users.
+        for i in (0..n).rev() {
+            if matches!(
+                bb.insts[i].op,
+                Op::ConstI32(_) | Op::ConstI64(_) | Op::ConstF32(_) | Op::ConstF64(_)
+            ) && succs_mask[i] != 0
+            {
+                let mut best = 2u8;
+                let mut m = succs_mask[i];
+                while m != 0 {
+                    let s = m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    best = best.min(prio[s]);
+                }
+                prio[i] = best;
+            }
+        }
+
+        // Deterministic topological list schedule by `(prio[i], i)`.
+        let mut order: Vec<usize> = Vec::with_capacity(n);
+        let mut scheduled = 0u64;
+        for _ in 0..n {
+            let mut pick: Option<usize> = None;
+            for i in 0..n {
+                if (scheduled & (1u64 << i)) == 0 && in_deg[i] == 0 {
+                    match pick {
+                        None => pick = Some(i),
+                        Some(cur) if (prio[i], i) < (prio[cur], cur) => pick = Some(i),
+                        _ => {}
+                    }
+                }
+            }
+            let p = pick.expect("DAG inside basic block is acyclic");
+            scheduled |= 1u64 << p;
+            order.push(p);
+            let mut m = succs_mask[p];
+            while m != 0 {
+                let s = m.trailing_zeros() as usize;
+                m &= m - 1;
+                in_deg[s] -= 1;
+            }
+        }
+        if order.iter().enumerate().any(|(pos, &idx)| pos != idx) {
+            let old = std::mem::take(&mut bb.insts);
+            bb.insts = order.into_iter().map(|idx| old[idx]).collect();
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Late pre-regalloc SSA live-range splitting around call-free natural loops.

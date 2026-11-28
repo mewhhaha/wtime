@@ -758,6 +758,93 @@ pub fn allocate_with_config_and_scratch(
             scratch.rpo_pos[b as usize] = ri as u32;
         }
 
+        // Compute RPO loop nesting depths up front so hot-fallthrough trace layout keeps inner
+        // loop bodies inline instead of letting an outer-loop backedge steal fallthrough from an
+        // inner loop header (eliminating double-taken branches in nested loops).
+        reset_fill(&mut scratch.rpo_depth, n_ord, 0u8);
+        scratch.backedges.clear();
+        if n_ord > 1 || scratch.succ_offs[1] > 0 {
+            for (ri, &bid) in scratch.postorder.iter().enumerate() {
+                let ss = scratch.succ_offs[bid as usize] as usize;
+                let se = scratch.succ_offs[bid as usize + 1] as usize;
+                for &sid in &scratch.succ_data[ss..se] {
+                    let sri = scratch.rpo_pos[sid as usize];
+                    if sri != u32::MAX && sri <= ri as u32 {
+                        scratch.backedges.push((ri as u32, sri));
+                    }
+                }
+            }
+            if !scratch.backedges.is_empty() {
+                reset_fill(&mut scratch.rpo_pred_counts, n_ord, 0u32);
+                let mut total_rp = 0usize;
+                for &bid in &scratch.postorder {
+                    let ss = scratch.succ_offs[bid as usize] as usize;
+                    let se = scratch.succ_offs[bid as usize + 1] as usize;
+                    for &sid in &scratch.succ_data[ss..se] {
+                        let sri = scratch.rpo_pos[sid as usize];
+                        if sri != u32::MAX {
+                            scratch.rpo_pred_counts[sri as usize] += 1;
+                            total_rp += 1;
+                        }
+                    }
+                }
+                scratch.rpo_pred_offs.clear();
+                scratch.rpo_pred_offs.reserve(n_ord + 1);
+                let mut off = 0u32;
+                for ri in 0..n_ord {
+                    scratch.rpo_pred_offs.push(off);
+                    off += scratch.rpo_pred_counts[ri];
+                    scratch.rpo_pred_counts[ri] = scratch.rpo_pred_offs[ri];
+                }
+                scratch.rpo_pred_offs.push(off);
+                scratch.rpo_pred_data.clear();
+                scratch.rpo_pred_data.resize(total_rp, 0u32);
+                for (ri, &bid) in scratch.postorder.iter().enumerate() {
+                    let ss = scratch.succ_offs[bid as usize] as usize;
+                    let se = scratch.succ_offs[bid as usize + 1] as usize;
+                    for &sid in &scratch.succ_data[ss..se] {
+                        let sri = scratch.rpo_pos[sid as usize];
+                        if sri != u32::MAX {
+                            let pos = scratch.rpo_pred_counts[sri as usize] as usize;
+                            scratch.rpo_pred_counts[sri as usize] = (pos + 1) as u32;
+                            scratch.rpo_pred_data[pos] = ri as u32;
+                        }
+                    }
+                }
+                reset_fill(&mut scratch.loop_seen, n_ord, u32::MAX);
+                scratch
+                    .backedges
+                    .sort_unstable_by_key(|&(latch, header)| (header, latch));
+                for &(latch, header) in scratch.backedges.iter().take(512) {
+                    let stamp = header;
+                    if scratch.loop_seen[header as usize] != stamp {
+                        scratch.loop_seen[header as usize] = stamp;
+                        scratch.rpo_depth[header as usize] =
+                            scratch.rpo_depth[header as usize].saturating_add(1).min(4);
+                    }
+                    if latch != header && scratch.loop_seen[latch as usize] != stamp {
+                        scratch.loop_seen[latch as usize] = stamp;
+                        scratch.rpo_depth[latch as usize] =
+                            scratch.rpo_depth[latch as usize].saturating_add(1).min(4);
+                        scratch.loop_wl.clear();
+                        scratch.loop_wl.push(latch);
+                        while let Some(cur) = scratch.loop_wl.pop() {
+                            let ps = scratch.rpo_pred_offs[cur as usize] as usize;
+                            let pe = scratch.rpo_pred_offs[cur as usize + 1] as usize;
+                            for &p in &scratch.rpo_pred_data[ps..pe] {
+                                if p > header && scratch.loop_seen[p as usize] != stamp {
+                                    scratch.loop_seen[p as usize] = stamp;
+                                    scratch.rpo_depth[p as usize] =
+                                        scratch.rpo_depth[p as usize].saturating_add(1).min(4);
+                                    scratch.loop_wl.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 1b. Hot-fallthrough trace layout over reachable blocks (always starts with bb0).
         reset_fill(&mut scratch.is_trap_blk, n_blocks, false);
         reset_fill(&mut scratch.has_call_blk, n_blocks, false);
@@ -857,10 +944,31 @@ pub fn allocate_with_config_and_scratch(
         let has_call_blk = &scratch.has_call_blk;
         let has_store_blk = &scratch.has_store_blk;
         let has_unchecked_mem_blk = &scratch.has_unchecked_mem_blk;
+        let rpo_pos_ro = &scratch.rpo_pos;
+        let rpo_depth_ro = &scratch.rpo_depth;
         let cand_score = |cur: u32, cand: u32, is_then: bool, placed: &[bool]| -> i32 {
             let mut s = 0i32;
             if is_trap_blk[cand as usize] {
                 s += 1000;
+            }
+            let cur_ri = rpo_pos_ro[cur as usize] as usize;
+            let cand_ri = rpo_pos_ro[cand as usize] as usize;
+            let cur_d = if cur_ri < rpo_depth_ro.len() {
+                rpo_depth_ro[cur_ri]
+            } else {
+                0
+            };
+            let cand_d = if cand_ri < rpo_depth_ro.len() {
+                rpo_depth_ro[cand_ri]
+            } else {
+                0
+            };
+            if cur_d >= 2 {
+                if cand_d >= cur_d {
+                    s -= 300;
+                } else {
+                    s += 300;
+                }
             }
             if is_then
                 && let Term::CmpBranch { kind, a, b, .. } = ir.blocks[cur as usize].term
@@ -878,7 +986,7 @@ pub fn allocate_with_config_and_scratch(
             let backedges_to_placed_hdr = succ_data_ro[ss..se]
                 .iter()
                 .any(|&x| placed[x as usize] && ir.blocks[x as usize].is_loop_header);
-            if cbb.is_loop_header || backedges_to_placed_hdr {
+            if (cbb.is_loop_header || backedges_to_placed_hdr) && cand_d >= cur_d {
                 s -= 100;
             }
             if has_call_blk[cand as usize] {
@@ -906,7 +1014,6 @@ pub fn allocate_with_config_and_scratch(
         let mut block_order = Vec::with_capacity(n_ord);
         reset_fill(&mut scratch.placed, n_blocks, false);
         let placed = &mut scratch.placed;
-        let rpo_pos_ro = &scratch.rpo_pos;
         // Pass 1: place all hot / non-trap blocks in contiguous traces (sinking cold trap/abort
         // blocks out of hot loops so they neither pollute I-cache nor split/clobber hot ranges).
         // Pass 2: append remaining cold trap/unreachable blocks at the tail of the function.
@@ -2308,90 +2415,14 @@ pub fn allocate_with_config_and_scratch(
         (gp, xmm)
     };
 
-    // 4b. Compute loop-depth weighting (strictly in RPO so hot-fallthrough block layout
-    // never turns a cold rejoin edge into a false backedge) and ABI / phi / two-address hints.
-    // Only build flat CSR `rpo_preds` when backedges actually exist!
+    // 4b. Map precomputed RPO loop-depth weighting onto the trace block order (strictly in RPO so
+    // hot-fallthrough block layout never turns a cold rejoin edge into a false backedge) and ABI /
+    // phi / two-address hints.
     reset_fill(&mut scratch.loop_depth, n_ord, 0u8);
-    if n_ord > 1 || scratch.succ_offs[1] > 0 {
-        scratch.backedges.clear();
+    if !scratch.backedges.is_empty() {
         for (ri, &bid) in scratch.postorder.iter().enumerate() {
-            let ss = scratch.succ_offs[bid as usize] as usize;
-            let se = scratch.succ_offs[bid as usize + 1] as usize;
-            for &sid in &scratch.succ_data[ss..se] {
-                let sri = scratch.rpo_pos[sid as usize];
-                if sri != u32::MAX && sri <= ri as u32 {
-                    scratch.backedges.push((ri as u32, sri));
-                }
-            }
-        }
-        if !scratch.backedges.is_empty() {
-            reset_fill(&mut scratch.rpo_pred_counts, n_ord, 0u32);
-            let mut total_rp = 0usize;
-            for &bid in &scratch.postorder {
-                let ss = scratch.succ_offs[bid as usize] as usize;
-                let se = scratch.succ_offs[bid as usize + 1] as usize;
-                for &sid in &scratch.succ_data[ss..se] {
-                    let sri = scratch.rpo_pos[sid as usize];
-                    if sri != u32::MAX {
-                        scratch.rpo_pred_counts[sri as usize] += 1;
-                        total_rp += 1;
-                    }
-                }
-            }
-            scratch.rpo_pred_offs.clear();
-            scratch.rpo_pred_offs.reserve(n_ord + 1);
-            let mut off = 0u32;
-            for ri in 0..n_ord {
-                scratch.rpo_pred_offs.push(off);
-                off += scratch.rpo_pred_counts[ri];
-                scratch.rpo_pred_counts[ri] = scratch.rpo_pred_offs[ri];
-            }
-            scratch.rpo_pred_offs.push(off);
-            scratch.rpo_pred_data.clear();
-            scratch.rpo_pred_data.resize(total_rp, 0u32);
-            for (ri, &bid) in scratch.postorder.iter().enumerate() {
-                let ss = scratch.succ_offs[bid as usize] as usize;
-                let se = scratch.succ_offs[bid as usize + 1] as usize;
-                for &sid in &scratch.succ_data[ss..se] {
-                    let sri = scratch.rpo_pos[sid as usize];
-                    if sri != u32::MAX {
-                        let pos = scratch.rpo_pred_counts[sri as usize] as usize;
-                        scratch.rpo_pred_counts[sri as usize] = (pos + 1) as u32;
-                        scratch.rpo_pred_data[pos] = ri as u32;
-                    }
-                }
-            }
-            reset_fill(&mut scratch.rpo_depth, n_ord, 0u8);
-            reset_fill(&mut scratch.loop_seen, n_ord, u32::MAX);
-            for (li, &(latch, header)) in scratch.backedges.iter().take(512).enumerate() {
-                let stamp = li as u32;
-                scratch.loop_seen[header as usize] = stamp;
-                scratch.rpo_depth[header as usize] =
-                    scratch.rpo_depth[header as usize].saturating_add(1).min(4);
-                if latch != header {
-                    scratch.loop_seen[latch as usize] = stamp;
-                    scratch.rpo_depth[latch as usize] =
-                        scratch.rpo_depth[latch as usize].saturating_add(1).min(4);
-                    scratch.loop_wl.clear();
-                    scratch.loop_wl.push(latch);
-                    while let Some(cur) = scratch.loop_wl.pop() {
-                        let ps = scratch.rpo_pred_offs[cur as usize] as usize;
-                        let pe = scratch.rpo_pred_offs[cur as usize + 1] as usize;
-                        for &p in &scratch.rpo_pred_data[ps..pe] {
-                            if p > header && scratch.loop_seen[p as usize] != stamp {
-                                scratch.loop_seen[p as usize] = stamp;
-                                scratch.rpo_depth[p as usize] =
-                                    scratch.rpo_depth[p as usize].saturating_add(1).min(4);
-                                scratch.loop_wl.push(p);
-                            }
-                        }
-                    }
-                }
-            }
-            for (ri, &bid) in scratch.postorder.iter().enumerate() {
-                let oi = scratch.block_pos_in_order[bid as usize] as usize;
-                scratch.loop_depth[oi] = scratch.rpo_depth[ri];
-            }
+            let oi = scratch.block_pos_in_order[bid as usize] as usize;
+            scratch.loop_depth[oi] = scratch.rpo_depth[ri];
         }
     }
     let loop_depth = &scratch.loop_depth;
