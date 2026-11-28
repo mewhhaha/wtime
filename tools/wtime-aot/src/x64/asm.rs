@@ -4467,6 +4467,10 @@ impl Asm {
     pub fn vpbroadcastq_yx(&mut self, dst: Xmm, src: Xmm) {
         self.vex3_ymm_rr(2, 1, false, dst, None, src, 0x59);
     }
+    /// `vpmovzxdq ymm, xmm` (`VEX.256.66.0F38.WIG 35 /r`).
+    pub fn vpmovzxdq_yx(&mut self, dst: Xmm, src: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, dst, None, src, 0x35);
+    }
     pub fn vmovups_ym(&mut self, dst: Xmm, mem: Mem) {
         self.vex3_ymm_mem(1, 0, false, dst, None, mem, 0x10);
     }
@@ -4882,6 +4886,10 @@ impl Asm {
     /// `vpbroadcastq zmm, xmm` (`EVEX.512.66.0F38.W1 59 /r`).
     pub fn vpbroadcastq_zx(&mut self, dst: Xmm, src: Xmm) {
         self.evex_rr(2, 1, true, 2, dst, None, src, 0x59);
+    }
+    /// `vpmovzxdq zmm, ymm` (`EVEX.512.66.0F38.WIG 35 /r`).
+    pub fn vpmovzxdq_zy(&mut self, dst: Xmm, src: Xmm) {
+        self.evex_rr(2, 1, false, 2, dst, None, src, 0x35);
     }
     /// `vmovupd zmm, m512` (`EVEX.512.66.0F.W1 10 /r`).
     pub fn vmovupd_zm(&mut self, dst: Xmm, mem: Mem) {

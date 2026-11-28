@@ -6130,13 +6130,19 @@ impl<'a> LowerA64<'a> {
                 count,
             } => {
                 // Regalloc reserves clobbers X0..X3 and V0..V2.
-                // X0 = src_a_ptr, X1 = src_b_ptr (if dot), X2 = count.
+                // X0 = src_a_ptr, X1 = src_b_ptr (if dot) or u32 xor mask (if widen_xor), X2 = count.
                 let r = res.unwrap();
-                let is8 = kind.elem_bytes() == 8;
+                let elem_is8 = kind.elem_bytes() == 8;
+                let res_is64 = kind.result_ty() == Ty::I64;
                 let is_dot = matches!(kind, VecReduceKind::I32Dot);
                 let is_xor = matches!(kind, VecReduceKind::I32Xor | VecReduceKind::I64Xor);
-                let lanes: u16 = if is8 { 2 } else { 4 };
-                if is_dot {
+                let is_widen = matches!(
+                    kind,
+                    VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum
+                );
+                let is_widen_xor = matches!(kind, VecReduceKind::U32XorZextSum);
+                let lanes: u16 = if elem_is8 { 2 } else { 4 };
+                if is_dot || is_widen_xor {
                     let moves = [
                         (
                             MoveLoc::Gp(Reg::X0),
@@ -6179,6 +6185,8 @@ impl<'a> LowerA64<'a> {
                 if is_dot {
                     self.asm.uxtw(Reg::X1, Reg::X1);
                     self.asm.add_r(true, Reg::X1, MEM_BASE_REG, Reg::X1);
+                } else if is_widen_xor {
+                    self.asm.dup_gp_128(2, VReg::V2, Reg::X1);
                 }
 
                 self.asm.movi_zero_16b(VReg::V0);
@@ -6194,9 +6202,15 @@ impl<'a> LowerA64<'a> {
                     self.asm.mul_v128(2, VReg::V1, VReg::V1, VReg::V2);
                     self.asm.add_v128(2, VReg::V0, VReg::V0, VReg::V1);
                     self.asm.add_imm(true, Reg::X1, Reg::X1, 16);
+                } else if is_widen {
+                    if is_widen_xor {
+                        self.asm.eor_16b(VReg::V1, VReg::V1, VReg::V2);
+                    }
+                    self.asm.uaddlp_128(2, VReg::V1, VReg::V1);
+                    self.asm.add_v128(3, VReg::V0, VReg::V0, VReg::V1);
                 } else if is_xor {
                     self.asm.eor_16b(VReg::V0, VReg::V0, VReg::V1);
-                } else if is8 {
+                } else if elem_is8 {
                     self.asm.add_v128(3, VReg::V0, VReg::V0, VReg::V1);
                 } else {
                     self.asm.add_v128(2, VReg::V0, VReg::V0, VReg::V1);
@@ -6208,7 +6222,7 @@ impl<'a> LowerA64<'a> {
 
                 self.asm.bind(lbl_red);
                 // Extract lanes into SGP1 using umov + add/eor (fully supported in A64Vm!).
-                if is8 {
+                if res_is64 {
                     self.asm.umov(3, SGP1, VReg::V0, 0);
                     self.asm.umov(3, SGP2, VReg::V0, 1);
                     if is_xor {
@@ -6231,19 +6245,24 @@ impl<'a> LowerA64<'a> {
                 self.asm.cbz(true, Reg::X2, lbl_done);
                 let lbl_sc = self.asm.new_label();
                 self.asm.bind(lbl_sc);
-                self.asm.ldr_uimm(is8, SGP2, Reg::X0, 0);
+                self.asm.ldr_uimm(elem_is8, SGP2, Reg::X0, 0);
                 if is_dot {
                     self.asm.ldr_uimm(false, SGP3, Reg::X1, 0);
                     self.asm.mul(false, SGP2, SGP2, SGP3);
                     self.asm.add_r(false, SGP1, SGP1, SGP2);
                     self.asm.add_imm(true, Reg::X1, Reg::X1, 4);
+                } else if is_widen {
+                    if is_widen_xor {
+                        self.asm.eor_r(false, SGP2, SGP2, Reg::X1);
+                    }
+                    self.asm.add_r(true, SGP1, SGP1, SGP2);
                 } else if is_xor {
-                    self.asm.eor_r(is8, SGP1, SGP1, SGP2);
+                    self.asm.eor_r(elem_is8, SGP1, SGP1, SGP2);
                 } else {
-                    self.asm.add_r(is8, SGP1, SGP1, SGP2);
+                    self.asm.add_r(elem_is8, SGP1, SGP1, SGP2);
                 }
                 self.asm
-                    .add_imm(true, Reg::X0, Reg::X0, if is8 { 8 } else { 4 });
+                    .add_imm(true, Reg::X0, Reg::X0, if elem_is8 { 8 } else { 4 });
                 self.asm.sub_imm(true, Reg::X2, Reg::X2, 1);
                 self.asm.cbnz(true, Reg::X2, lbl_sc);
                 self.asm.b(lbl_done);

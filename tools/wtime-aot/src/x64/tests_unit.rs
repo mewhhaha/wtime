@@ -10434,3 +10434,413 @@ fn x64_store_probe_scriptw_real_r_and_p() {
         );
     }
 }
+
+#[test]
+fn x64_wave_b_mul_wide_widen_reduce_and_spill_cache_parity() {
+    use super::ir::VecReduceKind;
+
+    let push_i64 = |v: &mut Vec<u8>, mut val: i64| {
+        v.push(0x42);
+        loop {
+            let byte = (val & 0x7f) as u8;
+            val >>= 7;
+            let done = (val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0);
+            if done {
+                v.push(byte);
+                break;
+            }
+            v.push(byte | 0x80);
+        }
+    };
+
+    // Helper emitting exact Blot schoolbook 64x64->128 `(lo, hi)` using locals `[a, b, alo, ahi, blo, bhi, p1, p2]`:
+    // Leaves `(lo, hi)` on the stack (actually stores `lo` into `lo_loc`, `hi` into `hi_loc`).
+    let emit_schoolbook_mul_wide = |out: &mut Vec<u8>,
+                                    a: u8,
+                                    b: u8,
+                                    alo: u8,
+                                    ahi: u8,
+                                    blo: u8,
+                                    bhi: u8,
+                                    p1: u8,
+                                    p2: u8,
+                                    lo_out: u8,
+                                    hi_out: u8| {
+        // lo = a * b
+        out.extend_from_slice(&[0x20, a, 0x20, b, 0x7e, 0x21, lo_out]);
+        // blo = b & 0xffff_ffff; bhi = b >>u 32
+        out.extend_from_slice(&[0x20, b]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x21, blo, 0x20, b, 0x42, 32, 0x88, 0x21, bhi]);
+        // alo = a & 0xffff_ffff; ahi = a >>u 32
+        out.extend_from_slice(&[0x20, a]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x21, alo, 0x20, a, 0x42, 32, 0x88, 0x21, ahi]);
+        // p1 = alo * bhi; p2 = ahi * blo
+        out.extend_from_slice(&[
+            0x20, alo, 0x20, bhi, 0x7e, 0x21, p1, 0x20, ahi, 0x20, blo, 0x7e, 0x21, p2,
+        ]);
+        // mid = ((alo * blo) >>u 32) + (p1 & mask) + (p2 & mask)
+        out.extend_from_slice(&[0x20, alo, 0x20, blo, 0x7e, 0x42, 32, 0x88, 0x20, p1]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x7c, 0x20, p2]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x7c]);
+        // hi = (mid >>u 32) + (p1 >>u 32) + (p2 >>u 32) + (ahi * bhi)
+        out.extend_from_slice(&[
+            0x42, 32, 0x88, 0x20, p1, 0x42, 32, 0x88, 0x7c, 0x20, p2, 0x42, 32, 0x88, 0x7c, 0x20,
+            ahi, 0x20, bhi, 0x7e, 0x7c, 0x21, hi_out,
+        ]);
+    };
+
+    // f0: `mul_wide_suite(case_id: i32) -> i32`
+    // Tests runtime 4-term `mul_wide` (including carry=2 & squaring), constant `b = 10` collapsed
+    // 2-term `mul_wide`, constant 64-bit `b = 0x1234_5678_9abc_def1` `mul_wide`, and `add_carry`
+    // `Select(1i64, 0i64, lt_u)` on inputs loaded from linear memory (`[0..16]`), writing exact
+    // 128-bit results back to memory and returning a folded 32-bit digest.
+    // Locals: 0=case(i32), 1..=14=i64 (1=a, 2=b, 3=alo, 4=ahi, 5=blo, 6=bhi, 7=p1, 8=p2,
+    //         9=lo, 10=hi, 11=acc_lo, 12=acc_hi, 13=sum, 14=carry)
+    let mut b0 = Vec::new();
+    // Load `a` from mem[case*16], `b` from mem[case*16 + 8]
+    b0.extend_from_slice(&[
+        0x20, 0, 0x41, 4, 0x74, 0x29, 3, 0, 0x21, 1, // a = load64(case*16)
+        0x20, 0, 0x41, 4, 0x74, 0x29, 3, 8, 0x21, 2, // b = load64(case*16 + 8)
+    ]);
+    // 1) Runtime (a, b)
+    emit_schoolbook_mul_wide(&mut b0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+    // add_carry test: sum = lo + b; carry = select(1i64, 0i64, sum <u lo)
+    b0.extend_from_slice(&[
+        0x20, 9, 0x20, 2, 0x7c, 0x21, 13, // sum = lo + b
+        0x42, 1, 0x42, 0, 0x20, 13, 0x20, 9, 0x54, 0x1b, 0x21,
+        14, // carry = select(1,0,sum<u lo)
+        0x20, 13, 0x21, 11, // acc_lo = sum
+        0x20, 10, 0x20, 14, 0x7c, 0x21, 12, // acc_hi = hi + carry
+    ]);
+    // 2) Squaring (a, a)
+    emit_schoolbook_mul_wide(&mut b0, 1, 1, 3, 4, 5, 6, 7, 8, 9, 10);
+    b0.extend_from_slice(&[
+        0x20, 11, 0x20, 9, 0x85, 0x21, 11, // acc_lo ^= lo
+        0x20, 12, 0x20, 10, 0x85, 0x21, 12, // acc_hi ^= hi
+    ]);
+    // 3) Collapsed 2-term constant b = 10
+    b0.extend_from_slice(&[0x42, 10, 0x21, 2]);
+    emit_schoolbook_mul_wide(&mut b0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+    b0.extend_from_slice(&[
+        0x20, 11, 0x20, 9, 0x7c, 0x21, 11, // acc_lo += lo
+        0x20, 12, 0x20, 10, 0x7c, 0x21, 12, // acc_hi += hi
+    ]);
+    // 4) 64-bit constant b = 0x1234_5678_9abc_def1
+    push_i64(&mut b0, 0x1234_5678_9abc_def1u64 as i64);
+    b0.extend_from_slice(&[0x21, 2]);
+    emit_schoolbook_mul_wide(&mut b0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+    b0.extend_from_slice(&[
+        0x20, 11, 0x20, 9, 0x85, 0x21, 11, // acc_lo ^= lo
+        0x20, 12, 0x20, 10, 0x85, 0x21, 12, // acc_hi ^= hi
+        // Return 32-bit folded digest of `(acc_lo, acc_hi)`
+        0x20, 11, 0x20, 11, 0x42, 32, 0x88, 0x85, 0x20, 12, 0x42, 7, 0x89, 0x85, 0x20, 12, 0x42, 29,
+        0x88, 0x85, 0xa7,
+    ]);
+
+    // f1: `widen_reduce_suite(n: i32) -> i32`
+    // Initializes `n` u32 elements at addr 4096 (including high-bit values >= 0x8000_0000 and
+    // 0xffff_ffff so sum exceeds u32::MAX!), then runs:
+    //   1. `U32ZextSum`: sum_{i=0..n} (arr[i] as u64)
+    //   2. `U32XorZextSum` (runtime mask = (n * 0x9e3779b1) | 0x8000_0001): sum_{i=0..n} ((arr[i] ^ mask) as u64)
+    //   3. `U32XorZextSum` (const mask = 0x5a5a_a5a5): sum_{i=0..n} ((arr[i] ^ 0x5a5a_a5a5) as u64)
+    // Locals: 0=n, 1=i, 2=mask (i32), 3=sum1, 4=sum2, 5=sum3 (i64)
+    let mut b1 = Vec::new();
+    // Init arr[i] at 4096 + (i<<2) = (i * 0x7f4a7c15) ^ 0x8000_0005
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1,
+    ]);
+    b1.extend_from_slice(&[0x20, 1, 0x41, 2, 0x74, 0x20, 1]);
+    b1.push(0x41);
+    leb_i32(&mut b1, 0x7f4a_7c15u32 as i32);
+    b1.push(0x6c);
+    b1.push(0x41);
+    leb_i32(&mut b1, 0x8000_0005u32 as i32);
+    b1.extend_from_slice(&[
+        0x73, 0x36, 2, 0x80, 0x20, // store at offset 4096
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // mask = (n * 0x9e37_79b1) | 0x8000_0001
+    b1.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b1, 0x9e37_79b1u32 as i32);
+    b1.extend_from_slice(&[0x6c, 0x41]);
+    leb_i32(&mut b1, 0x8000_0001u32 as i32);
+    b1.extend_from_slice(&[0x72, 0x21, 2]);
+    // Loop 1: sum1 = 17 + sum(i64.extend_i32_u(arr[i]))
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x42, 17, 0x21, 3, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 3, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x20, 0xad, 0x7c, 0x21, 3, 0x20, 1,
+        0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Loop 2: sum2 = 29 + sum(i64.extend_i32_u(arr[i] ^ mask))
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x42, 29, 0x21, 4, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 4, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x20, 0x20, 2, 0x73, 0xad, 0x7c, 0x21,
+        4, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Loop 3: sum3 = 41 + sum(i64.extend_i32_u(arr[i] ^ 0x5a5a_a5a5))
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x42, 41, 0x21, 5, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 5, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x20, 0x41,
+    ]);
+    leb_i32(&mut b1, 0x5a5a_a5a5u32 as i32);
+    b1.extend_from_slice(&[
+        0x73, 0xad, 0x7c, 0x21, 5, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Fold all 64 bits of sum1, sum2, sum3 into i32 return
+    b1.extend_from_slice(&[
+        0x20, 3, 0x20, 4, 0x42, 3, 0x89, 0x85, 0x20, 5, 0x42, 11, 0x89, 0x85, 0x21, 3, 0x20, 3,
+        0x20, 3, 0x42, 32, 0x88, 0x85, 0xa7,
+    ]);
+
+    // f2: `spill_cache_stress(x: i32) -> i32`
+    // Keeps 18 live i32 values across loads, stores, muls (including imm=7/31/33), and cmps
+    // so multi-instruction `SpillRegCache` forwarding and invalidation are heavily exercised!
+    let mut b2 = Vec::new();
+    for k in 1u8..=18 {
+        // local k = (x * (k*2 + 1)) ^ (k * 17)
+        b2.extend_from_slice(&[0x20, 0, 0x41]);
+        leb_i32(&mut b2, i32::from(k) * 2 + 1);
+        b2.extend_from_slice(&[0x6c, 0x41]);
+        leb_i32(&mut b2, i32::from(k) * 17);
+        b2.extend_from_slice(&[0x73, 0x21, k]);
+    }
+    // Store all 18 to mem[256 + k*4], then read back with interleaved ops across all 18 live locals.
+    for k in 1u8..=18 {
+        b2.extend_from_slice(&[0x41]);
+        leb_i32(&mut b2, 256 + i32::from(k) * 4);
+        b2.extend_from_slice(&[0x20, k, 0x36, 2, 0]);
+    }
+    b2.extend_from_slice(&[0x20, 1]);
+    for k in 2u8..=18 {
+        // acc = ((acc * 7 + mem[256 + k*4]) ^ (local[k] % 287)) + (local[k] <u local[k-1])
+        // Exercises multi-inst spill forwarding AND non-preserving magic `rem_u(287)` on spilled values!
+        b2.extend_from_slice(&[0x41, 7, 0x6c, 0x41]);
+        leb_i32(&mut b2, 256 + i32::from(k) * 4);
+        b2.extend_from_slice(&[0x28, 2, 0, 0x6a, 0x20, k, 0x41]);
+        leb_i32(&mut b2, 287);
+        b2.extend_from_slice(&[0x70, 0x73, 0x20, k, 0x20, k - 1, 0x49, 0x6a]);
+    }
+
+    // Populate 6 edge-case (a, b) pairs in data segment at memory offset 0 (96 bytes):
+    let pairs: [(u64, u64); 6] = [
+        (0, 0),
+        (1, u64::MAX),
+        (u64::MAX, u64::MAX),
+        (0xffff_ffff_0000_0000, 0x0000_0000_ffff_ffff),
+        (0x8000_0000_ffff_ffff, 0xdead_beef_cafe_babe),
+        (0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff01),
+    ];
+    let mut data_payload = vec![1, 0, 0x41, 0, 0x0b];
+    leb_u32(&mut data_payload, (pairs.len() * 16) as u32);
+    for (a, b) in pairs {
+        data_payload.extend_from_slice(&a.to_le_bytes());
+        data_payload.extend_from_slice(&b.to_le_bytes());
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[
+            ("mul_wide", 0, 0),
+            ("widen_reduce", 0, 1),
+            ("spill_stress", 0, 2),
+            ("memory", 2, 0),
+        ]),
+        code_sec(&[
+            enc_body(&[(14, 0x7e)], &b0),
+            enc_body(&[(2, 0x7f), (3, 0x7e)], &b1),
+            enc_body(&[(18, 0x7f)], &b2),
+        ]),
+        section(11, &data_payload),
+    ]);
+
+    // 1. Verify Stage 2 IR emits `IntBinOp::MulHiU` (>= 4 times in f0), `U32ZextSum` & `U32XorZextSum` in f1!
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let eff = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2(ir, &module, &eff, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+    }
+    let mul_hi_cnt = irs[0]
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| matches!(i.op, Op::I64Bin(IntBinOp::MulHiU, _, _)))
+        .count();
+    assert_eq!(
+        mul_hi_cnt, 4,
+        "expected all 4 schoolbook mul_wide patterns (runtime, square, const10, const64) to fold to MulHiU"
+    );
+    let has_zext_sum = irs[1].blocks.iter().flat_map(|b| &b.insts).any(|i| {
+        matches!(
+            i.op,
+            Op::VecReduceLoop {
+                kind: VecReduceKind::U32ZextSum,
+                ..
+            }
+        )
+    });
+    let xor_zext_cnt = irs[1]
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| {
+            matches!(
+                i.op,
+                Op::VecReduceLoop {
+                    kind: VecReduceKind::U32XorZextSum,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(has_zext_sum, "expected VecReduceKind::U32ZextSum in f1 IR");
+    assert!(
+        xor_zext_cnt >= 2,
+        "expected both runtime-mask and const-mask VecReduceKind::U32XorZextSum in f1 IR (got {xor_zext_cnt})"
+    );
+
+    // 2. Reference Rust expectations (100% independent of compiler):
+    let expected_mul = |cid: usize| -> u32 {
+        let (a, b) = pairs[cid];
+        let p0 = u128::from(a) * u128::from(b);
+        let lo0 = p0 as u64;
+        let hi0 = (p0 >> 64) as u64;
+        let sum = lo0.wrapping_add(b);
+        let carry = u64::from(sum < lo0);
+        let mut acc_lo = sum;
+        let mut acc_hi = hi0.wrapping_add(carry);
+        let p1 = u128::from(a) * u128::from(a);
+        acc_lo ^= p1 as u64;
+        acc_hi ^= (p1 >> 64) as u64;
+        let p2 = u128::from(a) * 10u128;
+        acc_lo = acc_lo.wrapping_add(p2 as u64);
+        acc_hi = acc_hi.wrapping_add((p2 >> 64) as u64);
+        let p3 = u128::from(a) * 0x1234_5678_9abc_def1u128;
+        acc_lo ^= p3 as u64;
+        acc_hi ^= (p3 >> 64) as u64;
+        (acc_lo ^ (acc_lo >> 32) ^ acc_hi.rotate_left(7) ^ (acc_hi >> 29)) as u32
+    };
+    let expected_widen = |n: u32| -> u32 {
+        let mask = n.wrapping_mul(0x9e37_79b1) | 0x8000_0001;
+        let mut s1 = 17u64;
+        let mut s2 = 29u64;
+        let mut s3 = 41u64;
+        for i in 0..n {
+            let v = i.wrapping_mul(0x7f4a_7c15) ^ 0x8000_0005;
+            s1 = s1.wrapping_add(u64::from(v));
+            s2 = s2.wrapping_add(u64::from(v ^ mask));
+            s3 = s3.wrapping_add(u64::from(v ^ 0x5a5a_a5a5));
+        }
+        let f = s1 ^ s2.rotate_left(3) ^ s3.rotate_left(11);
+        (f ^ (f >> 32)) as u32
+    };
+    let expected_spill = |x: u32| -> u32 {
+        let mut loc = [0u32; 19];
+        for k in 1u32..=18 {
+            loc[k as usize] = x.wrapping_mul(k * 2 + 1) ^ (k * 17);
+        }
+        let mut acc = loc[1];
+        for k in 2usize..=18 {
+            acc = (acc.wrapping_mul(7).wrapping_add(loc[k]) ^ (loc[k] % 287))
+                .wrapping_add(u32::from(loc[k] < loc[k - 1]));
+        }
+        acc
+    };
+
+    // 3. Execute natively across ALL THREE x64 ISA tiers (SSE2 v2, AVX2 v3, AVX-512 v4)!
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if let Some(driver) = super::tests_oracle::get_oracle_driver() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let root = crate::build::create_fresh_test_root("wtime-aot-wave-b");
+        let mut configs = vec![
+            ("v2", TargetIsa::default()),
+            (
+                "v3",
+                TargetIsa {
+                    has_abm_bmi1: true,
+                    has_bmi2: true,
+                    has_avx2: true,
+                    has_avx512: false,
+                },
+            ),
+        ];
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512dq")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx512vl")
+        {
+            configs.push((
+                "v4",
+                TargetIsa {
+                    has_abm_bmi1: true,
+                    has_bmi2: true,
+                    has_avx2: true,
+                    has_avx512: true,
+                },
+            ));
+        }
+        for (tag, isa) in configs {
+            let so = compile_wasm_to_x64_so(
+                &wasm,
+                &X64CompileOptions {
+                    isa,
+                    verify: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let path = root.0.join(format!("wave_b_{tag}.so"));
+            std::fs::write(&path, so).unwrap();
+            let mut child = Command::new(driver)
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = String::new();
+            let mut expected = String::from("NEW_OK\n");
+            for cid in 0..pairs.len() {
+                input.push_str(&format!("call mul_wide {cid:x}\n"));
+                expected.push_str(&format!("CALL 0 {:016x} 0 0\n", expected_mul(cid)));
+            }
+            for &n in &[0u32, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 67] {
+                input.push_str(&format!("call widen_reduce {n:x}\n"));
+                expected.push_str(&format!("CALL 0 {:016x} 0 0\n", expected_widen(n)));
+            }
+            for &x in &[0u32, 1, 42, 0xdead_beef, 0xffff_ffff] {
+                input.push_str(&format!("call spill_stress {x:x}\n"));
+                expected.push_str(&format!("CALL 0 {:016x} 0 0\n", expected_spill(x)));
+            }
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "wave_b_{tag} failed");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                expected,
+                "wave_b_{tag} oracle mismatch"
+            );
+        }
+    }
+}

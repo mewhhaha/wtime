@@ -6970,6 +6970,290 @@ fn fold_i64_cmp_const(op: CmpOp, ca: i64, cb: i64) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchoolbookMulHi {
+    Vals(Val, Val),
+    ValConst(Val, u64),
+}
+
+/// Recognizes schoolbook 64x64->128 unsigned high-word multiplication (`mul_hi_u(a, b)`)
+/// split into 32-bit halves (`a_lo = a & 0xffffffff`, `a_hi = a >>u 32`, `b_lo`, `b_hi`):
+///
+/// 1. Full 4-term form (runtime `(a, b)`, squaring `a == b`, or 64-bit constant `b`):
+///    `(((a_lo*b_lo)>>32 + (p1 & mask) + (p2 & mask)) >> 32) + (p1>>32) + (p2>>32) + (a_hi*b_hi)`
+///    where `{p1, p2} = {a_lo*b_hi, a_hi*b_lo}`.
+/// 2. Collapsed 2-term form (`b_hi == 0`, e.g. small constant `b <= 0xffffffff` or zero-extended `u32`):
+///    `(((a_lo*b_lo)>>32 + (p2 & mask)) >> 32) + (p2>>32)` where `p2 = a_hi*b_lo`.
+///
+/// Exact for all 64-bit unsigned inputs because intermediate sums never overflow `u64`.
+fn try_fold_schoolbook_mul_hi_u(st: &GvnState, lhs: Val, rhs: Val) -> Option<SchoolbookMulHi> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Factor {
+        Val(Val),
+        Const(u64),
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Orig64 {
+        Val(Val),
+        Const(u64),
+    }
+
+    let factor_of = |v: Val| -> Factor {
+        match st.get_const64(v) {
+            Some(c) => Factor::Const(c as u64),
+            None => Factor::Val(v),
+        }
+    };
+    let extract_shr32 = |v: Val| -> Option<Val> {
+        match st.def_op[v.0 as usize] {
+            Some(Op::I64BinImm(IntBinOp::ShrU, x, 32)) => Some(x),
+            Some(Op::I64Bin(IntBinOp::ShrU, x, sh)) if st.get_const64(sh) == Some(32) => Some(x),
+            _ => None,
+        }
+    };
+    let extract_low32 = |v: Val| -> Option<Val> {
+        match st.def_op[v.0 as usize] {
+            Some(Op::I64Bin(IntBinOp::And, x, y)) => {
+                if st.get_const64(y) == Some(0xffff_ffff) {
+                    Some(x)
+                } else if st.get_const64(x) == Some(0xffff_ffff) {
+                    Some(y)
+                } else {
+                    None
+                }
+            }
+            Some(Op::I64ExtendI32U(w)) => match st.def_op[w.0 as usize] {
+                Some(Op::I32WrapI64(orig)) => Some(orig),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let extract_mul_pair = |v: Val| -> Option<(Factor, Factor)> {
+        match st.def_op[v.0 as usize] {
+            Some(Op::I64Bin(IntBinOp::Mul, x, y)) => Some((factor_of(x), factor_of(y))),
+            Some(Op::I64BinImm(IntBinOp::Mul, x, imm)) if imm >= 0 => {
+                Some((factor_of(x), Factor::Const(imm as u64)))
+            }
+            Some(Op::I64BinImm(IntBinOp::Shl, x, sh)) if (1..=31).contains(&sh) => {
+                Some((factor_of(x), Factor::Const(1u64 << (sh as u32))))
+            }
+            _ => None,
+        }
+    };
+    let pair_matches = |p: (Factor, Factor), f1: Factor, f2: Factor| -> bool {
+        (p.0 == f1 && p.1 == f2) || (p.0 == f2 && p.1 == f1)
+    };
+    let match_lo_hi_origin = |lo_f: Factor, hi_f: Factor| -> Option<Orig64> {
+        match (lo_f, hi_f) {
+            (Factor::Val(lo_v), Factor::Val(hi_v)) => {
+                let o1 = extract_low32(lo_v)?;
+                let o2 = extract_shr32(hi_v)?;
+                (o1 == o2).then_some(Orig64::Val(o1))
+            }
+            (Factor::Const(lo_c), Factor::Const(hi_c))
+                if lo_c <= 0xffff_ffff && hi_c <= 0xffff_ffff =>
+            {
+                Some(Orig64::Const((hi_c << 32) | lo_c))
+            }
+            _ => None,
+        }
+    };
+    let flatten_add = |a: Val, b: Val, max_leaves: usize| -> Option<([Val; 4], usize)> {
+        let mut leaves = [Val(0); 4];
+        let mut len = 0usize;
+        let mut stack = [Val(0); 8];
+        let mut sp = 0usize;
+        stack[sp] = b;
+        sp += 1;
+        stack[sp] = a;
+        sp += 1;
+        while sp > 0 {
+            sp -= 1;
+            let cur = stack[sp];
+            match st.def_op[cur.0 as usize] {
+                Some(Op::I64Bin(IntBinOp::Add, x, y)) => {
+                    if len + sp + 2 > max_leaves || sp + 2 > stack.len() {
+                        return None;
+                    }
+                    stack[sp] = y;
+                    sp += 1;
+                    stack[sp] = x;
+                    sp += 1;
+                }
+                Some(Op::I64BinImm(IntBinOp::Shl, x, 1)) => {
+                    if len + sp + 2 > max_leaves || sp + 2 > stack.len() {
+                        return None;
+                    }
+                    stack[sp] = x;
+                    sp += 1;
+                    stack[sp] = x;
+                    sp += 1;
+                }
+                _ => {
+                    if len >= max_leaves {
+                        return None;
+                    }
+                    leaves[len] = cur;
+                    len += 1;
+                }
+            }
+        }
+        Some((leaves, len))
+    };
+
+    let (top, top_len) = flatten_add(lhs, rhs, 4)?;
+    if top_len == 4 {
+        // Form 1: 1 high-high product (`p3 = a_hi * b_hi`) + 3 `>>u 32` terms (`mid`, `p1`, `p2`).
+        let mut p3_idx = None;
+        let mut shr_vals = [Val(0); 3];
+        let mut shr_len = 0usize;
+        for (i, &lv) in top.iter().enumerate() {
+            if let Some(u) = extract_shr32(lv) {
+                if shr_len >= 3 {
+                    return None;
+                }
+                shr_vals[shr_len] = u;
+                shr_len += 1;
+            } else if p3_idx.is_none() {
+                p3_idx = Some(i);
+            } else {
+                return None;
+            }
+        }
+        if shr_len != 3 {
+            return None;
+        }
+        let p3_pair = extract_mul_pair(top[p3_idx?])?;
+        // Among `shr_vals[0..3]`, identify `mid` (`Add` of 3 leaves) and `{p1, p2}` (two `Mul`s).
+        for mi in 0..3 {
+            let mid_v = shr_vals[mi];
+            let Some(Op::I64Bin(IntBinOp::Add, ma, mb)) = st.def_op[mid_v.0 as usize] else {
+                continue;
+            };
+            let p1 = shr_vals[(mi + 1) % 3];
+            let p2 = shr_vals[(mi + 2) % 3];
+            let (Some(p1_pair), Some(p2_pair)) = (extract_mul_pair(p1), extract_mul_pair(p2))
+            else {
+                continue;
+            };
+            let Some((ml, 3)) = flatten_add(ma, mb, 3) else {
+                continue;
+            };
+            // `mid` leaves must be `{p0 >> 32, p1 & mask, p2 & mask}`.
+            let mut p0_opt = None;
+            let mut m_lows = [Val(0); 2];
+            let mut m_low_len = 0usize;
+            for &mv in &ml[..3] {
+                if let Some(u) = extract_shr32(mv) {
+                    if p0_opt.is_some() {
+                        p0_opt = None;
+                        break;
+                    }
+                    p0_opt = Some(u);
+                } else if let Some(u) = extract_low32(mv) {
+                    if m_low_len >= 2 {
+                        m_low_len = 3;
+                        break;
+                    }
+                    m_lows[m_low_len] = u;
+                    m_low_len += 1;
+                } else {
+                    m_low_len = 3;
+                    break;
+                }
+            }
+            if m_low_len != 2 {
+                continue;
+            }
+            let Some(p0) = p0_opt else {
+                continue;
+            };
+            if !((m_lows[0] == p1 && m_lows[1] == p2) || (m_lows[0] == p2 && m_lows[1] == p1)) {
+                continue;
+            }
+            let Some(p0_pair) = extract_mul_pair(p0) else {
+                continue;
+            };
+            let (ah, bh) = p3_pair;
+            for (a_lo, b_lo) in [(p0_pair.0, p0_pair.1), (p0_pair.1, p0_pair.0)] {
+                let (Some(a_orig), Some(b_orig)) =
+                    (match_lo_hi_origin(a_lo, ah), match_lo_hi_origin(b_lo, bh))
+                else {
+                    continue;
+                };
+                let cross_ok = (pair_matches(p1_pair, a_lo, bh) && pair_matches(p2_pair, ah, b_lo))
+                    || (pair_matches(p1_pair, ah, b_lo) && pair_matches(p2_pair, a_lo, bh));
+                if !cross_ok {
+                    continue;
+                }
+                return match (a_orig, b_orig) {
+                    (Orig64::Val(av), Orig64::Val(bv)) => Some(SchoolbookMulHi::Vals(av, bv)),
+                    (Orig64::Val(av), Orig64::Const(bc)) => Some(SchoolbookMulHi::ValConst(av, bc)),
+                    (Orig64::Const(ac), Orig64::Val(bv)) => Some(SchoolbookMulHi::ValConst(bv, ac)),
+                    (Orig64::Const(_), Orig64::Const(_)) => None,
+                };
+            }
+        }
+        None
+    } else if top_len == 2 {
+        // Form 2 (`b_hi == 0`): `(mid >>u 32) + (p2 >>u 32)` where `mid = (p0 >>u 32) + (p2 & mask)`.
+        let u0 = extract_shr32(top[0])?;
+        let u1 = extract_shr32(top[1])?;
+        for (mid_v, p2) in [(u0, u1), (u1, u0)] {
+            let Some(Op::I64Bin(IntBinOp::Add, ma, mb)) = st.def_op[mid_v.0 as usize] else {
+                continue;
+            };
+            let Some(p2_pair) = extract_mul_pair(p2) else {
+                continue;
+            };
+            let Some((ml, 2)) = flatten_add(ma, mb, 2) else {
+                continue;
+            };
+            let p0 = if let (Some(u), Some(lo)) = (extract_shr32(ml[0]), extract_low32(ml[1]))
+                && lo == p2
+            {
+                u
+            } else if let (Some(u), Some(lo)) = (extract_shr32(ml[1]), extract_low32(ml[0]))
+                && lo == p2
+            {
+                u
+            } else {
+                continue;
+            };
+            let Some(p0_pair) = extract_mul_pair(p0) else {
+                continue;
+            };
+            for (a_lo, b_lo) in [(p0_pair.0, p0_pair.1), (p0_pair.1, p0_pair.0)] {
+                for (a_hi, b_lo2) in [(p2_pair.0, p2_pair.1), (p2_pair.1, p2_pair.0)] {
+                    if b_lo != b_lo2 {
+                        continue;
+                    }
+                    let Some(Orig64::Val(av)) = match_lo_hi_origin(a_lo, a_hi) else {
+                        continue;
+                    };
+                    match b_lo {
+                        Factor::Const(bc) if bc <= 0xffff_ffff => {
+                            return Some(SchoolbookMulHi::ValConst(av, bc));
+                        }
+                        Factor::Val(bv)
+                            if extract_low32(bv).is_some()
+                                || st.non_wrap_bound[bv.0 as usize]
+                                    .is_some_and(|hi| hi <= u64::from(u32::MAX)) =>
+                        {
+                            return Some(SchoolbookMulHi::Vals(av, bv));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
+    } else {
+        None
+    }
+}
+
 /// Runs dominator-tree scoped GVN/CSE, post-inlining `const32` folding, `GlobalGet`/`MemSize`/`TableGet`/
 /// alias-safe `Load` CSE, cross-block dominator `checked_max` bounds-check elimination, and wrap-safe
 /// addressing-mode folding. Returns `(folded_any_branch, ir_mutated)`.
@@ -6987,6 +7271,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     }
     let mut folded_any_branch = false;
     let mut ir_mutated = false;
+    let mut deferred_const_mul_hi: Vec<(u32, Val, Val, i64)> = Vec::new();
 
     let fixed_mem = module.fixed32.is_some();
     let mem_min_bytes = module
@@ -8574,6 +8859,19 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         };
                                         inst.op = Op::I64Bin(nz_op, a, b);
                                         ir_mutated = true;
+                                    } else if bop == IntBinOp::Add
+                                        && let Some(mh) = try_fold_schoolbook_mul_hi_u(&st, a, b)
+                                    {
+                                        match mh {
+                                            SchoolbookMulHi::Vals(ma, mb) => {
+                                                inst.op = Op::I64Bin(IntBinOp::MulHiU, ma, mb);
+                                                ir_mutated = true;
+                                            }
+                                            SchoolbookMulHi::ValConst(ma, bc) => {
+                                                deferred_const_mul_hi
+                                                    .push((bid, res, ma, bc as i64));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -8654,6 +8952,21 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 } else if a == b {
                                     st.set_subst(res, a);
                                     continue;
+                                } else if st.non_wrap_bound[cond.0 as usize]
+                                    .is_some_and(|hi| hi <= 1)
+                                {
+                                    if st.const32[a.0 as usize] == Some(1)
+                                        && st.const32[b.0 as usize] == Some(0)
+                                    {
+                                        st.set_subst(res, cond);
+                                        ir_mutated = true;
+                                        continue;
+                                    } else if st.get_const64(a) == Some(1)
+                                        && st.get_const64(b) == Some(0)
+                                    {
+                                        inst.op = Op::I64ExtendI32U(cond);
+                                        ir_mutated = true;
+                                    }
                                 }
                             }
                             Op::CmpSelect { kind, a, b, tv, fv } => {
@@ -8678,6 +8991,44 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 } else if tv == fv {
                                     st.set_subst(res, tv);
                                     continue;
+                                } else if st.const32[tv.0 as usize] == Some(1)
+                                    && st.const32[fv.0 as usize] == Some(0)
+                                {
+                                    inst.op = match kind {
+                                        CmpBranchKind::I32(cop) => Op::I32Cmp(cop, a, b),
+                                        CmpBranchKind::I32Imm(cop, imm) => {
+                                            Op::I32CmpImm(cop, a, imm)
+                                        }
+                                        CmpBranchKind::I64(cop) => Op::I64Cmp(cop, a, b),
+                                        CmpBranchKind::I64Imm(cop, imm) => {
+                                            Op::I64CmpImm(cop, a, imm)
+                                        }
+                                        CmpBranchKind::F32(cop) => Op::F32Cmp(cop, a, b),
+                                        CmpBranchKind::F64(cop) => Op::F64Cmp(cop, a, b),
+                                    };
+                                    ir_mutated = true;
+                                } else if st.const32[tv.0 as usize] == Some(0)
+                                    && st.const32[fv.0 as usize] == Some(1)
+                                {
+                                    match kind {
+                                        CmpBranchKind::I32(cop) => {
+                                            inst.op = Op::I32Cmp(cop.invert_int(), a, b);
+                                            ir_mutated = true;
+                                        }
+                                        CmpBranchKind::I32Imm(cop, imm) => {
+                                            inst.op = Op::I32CmpImm(cop.invert_int(), a, imm);
+                                            ir_mutated = true;
+                                        }
+                                        CmpBranchKind::I64(cop) => {
+                                            inst.op = Op::I64Cmp(cop.invert_int(), a, b);
+                                            ir_mutated = true;
+                                        }
+                                        CmpBranchKind::I64Imm(cop, imm) => {
+                                            inst.op = Op::I64CmpImm(cop.invert_int(), a, imm);
+                                            ir_mutated = true;
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             Op::V128Un { op: 0xfda9, a } => {
@@ -9403,6 +9754,25 @@ fn run_dom_gvn_and_bce_with_scratch(
         }
     }
     ir.val_pool = pool;
+    // Materialize constant multipliers for collapsed/constant schoolbook `mul_hi_u` matches.
+    for (bid, res_v, ma, bc) in deferred_const_mul_hi {
+        if ir.val_tys.len() >= MAX_IR_VALS_PER_FN {
+            break;
+        }
+        let b_insts = &ir.blocks[bid as usize].insts;
+        if let Some(pos) = b_insts.iter().position(|ins| ins.res == Some(res_v)) {
+            let cv = ir.push_val(Ty::I64);
+            ir.blocks[bid as usize].insts[pos].op = Op::I64Bin(IntBinOp::MulHiU, ma, cv);
+            ir.blocks[bid as usize].insts.insert(
+                pos,
+                Inst {
+                    res: Some(cv),
+                    op: Op::ConstI64(bc),
+                },
+            );
+            ir_mutated = true;
+        }
+    }
     // Return scratch buffers for reuse across functions on this worker thread.
     scratch.subst = st.subst;
     scratch.exprs = st.exprs;
@@ -22245,6 +22615,8 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
             acc_pos: usize,
             src_a: AddrForm,
             src_b: Option<AddrForm>,
+            src_b_scalar: Option<Val>,
+            src_b_const: Option<i32>,
             acc_next: Val,
         },
     }
@@ -22920,7 +23292,20 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
             };
             (p, eb, esh)
         } else {
-            // 0 stores: try matching associative integer reduction (`I32Sum`, `I32Xor`, `I64Sum`, `I64Xor`, `I32Dot`).
+            // 0 stores: try matching associative integer reduction (`I32Sum`, `I32Xor`, `I64Sum`,
+            // `I64Xor`, `I32Dot`, `U32ZextSum`, `U32XorZextSum`).
+            let entry_slice = ir.pool_slice(entry_args);
+            let resolve_inv_i32 = |v: Val| -> Option<Val> {
+                if !is_bi_def(v) {
+                    Some(v)
+                } else if let Some(pi) = bb.params.iter().position(|&bp| bp == v)
+                    && param_step(pi) == Some(0)
+                {
+                    Some(entry_slice[pi])
+                } else {
+                    None
+                }
+            };
             let check_loads = |va: Val,
                                bca: Option<(Val, u64)>,
                                vb: Option<(Val, Option<(Val, u64)>)>,
@@ -22961,6 +23346,8 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                                     acc_pos: pi,
                                     src_a: fa,
                                     src_b: None,
+                                    src_b_scalar: None,
+                                    src_b_const: None,
                                     acc_next: next,
                                 },
                                 4,
@@ -22977,6 +23364,8 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                                     acc_pos: pi,
                                     src_a: fa,
                                     src_b: Some(fb),
+                                    src_b_scalar: None,
+                                    src_b_const: None,
                                     acc_next: next,
                                 },
                                 4,
@@ -22997,6 +23386,8 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                                         acc_pos: pi,
                                         src_a: fa,
                                         src_b: None,
+                                        src_b_scalar: None,
+                                        src_b_const: None,
                                         acc_next: next,
                                     },
                                     4,
@@ -23006,21 +23397,120 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                     }
                     (Ty::I64, Op::I64Bin(IntBinOp::Add, x, y)) if x == p || y == p => {
                         let rhs = if x == p { y } else { x };
-                        parse_load(rhs, LoadKind::I64, 3, 8)
-                            .filter(|(va, bca, _)| check_loads(*va, *bca, None, 8))
-                            .map(|(_, _, fa)| {
-                                (
+                        if let Some((va, bca, fa)) = parse_load(rhs, LoadKind::I64, 3, 8)
+                            && check_loads(va, bca, None, 8)
+                        {
+                            Some((
+                                MatchPlan::Reduce {
+                                    kind: VecReduceKind::I64Sum,
+                                    acc_pos: pi,
+                                    src_a: fa,
+                                    src_b: None,
+                                    src_b_scalar: None,
+                                    src_b_const: None,
+                                    acc_next: next,
+                                },
+                                8,
+                                3,
+                            ))
+                        } else if let Some((va, bca, fa)) =
+                            parse_load(rhs, LoadKind::I64Load32U, 2, 4)
+                            && check_loads(va, bca, None, 4)
+                        {
+                            Some((
+                                MatchPlan::Reduce {
+                                    kind: VecReduceKind::U32ZextSum,
+                                    acc_pos: pi,
+                                    src_a: fa,
+                                    src_b: None,
+                                    src_b_scalar: None,
+                                    src_b_const: None,
+                                    acc_next: next,
+                                },
+                                4,
+                                2,
+                            ))
+                        } else if let Some(Op::I64ExtendI32U(inner)) = find_inst(rhs) {
+                            if let Some((va, bca, fa)) = parse_load(inner, LoadKind::I32, 2, 4)
+                                && check_loads(va, bca, None, 4)
+                            {
+                                Some((
                                     MatchPlan::Reduce {
-                                        kind: VecReduceKind::I64Sum,
+                                        kind: VecReduceKind::U32ZextSum,
                                         acc_pos: pi,
                                         src_a: fa,
                                         src_b: None,
+                                        src_b_scalar: None,
+                                        src_b_const: None,
                                         acc_next: next,
                                     },
-                                    8,
-                                    3,
-                                )
-                            })
+                                    4,
+                                    2,
+                                ))
+                            } else if let Some(Op::I32Bin(IntBinOp::Xor, lx, ly)) = find_inst(inner)
+                            {
+                                if let Some((va, bca, fa)) = parse_load(lx, LoadKind::I32, 2, 4)
+                                    && let Some(sv) = resolve_inv_i32(ly)
+                                    && check_loads(va, bca, None, 4)
+                                {
+                                    Some((
+                                        MatchPlan::Reduce {
+                                            kind: VecReduceKind::U32XorZextSum,
+                                            acc_pos: pi,
+                                            src_a: fa,
+                                            src_b: None,
+                                            src_b_scalar: Some(sv),
+                                            src_b_const: None,
+                                            acc_next: next,
+                                        },
+                                        4,
+                                        2,
+                                    ))
+                                } else if let Some((va, bca, fa)) =
+                                    parse_load(ly, LoadKind::I32, 2, 4)
+                                    && let Some(sv) = resolve_inv_i32(lx)
+                                    && check_loads(va, bca, None, 4)
+                                {
+                                    Some((
+                                        MatchPlan::Reduce {
+                                            kind: VecReduceKind::U32XorZextSum,
+                                            acc_pos: pi,
+                                            src_a: fa,
+                                            src_b: None,
+                                            src_b_scalar: Some(sv),
+                                            src_b_const: None,
+                                            acc_next: next,
+                                        },
+                                        4,
+                                        2,
+                                    ))
+                                } else {
+                                    None
+                                }
+                            } else if let Some(Op::I32BinImm(IntBinOp::Xor, lx, imm)) =
+                                find_inst(inner)
+                                && let Some((va, bca, fa)) = parse_load(lx, LoadKind::I32, 2, 4)
+                                && check_loads(va, bca, None, 4)
+                            {
+                                Some((
+                                    MatchPlan::Reduce {
+                                        kind: VecReduceKind::U32XorZextSum,
+                                        acc_pos: pi,
+                                        src_a: fa,
+                                        src_b: None,
+                                        src_b_scalar: None,
+                                        src_b_const: Some(imm),
+                                        acc_next: next,
+                                    },
+                                    4,
+                                    2,
+                                ))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
                     (Ty::I64, Op::I64Bin(IntBinOp::Xor, x, y)) if x == p || y == p => {
                         let rhs = if x == p { y } else { x };
@@ -23033,6 +23523,8 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                                         acc_pos: pi,
                                         src_a: fa,
                                         src_b: None,
+                                        src_b_scalar: None,
+                                        src_b_const: None,
                                         acc_next: next,
                                     },
                                     8,
@@ -23359,6 +23851,8 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                 acc_pos,
                 src_a,
                 src_b,
+                src_b_scalar,
+                src_b_const,
                 ..
             } => {
                 let (as_, ae) = build_range64(ir, src_a, &mut guard_ok);
@@ -23370,6 +23864,10 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                     let b_ib = emit_pre(ir, Ty::I32, Op::I64Cmp(CmpOp::LeU, be, mem_bytes64));
                     guard_ok = emit_pre(ir, Ty::I32, Op::I32Bin(IntBinOp::And, guard_ok, b_ib));
                     emit_fast(ir, &mut fast_insts, Ty::I32, Op::I32WrapI64(bs))
+                } else if let Some(sv) = src_b_scalar {
+                    sv
+                } else if let Some(ci) = src_b_const {
+                    emit_fast(ir, &mut fast_insts, Ty::I32, Op::ConstI32(ci))
                 } else {
                     src_a_u32
                 };
@@ -23390,7 +23888,9 @@ fn vectorize_general_counted_loops(ir: &mut IrFunc, module: &X64Module) -> bool 
                         Op::I32Bin(IntBinOp::Add, init_acc, vred)
                     }
                     VecReduceKind::I32Xor => Op::I32Bin(IntBinOp::Xor, init_acc, vred),
-                    VecReduceKind::I64Sum => Op::I64Bin(IntBinOp::Add, init_acc, vred),
+                    VecReduceKind::I64Sum
+                    | VecReduceKind::U32ZextSum
+                    | VecReduceKind::U32XorZextSum => Op::I64Bin(IntBinOp::Add, init_acc, vred),
                     VecReduceKind::I64Xor => Op::I64Bin(IntBinOp::Xor, init_acc, vred),
                 };
                 let acc_done = emit_fast(ir, &mut fast_insts, kind.result_ty(), comb_op);

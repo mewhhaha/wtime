@@ -609,9 +609,69 @@ struct Lower<'a> {
     /// Intra-block live integer `RFLAGS` state for redundant `cmp` elision across adjacent
     /// `Op::CmpSelect` / `Term::CmpBranch` instructions.
     live_flags: Option<LiveFlags>,
-    /// Intra-block zero-gap spill-slot forwarding: `(val, reg_holding_val, asm_len_after_store)`.
-    /// Valid iff `self.asm.code.len() == saved_len` (zero bytes emitted since `gp_commit`).
-    just_spilled: Option<(Val, Gp, usize)>,
+    /// Intra-block spill-slot register cache (zero-gap non-scratch commits + audited
+    /// multi-instruction `SCRATCH_GP1`/`SCRATCH_GP2` value caching).
+    spill_cache: SpillRegCache,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SpillRegCache {
+    /// `(val, any_gp, asm_len_after_store)` valid iff `asm.code.len() == saved_len`.
+    zero_gap: Option<(Val, Gp, usize)>,
+    /// `[SCRATCH_GP1 (R11), SCRATCH_GP2 (R10)]` currently holding spilled `Val`s with valid width.
+    scratch: [Option<Val>; 2],
+    /// Whether `gp_read` / `gp_read_preserve_flags` is allowed to record a freshly loaded spill
+    /// value into `scratch[0]` / `scratch[1]` during the current instruction (only true for
+    /// audited scratch-preserving instructions!).
+    populate_scratch: [bool; 2],
+    /// Set by `gp_commit` when the current instruction freshly committed a spilled result into a
+    /// scratch register (`Some(0)` or `Some(1)`).
+    committed_scratch: Option<usize>,
+}
+
+impl SpillRegCache {
+    #[inline]
+    fn scratch_idx(g: Gp) -> Option<usize> {
+        if g == SCRATCH_GP1 {
+            Some(0)
+        } else if g == SCRATCH_GP2 {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.zero_gap = None;
+        self.scratch = [None, None];
+        self.populate_scratch = [false, false];
+        self.committed_scratch = None;
+    }
+
+    #[inline]
+    fn clobber_scratch(&mut self, g: Gp) {
+        if let Some(si) = Self::scratch_idx(g) {
+            self.scratch[si] = None;
+        }
+    }
+
+    #[inline]
+    fn lookup(&self, v: Val, asm_len: usize) -> Option<Gp> {
+        if self.scratch[0] == Some(v) {
+            return Some(SCRATCH_GP1);
+        }
+        if self.scratch[1] == Some(v) {
+            return Some(SCRATCH_GP2);
+        }
+        if let Some((sv, reg, saved_len)) = self.zero_gap
+            && sv == v
+            && saved_len == asm_len
+        {
+            return Some(reg);
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -759,24 +819,45 @@ impl<'a> Lower<'a> {
             Loc::Gp(g) => g,
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
-                if let Some((sv, reg, saved_len)) = self.just_spilled
-                    && sv == v
-                    && self.asm.code.len() == saved_len
-                {
+                if let Some(reg) = self.spill_cache.lookup(v, self.asm.code.len()) {
                     if reg != scratch {
                         self.asm.mov_rr(is64, scratch, reg);
+                        self.spill_cache.zero_gap = None;
+                        if let Some(si) = SpillRegCache::scratch_idx(scratch) {
+                            self.spill_cache.scratch[si] = if self.spill_cache.populate_scratch[si]
+                                && (is64 || self.is_upper32_zero(v))
+                            {
+                                Some(v)
+                            } else {
+                                None
+                            };
+                        }
                     }
                     return scratch;
                 }
                 self.asm.mov_rm(is64, scratch, Mem::base_disp(Gp::Rsp, off));
+                self.spill_cache.zero_gap = None;
+                if let Some(si) = SpillRegCache::scratch_idx(scratch) {
+                    self.spill_cache.scratch[si] = if self.spill_cache.populate_scratch[si]
+                        && (is64 || self.is_upper32_zero(v))
+                    {
+                        Some(v)
+                    } else {
+                        None
+                    };
+                }
                 scratch
             }
             Loc::Remat(RematConst::I32(c)) => {
                 self.asm.mov_ri32(scratch, c as u32);
+                self.spill_cache.zero_gap = None;
+                self.spill_cache.clobber_scratch(scratch);
                 scratch
             }
             Loc::Remat(RematConst::I64(c)) => {
                 self.asm.mov_ri64(scratch, c as u64);
+                self.spill_cache.zero_gap = None;
+                self.spill_cache.clobber_scratch(scratch);
                 scratch
             }
             Loc::RematAddr {
@@ -786,6 +867,8 @@ impl<'a> Lower<'a> {
                 ..
             } => {
                 self.asm.lea(is64, scratch, Mem::base_disp(base_reg, disp));
+                self.spill_cache.zero_gap = None;
+                self.spill_cache.clobber_scratch(scratch);
                 scratch
             }
             Loc::Xmm(_) | Loc::Remat(_) => unreachable!("expected gp val"),
@@ -798,24 +881,45 @@ impl<'a> Lower<'a> {
             Loc::Gp(g) => g,
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
-                if let Some((sv, reg, saved_len)) = self.just_spilled
-                    && sv == v
-                    && self.asm.code.len() == saved_len
-                {
+                if let Some(reg) = self.spill_cache.lookup(v, self.asm.code.len()) {
                     if reg != scratch {
                         self.asm.mov_rr(is64, scratch, reg);
+                        self.spill_cache.zero_gap = None;
+                        if let Some(si) = SpillRegCache::scratch_idx(scratch) {
+                            self.spill_cache.scratch[si] = if self.spill_cache.populate_scratch[si]
+                                && (is64 || self.is_upper32_zero(v))
+                            {
+                                Some(v)
+                            } else {
+                                None
+                            };
+                        }
                     }
                     return scratch;
                 }
                 self.asm.mov_rm(is64, scratch, Mem::base_disp(Gp::Rsp, off));
+                self.spill_cache.zero_gap = None;
+                if let Some(si) = SpillRegCache::scratch_idx(scratch) {
+                    self.spill_cache.scratch[si] = if self.spill_cache.populate_scratch[si]
+                        && (is64 || self.is_upper32_zero(v))
+                    {
+                        Some(v)
+                    } else {
+                        None
+                    };
+                }
                 scratch
             }
             Loc::Remat(RematConst::I32(c)) => {
                 self.asm.mov_ri32_preserve_flags(scratch, c as u32);
+                self.spill_cache.zero_gap = None;
+                self.spill_cache.clobber_scratch(scratch);
                 scratch
             }
             Loc::Remat(RematConst::I64(c)) => {
                 self.asm.mov_ri64_preserve_flags(scratch, c as u64);
+                self.spill_cache.zero_gap = None;
+                self.spill_cache.clobber_scratch(scratch);
                 scratch
             }
             Loc::RematAddr {
@@ -825,6 +929,8 @@ impl<'a> Lower<'a> {
                 ..
             } => {
                 self.asm.lea(is64, scratch, Mem::base_disp(base_reg, disp));
+                self.spill_cache.zero_gap = None;
+                self.spill_cache.clobber_scratch(scratch);
                 scratch
             }
             Loc::Xmm(_) | Loc::Remat(_) => unreachable!("expected gp val"),
@@ -915,16 +1021,171 @@ impl<'a> Lower<'a> {
                 let is64 = self.ty(v) == Ty::I64;
                 if d != reg {
                     self.asm.mov_rr(is64, d, reg);
+                    self.spill_cache.zero_gap = None;
                 }
             }
             Loc::Spill(off) => {
                 let is64 = self.ty(v) == Ty::I64;
                 self.asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, off), reg);
                 if is64 || self.is_upper32_zero(v) {
-                    self.just_spilled = Some((v, reg, self.asm.code.len()));
+                    self.spill_cache.zero_gap = Some((v, reg, self.asm.code.len()));
+                    if let Some(si) = SpillRegCache::scratch_idx(reg) {
+                        self.spill_cache.scratch[si] = Some(v);
+                        self.spill_cache.committed_scratch = Some(si);
+                    }
+                } else {
+                    self.spill_cache.clobber_scratch(reg);
+                    self.spill_cache.zero_gap = None;
                 }
             }
             Loc::Xmm(_) | Loc::Remat(_) | Loc::RematAddr { .. } => unreachable!(),
+        }
+    }
+
+    /// Strictly audited whitelist returning `(preserves_sgp1, preserves_sgp2)` for `emit_inst`.
+    /// A slot is `true` ONLY if the lowering of `op` NEVER writes that scratch GP register except
+    /// through `gp_read` / `gp_read_preserve_flags` (which already maintain `self.spill_cache`).
+    fn op_preserves_scratch_gp(
+        &self,
+        res: Option<Val>,
+        op: Op,
+        bc_guard_covered: bool,
+    ) -> (bool, bool) {
+        let res_is_gp = res.is_some_and(|r| matches!(self.loc(r), Loc::Gp(_)));
+        let res_is_xmm = res.is_some_and(|r| matches!(self.loc(r), Loc::Xmm(_)));
+        let res_is_remat = res.is_some_and(|r| matches!(self.loc(r), Loc::Remat(_)));
+        let res_is_remat_addr = res.is_some_and(|r| matches!(self.loc(r), Loc::RematAddr { .. }));
+        match op {
+            Op::BoundsCheck { .. } if bc_guard_covered => (true, true),
+            Op::ConstI32(_) | Op::ConstI64(_) if res_is_gp || res_is_remat => (true, true),
+            Op::ConstF32(_) | Op::ConstF64(_) | Op::ConstV128(_) if res_is_xmm || res_is_remat => {
+                (true, true)
+            }
+            Op::Copy(_) if res_is_gp || res_is_xmm => (true, true),
+            Op::I32WrapI64(_)
+            | Op::I64ExtendI32U(_)
+            | Op::I64ExtendI32S(_)
+            | Op::I64Extend32S(_)
+            | Op::I32Extend8S(_)
+            | Op::I32Extend16S(_)
+            | Op::I64Extend8S(_)
+            | Op::I64Extend16S(_)
+            | Op::I32Eqz(_)
+            | Op::I64Eqz(_)
+            | Op::I32Popcnt(_)
+            | Op::I64Popcnt(_)
+                if res_is_gp =>
+            {
+                (true, true)
+            }
+            Op::I32BinImm(bop, _, imm) | Op::I64BinImm(bop, _, imm) => {
+                if res_is_remat_addr {
+                    (true, true)
+                } else if !res_is_gp {
+                    (false, false)
+                } else {
+                    match bop {
+                        IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU
+                        | IntBinOp::Rotl
+                        | IntBinOp::Rotr => (true, true),
+                        IntBinOp::Mul => {
+                            // `emit_mul_imm` uses `SCRATCH_GP2` for `7|31|63|17|33|65` when `d == ar`.
+                            (true, !matches!(imm, 7 | 31 | 63 | 17 | 33 | 65))
+                        }
+                        _ => (false, false),
+                    }
+                }
+            }
+            Op::I32Bin(bop, _, _) | Op::I64Bin(bop, _, _) if res_is_gp => match bop {
+                IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor => {
+                    (true, true)
+                }
+                IntBinOp::Sub => (true, false),
+                IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU if self.isa.has_bmi2 => {
+                    (true, true)
+                }
+                _ => (false, false),
+            },
+            Op::AddScaled { .. }
+            | Op::I32Cmp(..)
+            | Op::I32CmpImm(..)
+            | Op::I64Cmp(..)
+            | Op::I64CmpImm(..)
+                if res_is_gp =>
+            {
+                (true, true)
+            }
+            Op::CmpSelect { kind, .. }
+                if res_is_gp
+                    && matches!(
+                        kind,
+                        CmpBranchKind::I32(_)
+                            | CmpBranchKind::I32Imm(..)
+                            | CmpBranchKind::I64(_)
+                            | CmpBranchKind::I64Imm(..)
+                    ) =>
+            {
+                (true, true)
+            }
+            Op::Load {
+                kind,
+                offset,
+                checked,
+                ..
+            } => {
+                let guard_ok = self.layout.use_guard_pages
+                    && !self.layout.memory64
+                    && offset <= u32::MAX as u64;
+                let no_bc = !self.layout.spectre_mitigations && (checked || guard_ok);
+                let small_off = i32::try_from(offset).is_ok();
+                let clean_dst = if kind.ty().is_fp() {
+                    res_is_xmm
+                        && !matches!(kind, LoadKind::V128Load8Splat | LoadKind::V128Load16Splat)
+                } else {
+                    res_is_gp
+                };
+                if no_bc && small_off && clean_dst {
+                    (true, true)
+                } else {
+                    (false, false)
+                }
+            }
+            Op::LoadScaled { kind, .. } => {
+                let clean_dst = if kind.ty().is_fp() {
+                    res_is_xmm
+                        && !matches!(kind, LoadKind::V128Load8Splat | LoadKind::V128Load16Splat)
+                } else {
+                    res_is_gp
+                };
+                if clean_dst {
+                    (true, true)
+                } else {
+                    (false, false)
+                }
+            }
+            Op::Store {
+                offset, checked, ..
+            } => {
+                let guard_ok = self.layout.use_guard_pages
+                    && !self.layout.memory64
+                    && offset <= u32::MAX as u64;
+                let no_bc = !self.layout.spectre_mitigations && (checked || guard_ok);
+                if no_bc && i32::try_from(offset).is_ok() {
+                    (true, true)
+                } else {
+                    (false, false)
+                }
+            }
+            Op::StoreScaled { .. } => (true, true),
+            Op::F32Un(..) | Op::F64Un(..) | Op::F32Bin(..) | Op::F64Bin(..) => (true, true),
+            _ => (false, false),
         }
     }
 
@@ -1547,6 +1808,7 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_edge_moves(&mut self, target_bb: u32, args: ValRange) {
+        self.spill_cache.clear();
         let params = &self.ir.blocks[target_bb as usize].params;
         let arg_vals = self.ir.pool_slice(args);
         debug_assert_eq!(params.len(), arg_vals.len());
@@ -3136,12 +3398,29 @@ impl<'a> Lower<'a> {
                     IntBinOp::Xor => asm.xor_rm(is64, dst, mem),
                     _ => unreachable!(),
                 };
+                let reg_alu = |asm: &mut Asm, op: IntBinOp, is64: bool, dst: Gp, src: Gp| match op {
+                    IntBinOp::Add => asm.add_rr(is64, dst, src),
+                    IntBinOp::Sub => asm.sub_rr(is64, dst, src),
+                    IntBinOp::Mul => asm.imul_rr(is64, dst, src),
+                    IntBinOp::And => asm.and_rr(is64, dst, src),
+                    IntBinOp::Or => asm.or_rr(is64, dst, src),
+                    IntBinOp::Xor => asm.xor_rr(is64, dst, src),
+                    _ => unreachable!(),
+                };
                 match (self.loc(a), self.loc(b)) {
                     (Loc::Gp(ag), Loc::Spill(boff)) => {
+                        let cached_b = self
+                            .spill_cache
+                            .lookup(b, self.asm.code.len())
+                            .filter(|&r| r != d);
                         if d != ag {
                             self.asm.mov_rr(is64, d, ag);
                         }
-                        mem_alu(&mut self.asm, op, is64, d, Mem::base_disp(Gp::Rsp, boff));
+                        if let Some(br) = cached_b {
+                            reg_alu(&mut self.asm, op, is64, d, br);
+                        } else {
+                            mem_alu(&mut self.asm, op, is64, d, Mem::base_disp(Gp::Rsp, boff));
+                        }
                         self.gp_commit(dst_val, d);
                         if op != IntBinOp::Mul {
                             self.live_flags = Some(LiveFlags::IntZero { is64, val: dst_val });
@@ -3149,10 +3428,18 @@ impl<'a> Lower<'a> {
                         return;
                     }
                     (Loc::Spill(aoff), Loc::Gp(bg)) if is_comm => {
+                        let cached_a = self
+                            .spill_cache
+                            .lookup(a, self.asm.code.len())
+                            .filter(|&r| r != d);
                         if d != bg {
                             self.asm.mov_rr(is64, d, bg);
                         }
-                        mem_alu(&mut self.asm, op, is64, d, Mem::base_disp(Gp::Rsp, aoff));
+                        if let Some(ar) = cached_a {
+                            reg_alu(&mut self.asm, op, is64, d, ar);
+                        } else {
+                            mem_alu(&mut self.asm, op, is64, d, Mem::base_disp(Gp::Rsp, aoff));
+                        }
                         self.gp_commit(dst_val, d);
                         if op != IntBinOp::Mul {
                             self.live_flags = Some(LiveFlags::IntZero { is64, val: dst_val });
@@ -4022,7 +4309,11 @@ impl<'a> Lower<'a> {
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
                 if let Loc::Spill(boff) = self.loc(b) {
-                    self.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
+                    if let Some(br) = self.spill_cache.lookup(b, self.asm.code.len()) {
+                        self.asm.cmp_rr(false, ar, br);
+                    } else {
+                        self.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
+                    }
                 } else {
                     let br = self.gp_read(b, SCRATCH_GP2);
                     self.asm.cmp_rr(false, ar, br);
@@ -4049,7 +4340,11 @@ impl<'a> Lower<'a> {
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
                 if let Loc::Spill(boff) = self.loc(b) {
-                    self.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
+                    if let Some(br) = self.spill_cache.lookup(b, self.asm.code.len()) {
+                        self.asm.cmp_rr(true, ar, br);
+                    } else {
+                        self.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
+                    }
                 } else {
                     let br = self.gp_read(b, SCRATCH_GP2);
                     self.asm.cmp_rr(true, ar, br);
@@ -4786,7 +5081,11 @@ impl<'a> Lower<'a> {
                             }
                             let ar = l.gp_read(a, SCRATCH_GP1);
                             if let Loc::Spill(boff) = l.loc(b) {
-                                l.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
+                                if let Some(br) = l.spill_cache.lookup(b, l.asm.code.len()) {
+                                    l.asm.cmp_rr(false, ar, br);
+                                } else {
+                                    l.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
+                                }
                             } else {
                                 let br = l.gp_read(b, SCRATCH_GP2);
                                 l.asm.cmp_rr(false, ar, br);
@@ -4838,7 +5137,11 @@ impl<'a> Lower<'a> {
                             }
                             let ar = l.gp_read(a, SCRATCH_GP1);
                             if let Loc::Spill(boff) = l.loc(b) {
-                                l.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
+                                if let Some(br) = l.spill_cache.lookup(b, l.asm.code.len()) {
+                                    l.asm.cmp_rr(true, ar, br);
+                                } else {
+                                    l.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
+                                }
                             } else {
                                 let br = l.gp_read(b, SCRATCH_GP2);
                                 l.asm.cmp_rr(true, ar, br);
@@ -4971,6 +5274,24 @@ impl<'a> Lower<'a> {
                             self.asm.cmovcc(Cond::Ne, is64, d, tv_reg);
                             self.asm.cmovcc(Cond::P, is64, d, tv_reg);
                         }
+                    } else if matches!(
+                        (self.loc(tv), self.loc(fv)),
+                        (
+                            Loc::Remat(RematConst::I32(1) | RematConst::I64(1)),
+                            Loc::Remat(RematConst::I32(0) | RematConst::I64(0))
+                        )
+                    ) {
+                        self.asm.setcc(cond, d);
+                        self.asm.movzx_rr8(d, d);
+                    } else if matches!(
+                        (self.loc(tv), self.loc(fv)),
+                        (
+                            Loc::Remat(RematConst::I32(0) | RematConst::I64(0)),
+                            Loc::Remat(RematConst::I32(1) | RematConst::I64(1))
+                        )
+                    ) {
+                        self.asm.setcc(cond.invert(), d);
+                        self.asm.movzx_rr8(d, d);
                     } else if self.loc(tv) == Loc::Gp(d) {
                         let fv_reg = self.gp_read_preserve_flags(fv, SCRATCH_GP2);
                         self.asm.cmovcc(cond.invert(), is64, d, fv_reg);
@@ -7556,10 +7877,16 @@ impl<'a> Lower<'a> {
                 count,
             } => {
                 let r = res.unwrap();
-                let is8 = kind.elem_bytes() == 8;
+                let elem_is8 = kind.elem_bytes() == 8;
+                let res_is64 = kind.result_ty() == Ty::I64;
                 let is_dot = matches!(kind, VecReduceKind::I32Dot);
                 let is_xor = matches!(kind, VecReduceKind::I32Xor | VecReduceKind::I64Xor);
-                if is_dot {
+                let is_widen = matches!(
+                    kind,
+                    VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum
+                );
+                let is_widen_xor = matches!(kind, VecReduceKind::U32XorZextSum);
+                if is_dot || is_widen_xor {
                     let moves = [
                         (
                             MoveLoc::Gp(Gp::Rax),
@@ -7603,15 +7930,25 @@ impl<'a> Lower<'a> {
                 if is_dot {
                     self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
                     self.asm.add_rr(true, Gp::Rdx, Gp::R14);
+                } else if is_widen_xor {
+                    self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                    // Load u32 XOR mask into `SCRATCH_FP2` BEFORE any VEX/EVEX ops to avoid transition stall.
+                    self.asm.movd_xr(SCRATCH_FP2, Gp::Rdx);
                 }
 
-                let lanes_zmm: i32 = if is8 { 8 } else { 16 };
-                let lanes_ymm: i32 = if is8 { 4 } else { 8 };
-                let lanes_xmm: i32 = if is8 { 2 } else { 4 };
+                let lanes_zmm: i32 = if res_is64 { 8 } else { 16 };
+                let lanes_ymm: i32 = if res_is64 { 4 } else { 8 };
+                let lanes_xmm: i32 = if elem_is8 { 2 } else { 4 };
+                let elem_b: i32 = if elem_is8 { 8 } else { 4 };
+                let bytes_zmm: i32 = lanes_zmm * elem_b;
+                let bytes_ymm: i32 = lanes_ymm * elem_b;
 
                 if self.isa.has_avx512 {
                     self.asm.vpxord_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
                     self.asm.vpxord_zzz(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm1);
+                    if is_widen_xor {
+                        self.asm.vpbroadcastd_yx(SCRATCH_FP2, SCRATCH_FP2);
+                    }
                     let lbl_z2 = self.asm.new_label();
                     let lbl_z1 = self.asm.new_label();
                     let lbl_y1 = self.asm.new_label();
@@ -7658,8 +7995,22 @@ impl<'a> Lower<'a> {
                             self.asm.vpaddd_zzz(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm2);
                             self.asm.add_ri(true, Gp::Rdx, 128);
                         }
+                        VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum => {
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            if is_widen_xor {
+                                self.asm.vpxor_yyy(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_zy(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base_disp(Gp::Rax, 32));
+                            if is_widen_xor {
+                                self.asm.vpxor_yyy(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_zy(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_zzz(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm2);
+                        }
                     }
-                    self.asm.add_ri(true, Gp::Rax, 128);
+                    self.asm.add_ri(true, Gp::Rax, bytes_zmm * 2);
                     self.asm.sub_ri(true, Gp::Rcx, lanes_zmm * 2);
                     self.asm.cmp_ri(true, Gp::Rcx, lanes_zmm * 2);
                     self.asm.jcc(Cond::Ae, lbl_z2);
@@ -7691,8 +8042,16 @@ impl<'a> Lower<'a> {
                             self.asm.vpaddd_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
                             self.asm.add_ri(true, Gp::Rdx, 64);
                         }
+                        VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum => {
+                            self.asm.vmovdqu_ym(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            if is_widen_xor {
+                                self.asm.vpxor_yyy(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_zy(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                        }
                     }
-                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.add_ri(true, Gp::Rax, bytes_zmm);
                     self.asm.sub_ri(true, Gp::Rcx, lanes_zmm);
 
                     self.asm.bind(lbl_y1);
@@ -7704,7 +8063,9 @@ impl<'a> Lower<'a> {
                         VecReduceKind::I32Xor => {
                             self.asm.vpxord_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
                         }
-                        VecReduceKind::I64Sum => {
+                        VecReduceKind::I64Sum
+                        | VecReduceKind::U32ZextSum
+                        | VecReduceKind::U32XorZextSum => {
                             self.asm.vpaddq_zzz(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
                         }
                         VecReduceKind::I64Xor => {
@@ -7719,11 +8080,13 @@ impl<'a> Lower<'a> {
                         VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
                             self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
                         }
-                        VecReduceKind::I64Sum => {
+                        VecReduceKind::I64Sum
+                        | VecReduceKind::U32ZextSum
+                        | VecReduceKind::U32XorZextSum => {
                             self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
                         }
                     }
-                    // Optional 32B YMM chunk.
+                    // Optional YMM chunk.
                     self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm);
                     self.asm.jcc(Cond::B, lbl_red);
                     match kind {
@@ -7745,8 +8108,16 @@ impl<'a> Lower<'a> {
                             self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
                             self.asm.add_ri(true, Gp::Rdx, 32);
                         }
+                        VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum => {
+                            self.asm.vmovdqu_xm(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            if is_widen_xor {
+                                self.asm.vpxor_xxx(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_yx(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                        }
                     }
-                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.add_ri(true, Gp::Rax, bytes_ymm);
                     self.asm.sub_ri(true, Gp::Rcx, lanes_ymm);
 
                     self.asm.bind(lbl_red);
@@ -7754,7 +8125,7 @@ impl<'a> Lower<'a> {
                     self.asm.vzeroupper();
                     if is_xor {
                         self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
-                    } else if is8 {
+                    } else if res_is64 {
                         self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
                     } else {
                         self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
@@ -7762,6 +8133,9 @@ impl<'a> Lower<'a> {
                 } else if self.isa.has_avx2 {
                     self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
                     self.asm.vpxor_yyy(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm1);
+                    if is_widen_xor {
+                        self.asm.vpbroadcastd_xx(SCRATCH_FP2, SCRATCH_FP2);
+                    }
                     let lbl_y2 = self.asm.new_label();
                     let lbl_y1 = self.asm.new_label();
                     let lbl_red = self.asm.new_label();
@@ -7799,8 +8173,22 @@ impl<'a> Lower<'a> {
                             self.asm.vpaddd_yyy(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm2);
                             self.asm.add_ri(true, Gp::Rdx, 64);
                         }
+                        VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum => {
+                            self.asm.vmovdqu_xm(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            if is_widen_xor {
+                                self.asm.vpxor_xxx(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_yx(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                            self.asm.vmovdqu_xm(Xmm::Xmm2, Mem::base_disp(Gp::Rax, 16));
+                            if is_widen_xor {
+                                self.asm.vpxor_xxx(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_yx(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_yyy(Xmm::Xmm1, Xmm::Xmm1, Xmm::Xmm2);
+                        }
                     }
-                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.add_ri(true, Gp::Rax, bytes_ymm * 2);
                     self.asm.sub_ri(true, Gp::Rcx, lanes_ymm * 2);
                     self.asm.cmp_ri(true, Gp::Rcx, lanes_ymm * 2);
                     self.asm.jcc(Cond::Ae, lbl_y2);
@@ -7827,8 +8215,16 @@ impl<'a> Lower<'a> {
                             self.asm.vpaddd_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
                             self.asm.add_ri(true, Gp::Rdx, 32);
                         }
+                        VecReduceKind::U32ZextSum | VecReduceKind::U32XorZextSum => {
+                            self.asm.vmovdqu_xm(Xmm::Xmm2, Mem::base(Gp::Rax));
+                            if is_widen_xor {
+                                self.asm.vpxor_xxx(Xmm::Xmm2, Xmm::Xmm2, SCRATCH_FP2);
+                            }
+                            self.asm.vpmovzxdq_yx(Xmm::Xmm2, Xmm::Xmm2);
+                            self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm2);
+                        }
                     }
-                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.add_ri(true, Gp::Rax, bytes_ymm);
                     self.asm.sub_ri(true, Gp::Rcx, lanes_ymm);
 
                     self.asm.bind(lbl_red);
@@ -7839,7 +8235,9 @@ impl<'a> Lower<'a> {
                         VecReduceKind::I32Xor | VecReduceKind::I64Xor => {
                             self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
                         }
-                        VecReduceKind::I64Sum => {
+                        VecReduceKind::I64Sum
+                        | VecReduceKind::U32ZextSum
+                        | VecReduceKind::U32XorZextSum => {
                             self.asm.vpaddq_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1);
                         }
                     }
@@ -7847,13 +8245,19 @@ impl<'a> Lower<'a> {
                     self.asm.vzeroupper();
                     if is_xor {
                         self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
-                    } else if is8 {
+                    } else if res_is64 {
                         self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
                     } else {
                         self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
                     }
                 } else {
                     self.asm.pxor(Xmm::Xmm0, Xmm::Xmm0);
+                    if is_widen {
+                        self.asm.pxor(SCRATCH_FP1, SCRATCH_FP1);
+                        if is_widen_xor {
+                            self.asm.pshufd(SCRATCH_FP2, SCRATCH_FP2, 0);
+                        }
+                    }
                     let lbl_x1 = self.asm.new_label();
                     let lbl_red = self.asm.new_label();
                     self.asm.cmp_ri(true, Gp::Rcx, lanes_xmm);
@@ -7866,9 +8270,18 @@ impl<'a> Lower<'a> {
                         self.asm.pmulld(Xmm::Xmm1, Xmm::Xmm2);
                         self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
                         self.asm.add_ri(true, Gp::Rdx, 16);
+                    } else if is_widen {
+                        if is_widen_xor {
+                            self.asm.pxor(Xmm::Xmm1, SCRATCH_FP2);
+                        }
+                        self.asm.movaps_rr(Xmm::Xmm2, Xmm::Xmm1);
+                        self.asm.punpckldq(Xmm::Xmm1, SCRATCH_FP1);
+                        self.asm.punpckhdq(Xmm::Xmm2, SCRATCH_FP1);
+                        self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
+                        self.asm.paddq(Xmm::Xmm0, Xmm::Xmm2);
                     } else if is_xor {
                         self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
-                    } else if is8 {
+                    } else if elem_is8 {
                         self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
                     } else {
                         self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
@@ -7884,12 +8297,12 @@ impl<'a> Lower<'a> {
                 self.asm.pshufd(Xmm::Xmm1, Xmm::Xmm0, 0xee);
                 if is_xor {
                     self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
-                } else if is8 {
+                } else if res_is64 {
                     self.asm.paddq(Xmm::Xmm0, Xmm::Xmm1);
                 } else {
                     self.asm.paddd(Xmm::Xmm0, Xmm::Xmm1);
                 }
-                if !is8 {
+                if !res_is64 {
                     self.asm.pshufd(Xmm::Xmm1, Xmm::Xmm0, 0x55);
                     if is_xor {
                         self.asm.pxor(Xmm::Xmm0, Xmm::Xmm1);
@@ -7905,17 +8318,22 @@ impl<'a> Lower<'a> {
                 self.asm.jcc(Cond::E, lbl_done);
                 let lbl_sc = self.asm.new_label();
                 self.asm.bind(lbl_sc);
-                self.asm.mov_rm(is8, SCRATCH_GP2, Mem::base(Gp::Rax));
+                self.asm.mov_rm(elem_is8, SCRATCH_GP2, Mem::base(Gp::Rax));
                 if is_dot {
                     self.asm.imul_rm(false, SCRATCH_GP2, Mem::base(Gp::Rdx));
                     self.asm.add_rr(false, SCRATCH_GP1, SCRATCH_GP2);
                     self.asm.add_ri(true, Gp::Rdx, 4);
+                } else if is_widen {
+                    if is_widen_xor {
+                        self.asm.xor_rr(false, SCRATCH_GP2, Gp::Rdx);
+                    }
+                    self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                 } else if is_xor {
-                    self.asm.xor_rr(is8, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.xor_rr(elem_is8, SCRATCH_GP1, SCRATCH_GP2);
                 } else {
-                    self.asm.add_rr(is8, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.add_rr(elem_is8, SCRATCH_GP1, SCRATCH_GP2);
                 }
-                self.asm.add_ri(true, Gp::Rax, if is8 { 8 } else { 4 });
+                self.asm.add_ri(true, Gp::Rax, elem_b);
                 self.asm.sub_ri(true, Gp::Rcx, 1);
                 self.asm.jcc(Cond::Ne, lbl_sc);
                 self.asm.jmp(lbl_done);
@@ -10948,7 +11366,11 @@ impl<'a> Lower<'a> {
                 }
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 if let Loc::Spill(boff) = self.loc(b) {
-                    self.asm.cmp_rm(is64, ar, Mem::base_disp(Gp::Rsp, boff));
+                    if let Some(br) = self.spill_cache.lookup(b, self.asm.code.len()) {
+                        self.asm.cmp_rr(is64, ar, br);
+                    } else {
+                        self.asm.cmp_rm(is64, ar, Mem::base_disp(Gp::Rsp, boff));
+                    }
                 } else {
                     let br = self.gp_read(b, SCRATCH_GP2);
                     self.asm.cmp_rr(is64, ar, br);
@@ -11848,6 +12270,67 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Fuses adjacent `(I64Bin(Mul, a, b), I64Bin(MulHiU|MulHiS, a, b))` (in either order,
+    /// matching commutative operand pairs) into a single x86-64 `mul r10` / `imul r10` writing
+    /// both `lo` (`RAX`) and `hi` (`RDX`).
+    fn try_fuse_mul_wide(&mut self, i0: crate::x64::ir::Inst, i1: crate::x64::ir::Inst) -> bool {
+        let (Some(r0), Some(r1)) = (i0.res, i1.res) else {
+            return false;
+        };
+        let (lo, hi, signed, a, b) = match (i0.op, i1.op) {
+            (
+                Op::I64Bin(IntBinOp::Mul, a0, b0),
+                Op::I64Bin(op @ (IntBinOp::MulHiU | IntBinOp::MulHiS), a1, b1),
+            ) if (a0 == a1 && b0 == b1) || (a0 == b1 && b0 == a1) => {
+                (r0, r1, op == IntBinOp::MulHiS, a0, b0)
+            }
+            (
+                Op::I64Bin(op @ (IntBinOp::MulHiU | IntBinOp::MulHiS), a0, b0),
+                Op::I64Bin(IntBinOp::Mul, a1, b1),
+            ) if (a0 == a1 && b0 == b1) || (a0 == b1 && b0 == a1) => {
+                (r1, r0, op == IntBinOp::MulHiS, a0, b0)
+            }
+            _ => return false,
+        };
+        if lo == hi || lo == a || lo == b || hi == a || hi == b {
+            return false;
+        }
+        let lo_loc = self.loc(lo);
+        let hi_loc = self.loc(hi);
+        if lo_loc == hi_loc {
+            return false;
+        }
+        self.live_flags = None;
+        let br = self.gp_read(b, SCRATCH_GP2);
+        if br != SCRATCH_GP2 {
+            self.asm.mov_rr(true, SCRATCH_GP2, br);
+        }
+        self.spill_cache.scratch = [None, None];
+        self.spill_cache.zero_gap = None;
+        let ar = self.gp_read(a, Gp::Rax);
+        if ar != Gp::Rax {
+            self.asm.mov_rr(true, Gp::Rax, ar);
+        }
+        if signed {
+            self.asm.imul1_r(true, SCRATCH_GP2);
+        } else {
+            self.asm.mul_r(true, SCRATCH_GP2);
+        }
+        self.spill_cache.clear();
+        if lo_loc == Loc::Gp(Gp::Rdx) && hi_loc == Loc::Gp(Gp::Rax) {
+            self.asm.mov_rr(true, SCRATCH_GP1, Gp::Rax);
+            self.asm.mov_rr(true, Gp::Rax, Gp::Rdx);
+            self.asm.mov_rr(true, Gp::Rdx, SCRATCH_GP1);
+        } else if lo_loc == Loc::Gp(Gp::Rdx) {
+            self.gp_commit(hi, Gp::Rdx);
+            self.gp_commit(lo, Gp::Rax);
+        } else {
+            self.gp_commit(lo, Gp::Rax);
+            self.gp_commit(hi, Gp::Rdx);
+        }
+        true
+    }
+
     fn emit_term(
         &mut self,
         term: Term,
@@ -12348,7 +12831,7 @@ pub fn lower_ir_to_x64_with_budget(
         fp_nz_consts: None,
         val_upper32_zero: None,
         live_flags: None,
-        just_spilled: None,
+        spill_cache: SpillRegCache::default(),
     };
 
     // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----
@@ -12506,12 +12989,31 @@ pub fn lower_ir_to_x64_with_budget(
         l.asm.bind(l.bb_labels[bid as usize]);
         l.cur_bb = bid;
         l.live_flags = None;
-        l.just_spilled = None;
+        l.spill_cache.clear();
         let next_bb = alloc.block_order.get(oi + 1).copied();
         let mut term_fused = false;
         let mut ii = 0usize;
         while ii < bb.insts.len() {
             let inst = bb.insts[ii];
+            if ii + 1 < bb.insts.len() {
+                l.spill_cache.populate_scratch = [false, false];
+                if l.try_fuse_mul_wide(inst, bb.insts[ii + 1]) {
+                    ii += 2;
+                    if (ii & 255) == 0 {
+                        if let Some(b) = budget {
+                            b.check_deadline()?;
+                        }
+                        check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
+                    } else if l.asm.code.len() > MAX_FN_CODE_BYTES {
+                        return Err(format!(
+                            "x64: function {} code ({} B) exceeds cap {MAX_FN_CODE_BYTES} B",
+                            ir.func_index,
+                            l.asm.code.len()
+                        ));
+                    }
+                    continue;
+                }
+            }
             if !use_cnt.is_empty()
                 && let Some(lv) = inst.res
                 && use_cnt[lv.0 as usize] == 1
@@ -12519,7 +13021,13 @@ pub fn lower_ir_to_x64_with_budget(
             {
                 if ii + 1 < bb.insts.len() {
                     let next_inst = bb.insts[ii + 1];
+                    l.spill_cache.committed_scratch = None;
+                    l.spill_cache.populate_scratch = [false, false];
                     if l.try_fuse_load_into_inst(lv, lty, ag, mem, next_inst.res, next_inst.op) {
+                        if l.spill_cache.committed_scratch != Some(0) {
+                            l.spill_cache.scratch[0] = None;
+                        }
+                        l.spill_cache.scratch[1] = None;
                         ii += 2;
                         if (ii & 255) == 0 {
                             if let Some(b) = budget {
@@ -12535,9 +13043,12 @@ pub fn lower_ir_to_x64_with_budget(
                         }
                         continue;
                     }
-                } else if l.try_fuse_load_into_term(lv, lty, mem, bb.term, next_bb) {
-                    term_fused = true;
-                    break;
+                } else {
+                    l.spill_cache.populate_scratch = [false, false];
+                    if l.try_fuse_load_into_term(lv, lty, mem, bb.term, next_bb) {
+                        term_fused = true;
+                        break;
+                    }
                 }
             }
             let bc_guard_covered = match inst.op {
@@ -12550,8 +13061,24 @@ pub fn lower_ir_to_x64_with_budget(
                 }
                 _ => false,
             };
+            let (keep_sgp1, keep_sgp2) =
+                l.op_preserves_scratch_gp(inst.res, inst.op, bc_guard_covered);
+            if !keep_sgp1 {
+                l.spill_cache.scratch[0] = None;
+            }
+            if !keep_sgp2 {
+                l.spill_cache.scratch[1] = None;
+            }
+            l.spill_cache.populate_scratch = [keep_sgp1, keep_sgp2];
+            l.spill_cache.committed_scratch = None;
             l.cur_inst = ii as u32;
             l.emit_inst(inst.res, inst.op, bc_guard_covered)?;
+            if !keep_sgp1 && l.spill_cache.committed_scratch != Some(0) {
+                l.spill_cache.scratch[0] = None;
+            }
+            if !keep_sgp2 && l.spill_cache.committed_scratch != Some(1) {
+                l.spill_cache.scratch[1] = None;
+            }
             if (ii & 255) == 255 {
                 if let Some(b) = budget {
                     b.check_deadline()?;
@@ -12567,6 +13094,21 @@ pub fn lower_ir_to_x64_with_budget(
             ii += 1;
         }
         if !term_fused {
+            let term_keeps_scratch = matches!(
+                bb.term,
+                Term::BranchIf { .. }
+                    | Term::CmpBranch {
+                        kind: CmpBranchKind::I32(_)
+                            | CmpBranchKind::I32Imm(..)
+                            | CmpBranchKind::I64(_)
+                            | CmpBranchKind::I64Imm(..),
+                        ..
+                    }
+            );
+            if !term_keeps_scratch {
+                l.spill_cache.scratch = [None, None];
+            }
+            l.spill_cache.populate_scratch = [false, false];
             l.cur_inst = u32::MAX;
             l.emit_term(bb.term, next_bb, budget, &mut charged_rodata)?;
         }

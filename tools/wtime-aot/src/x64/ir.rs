@@ -549,13 +549,19 @@ pub enum VecReduceKind {
     I64Sum,
     I64Xor,
     I32Dot,
+    U32ZextSum,
+    U32XorZextSum,
 }
 
 impl VecReduceKind {
     #[inline]
     pub const fn elem_bytes(self) -> u64 {
         match self {
-            VecReduceKind::I32Sum | VecReduceKind::I32Xor | VecReduceKind::I32Dot => 4,
+            VecReduceKind::I32Sum
+            | VecReduceKind::I32Xor
+            | VecReduceKind::I32Dot
+            | VecReduceKind::U32ZextSum
+            | VecReduceKind::U32XorZextSum => 4,
             VecReduceKind::I64Sum | VecReduceKind::I64Xor => 8,
         }
     }
@@ -569,7 +575,10 @@ impl VecReduceKind {
     pub const fn result_ty(self) -> Ty {
         match self {
             VecReduceKind::I32Sum | VecReduceKind::I32Xor | VecReduceKind::I32Dot => Ty::I32,
-            VecReduceKind::I64Sum | VecReduceKind::I64Xor => Ty::I64,
+            VecReduceKind::I64Sum
+            | VecReduceKind::I64Xor
+            | VecReduceKind::U32ZextSum
+            | VecReduceKind::U32XorZextSum => Ty::I64,
         }
     }
 }
@@ -6181,6 +6190,41 @@ pub fn optimize_ir_with_budget_and_scratch(
                         std::mem::swap(&mut tv, &mut fv);
                     }
                     let (ep1, idx1) = def_stamp[cond.0 as usize];
+                    let cond_is_bool = ep1 == cur_epoch
+                        && matches!(
+                            bb.insts[idx1 as usize].op,
+                            Op::I32Cmp(..)
+                                | Op::I32CmpImm(..)
+                                | Op::I64Cmp(..)
+                                | Op::I64CmpImm(..)
+                                | Op::F32Cmp(..)
+                                | Op::F64Cmp(..)
+                                | Op::I32Eqz(_)
+                                | Op::I64Eqz(_)
+                        );
+                    if cond_is_bool {
+                        let (ept, idxt) = def_stamp[tv.0 as usize];
+                        let (epf, idxf) = def_stamp[fv.0 as usize];
+                        if ept == cur_epoch && epf == cur_epoch {
+                            match (bb.insts[idxt as usize].op, bb.insts[idxf as usize].op) {
+                                (Op::ConstI64(1), Op::ConstI64(0)) => {
+                                    bb.insts[idx].op = Op::I64ExtendI32U(cond);
+                                    if let Some(r) = bb.insts[idx].res {
+                                        def_stamp[r.0 as usize] = (cur_epoch, idx as u32);
+                                    }
+                                    continue;
+                                }
+                                (Op::ConstI32(1), Op::ConstI32(0)) => {
+                                    bb.insts[idx].op = Op::Copy(cond);
+                                    if let Some(r) = bb.insts[idx].res {
+                                        def_stamp[r.0 as usize] = (cur_epoch, idx as u32);
+                                    }
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     let fused_sel = if ep1 == cur_epoch {
                         match bb.insts[idx1 as usize].op {
                             Op::I32Cmp(op, a, b) => Some(Op::CmpSelect {

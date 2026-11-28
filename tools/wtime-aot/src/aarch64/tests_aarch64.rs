@@ -6424,3 +6424,158 @@ fn aarch64_store_cdylib_imports_exports_tables_mems_globals_eh() {
     assert!(meta.host_tramp_sigs.len() >= 3);
     assert_eq!(meta.host_tramp_sigs.len(), meta.export_tramp_sigs.len());
 }
+
+#[test]
+fn aarch64_wave_b_mul_wide_and_widen_reduce_neon_parity() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, leb_u32, section, type_sec, wasm_module,
+    };
+
+    let push_i64 = |v: &mut Vec<u8>, mut val: i64| {
+        v.push(0x42);
+        loop {
+            let byte = (val & 0x7f) as u8;
+            val >>= 7;
+            let done = (val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0);
+            if done {
+                v.push(byte);
+                break;
+            }
+            v.push(byte | 0x80);
+        }
+    };
+
+    let emit_schoolbook_mul_wide = |out: &mut Vec<u8>,
+                                    a: u8,
+                                    b: u8,
+                                    alo: u8,
+                                    ahi: u8,
+                                    blo: u8,
+                                    bhi: u8,
+                                    p1: u8,
+                                    p2: u8,
+                                    lo_out: u8,
+                                    hi_out: u8| {
+        out.extend_from_slice(&[0x20, a, 0x20, b, 0x7e, 0x21, lo_out]);
+        out.extend_from_slice(&[0x20, b]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x21, blo, 0x20, b, 0x42, 32, 0x88, 0x21, bhi]);
+        out.extend_from_slice(&[0x20, a]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x21, alo, 0x20, a, 0x42, 32, 0x88, 0x21, ahi]);
+        out.extend_from_slice(&[
+            0x20, alo, 0x20, bhi, 0x7e, 0x21, p1, 0x20, ahi, 0x20, blo, 0x7e, 0x21, p2,
+        ]);
+        out.extend_from_slice(&[0x20, alo, 0x20, blo, 0x7e, 0x42, 32, 0x88, 0x20, p1]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x7c, 0x20, p2]);
+        push_i64(out, 0xffff_ffff);
+        out.extend_from_slice(&[0x83, 0x7c]);
+        out.extend_from_slice(&[
+            0x42, 32, 0x88, 0x20, p1, 0x42, 32, 0x88, 0x7c, 0x20, p2, 0x42, 32, 0x88, 0x7c, 0x20,
+            ahi, 0x20, bhi, 0x7e, 0x7c, 0x21, hi_out,
+        ]);
+    };
+
+    // f0: `mul_wide(case_id: i32) -> i32` (runtime + const10 + add_carry Select(1,0))
+    let mut b0 = Vec::new();
+    b0.extend_from_slice(&[
+        0x20, 0, 0x41, 4, 0x74, 0x29, 3, 0, 0x21, 1, 0x20, 0, 0x41, 4, 0x74, 0x29, 3, 8, 0x21, 2,
+    ]);
+    emit_schoolbook_mul_wide(&mut b0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+    b0.extend_from_slice(&[
+        0x20, 9, 0x20, 2, 0x7c, 0x21, 13, 0x42, 1, 0x42, 0, 0x20, 13, 0x20, 9, 0x54, 0x1b, 0x21,
+        14, 0x20, 13, 0x21, 11, 0x20, 10, 0x20, 14, 0x7c, 0x21, 12,
+    ]);
+    b0.extend_from_slice(&[0x42, 10, 0x21, 2]);
+    emit_schoolbook_mul_wide(&mut b0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+    b0.extend_from_slice(&[
+        0x20, 11, 0x20, 9, 0x85, 0x20, 12, 0x20, 10, 0x85, 0x42, 7, 0x89, 0x85, 0x21, 11, 0x20, 11,
+        0x20, 11, 0x42, 32, 0x88, 0x85, 0xa7,
+    ]);
+
+    // f1: `widen_reduce(n: i32) -> i32` (U32ZextSum + U32XorZextSum on NEON `uaddlp`)
+    let mut b1 = Vec::new();
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 1, 0x41,
+        2, 0x74, 0x20, 1, 0x41,
+    ]);
+    leb_i32(&mut b1, 0x7f4a_7c15u32 as i32);
+    b1.extend_from_slice(&[0x6c, 0x41]);
+    leb_i32(&mut b1, 0x8000_0005u32 as i32);
+    b1.extend_from_slice(&[
+        0x73, 0x36, 2, 0x80, 0x20, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    b1.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b1, 0x9e37_79b1u32 as i32);
+    b1.extend_from_slice(&[0x6c, 0x41]);
+    leb_i32(&mut b1, 0x8000_0001u32 as i32);
+    b1.extend_from_slice(&[0x72, 0x21, 2]);
+    // U32ZextSum
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x42, 17, 0x21, 3, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 3, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x20, 0xad, 0x7c, 0x21, 3, 0x20, 1,
+        0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // U32XorZextSum
+    b1.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x42, 29, 0x21, 4, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 4, 0x20, 1, 0x41, 2, 0x74, 0x28, 2, 0x80, 0x20, 0x20, 2, 0x73, 0xad, 0x7c, 0x21,
+        4, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    b1.extend_from_slice(&[
+        0x20, 3, 0x20, 4, 0x42, 5, 0x89, 0x85, 0x21, 3, 0x20, 3, 0x20, 3, 0x42, 32, 0x88, 0x85,
+        0xa7,
+    ]);
+
+    let pairs: [(u64, u64); 4] = [
+        (0, 0),
+        (u64::MAX, u64::MAX),
+        (0x8000_0000_ffff_ffff, 0xdead_beef_cafe_babe),
+        (0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff01),
+    ];
+    let mut data_payload = vec![1, 0, 0x41, 0, 0x0b];
+    leb_u32(&mut data_payload, (pairs.len() * 16) as u32);
+    for (a, b) in pairs {
+        data_payload.extend_from_slice(&a.to_le_bytes());
+        data_payload.extend_from_slice(&b.to_le_bytes());
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 1, 1, 1]),
+        export_sec(&[("mul_wide", 0, 0), ("widen_reduce", 0, 1), ("memory", 2, 0)]),
+        code_sec(&[
+            enc_body(&[(14, 0x7e)], &b0),
+            enc_body(&[(2, 0x7f), (2, 0x7e)], &b1),
+        ]),
+        section(11, &data_payload),
+    ]);
+
+    let img = compile_wasm_to_aarch64_for_test(
+        &wasm,
+        &A64CompileOptions {
+            optimize: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    verify_disasm_aarch64("aarch64_wave_b", &img.elf);
+    let calls = [
+        ("mul_wide", Value::I32(0)),
+        ("mul_wide", Value::I32(1)),
+        ("mul_wide", Value::I32(2)),
+        ("mul_wide", Value::I32(3)),
+        ("widen_reduce", Value::I32(0)),
+        ("widen_reduce", Value::I32(1)),
+        ("widen_reduce", Value::I32(3)),
+        ("widen_reduce", Value::I32(4)),
+        ("widen_reduce", Value::I32(5)),
+        ("widen_reduce", Value::I32(15)),
+        ("widen_reduce", Value::I32(16)),
+        ("widen_reduce", Value::I32(17)),
+        ("widen_reduce", Value::I32(33)),
+    ];
+    assert_aarch64_image_matches_oracle("aarch64 wave b", &wasm, &calls, 16, &img);
+}
